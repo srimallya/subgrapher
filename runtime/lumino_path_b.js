@@ -13,6 +13,32 @@ function toShortText(value, maxLen = 1800) {
   return `${text.slice(0, Math.max(1, maxLen - 3))}...`;
 }
 
+function isPolicyFailureSummary(text = '') {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.startsWith('citation requirements were not met')
+    || normalized.startsWith('i need sufficient citations in footnote format')
+    || normalized.startsWith('i need sufficient citations')
+    || normalized.startsWith('required web research did not complete')
+    || normalized.startsWith('i need at least one successful web research step')
+  );
+}
+
+function buildSummaryFromVerifiedUrls(verified = []) {
+  const rows = toArray(verified).slice(0, 3);
+  if (rows.length === 0) return '';
+  const points = rows.map((item, idx) => {
+    const title = toShortText((item && item.title) || `Source ${idx + 1}`, 140);
+    const reason = toShortText((item && item.reason) || (item && item.relevance_reason) || '', 220);
+    return `${idx + 1}) ${title}${reason ? ` - ${reason}` : ''}`;
+  });
+  return [
+    'Latest verified developments from current sources:',
+    ...points,
+  ].join('\n');
+}
+
 function normalizeTopic(raw) {
   return String(raw || '')
     .toLowerCase()
@@ -672,6 +698,7 @@ function createPathBExecutor(options = {}) {
         const res = await delegatePathA({
           sr_id: srId,
           worker_prompt: workerPrompt,
+          path_b_delegate: true,
           provider: provider,
           model,
           run_id: runId,
@@ -901,13 +928,17 @@ function createPathBExecutor(options = {}) {
       },
     });
 
-    const summaryRaw = String(
+    let summaryRaw = String(
       (orchestratorState.final_payload && orchestratorState.final_payload.summary_for_telegram)
       || ((orchestratorState.research_artifact && orchestratorState.research_artifact.summary) || '')
       || ((orchestratorState.delegated_response && orchestratorState.delegated_response.message) || '')
       || ((agentResult && agentResult.message) || '')
       || ''
     ).trim();
+    if (isPolicyFailureSummary(summaryRaw)) {
+      const verifiedFallback = buildSummaryFromVerifiedUrls(orchestratorState.verified_urls);
+      if (verifiedFallback) summaryRaw = verifiedFallback;
+    }
     const verifiedOnly = dedupeUrls(
       toArray(orchestratorState.verified_urls).map((item) => String((item && item.url) || '').trim()),
     );

@@ -9510,8 +9510,9 @@ async function executeLuminoChat(input, options = {}) {
     toolingEnabled: canUseAgentMode,
     activeArtifactContext,
   });
-  const isDetailed = isDetailedDeliverableRequest(message);
-  const isResearchIntent = isResearchIntentRequest(message);
+  const isPathBDelegation = !!payload.path_b_delegate;
+  const isDetailed = isPathBDelegation ? false : isDetailedDeliverableRequest(message);
+  const isResearchIntent = isPathBDelegation ? false : isResearchIntentRequest(message);
   const researchPolicy = {
     isDetailed,
     requiresWebResearch: isDetailed && isResearchIntent,
