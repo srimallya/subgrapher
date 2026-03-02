@@ -158,6 +158,19 @@ function buildPathADelegationPrompt(task = {}, orchestratorState = {}) {
   ].join('\n');
 }
 
+function buildEnforcedPathADelegationPrompt(task = {}, orchestratorState = {}, modelPrompt = '') {
+  const basePrompt = buildPathADelegationPrompt(task, orchestratorState);
+  const customPrompt = String(modelPrompt || '').trim();
+  if (!customPrompt) return basePrompt;
+  const notes = toShortText(customPrompt, 900);
+  return [
+    basePrompt,
+    '',
+    'Additional orchestration notes:',
+    notes,
+  ].join('\n');
+}
+
 function parseToolArray(value) {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item || '').trim()).filter(Boolean);
@@ -648,8 +661,14 @@ function createPathBExecutor(options = {}) {
         if (!srId) {
           return { ok: false, message: 'No selected reference. Call select_reference or create_reference first.', tool_output: { ok: false, message: 'No selected reference.' } };
         }
-        const workerPrompt = String(args.worker_prompt || '').trim() || buildPathADelegationPrompt(payload, orchestratorState);
+        const workerPrompt = buildEnforcedPathADelegationPrompt(
+          payload,
+          orchestratorState,
+          String(args.worker_prompt || '').trim(),
+        );
         orchestratorState.path_a_prompt = workerPrompt;
+        // A new delegation invalidates any stale artifact read from earlier turns.
+        orchestratorState.research_artifact = null;
         const res = await delegatePathA({
           sr_id: srId,
           worker_prompt: workerPrompt,
@@ -681,7 +700,8 @@ function createPathBExecutor(options = {}) {
           sr_id: srId,
           delegated_response: orchestratorState.delegated_response,
         });
-        orchestratorState.research_artifact = res || null;
+        // Keep only successful reads in state so fallback can retry failed/empty reads.
+        orchestratorState.research_artifact = (res && res.ok) ? res : null;
         return {
           ok: !!(res && res.ok),
           message: res && res.ok ? 'Read research artifact.' : String((res && res.message) || 'Unable to read research artifact.'),
@@ -853,7 +873,8 @@ function createPathBExecutor(options = {}) {
       });
     }
 
-    if (selectedSrId && !orchestratorState.research_artifact) {
+    const hasResearchSummary = !!String(((orchestratorState.research_artifact && orchestratorState.research_artifact.summary) || '')).trim();
+    if (selectedSrId && (!orchestratorState.research_artifact || !hasResearchSummary)) {
       await toolExec({
         name: 'read_research_artifact',
         arguments: {
