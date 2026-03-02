@@ -77,7 +77,6 @@ This implementation delivers:
 ## Run
 
 ```bash
-cd /Users/srimallyamaitra/codes/subgrapher
 npm install
 npm start
 ```
@@ -97,7 +96,7 @@ npm run build:win
 
 ## GitHub release pipeline
 
-- Workflow file: `/Users/srimallyamaitra/codes/subgrapher/.github/workflows/release.yml`
+- Workflow file: `.github/workflows/release.yml`
 - Triggered on tags matching `v*` and manual dispatch.
 - Builds DMG on `macos-latest` and NSIS EXE on `windows-latest`.
 - Uploads artifacts to GitHub Release when run from a tag.
@@ -131,24 +130,24 @@ For new users:
 
 ## File map
 
-- `/Users/srimallyamaitra/codes/subgrapher/main.js`: Electron main process + IPC + reference store.
-- `/Users/srimallyamaitra/codes/subgrapher/preload.js`: secure renderer bridge.
-- `/Users/srimallyamaitra/codes/subgrapher/browser_view_preload.js`: marker selection capture.
-- `/Users/srimallyamaitra/codes/subgrapher/renderer/index.html`: 3-panel UI shell.
-- `/Users/srimallyamaitra/codes/subgrapher/renderer/styles.css`: UI theme/layout.
-- `/Users/srimallyamaitra/codes/subgrapher/renderer/app.js`: UI behavior and runtime patch application.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/agent_runtime.js`: local agentic response engine.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/lumino_path_a.js`: scoped Path A execution runtime.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/lumino_path_b.js`: orchestrator Path B runtime.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/hyperweb_manager.js`: Hyperweb signaling + peer exchange manager.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/trustcommons_identity.js`: Trust Commons identity bootstrap helper.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/file_indexer.js`: folder ingestion/indexing.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/lumino_crawler.js`: crawl and ingestion pipeline.
-- `/Users/srimallyamaitra/codes/subgrapher/runtime/keychain.js`: macOS keychain provider key storage.
+- `main.js`: Electron main process + IPC + reference store.
+- `preload.js`: secure renderer bridge.
+- `browser_view_preload.js`: marker selection capture.
+- `renderer/index.html`: 3-panel UI shell.
+- `renderer/styles.css`: UI theme/layout.
+- `renderer/app.js`: UI behavior and runtime patch application.
+- `runtime/agent_runtime.js`: local agentic response engine.
+- `runtime/lumino_path_a.js`: scoped Path A execution runtime.
+- `runtime/lumino_path_b.js`: orchestrator Path B runtime.
+- `runtime/hyperweb_manager.js`: Hyperweb signaling + peer exchange manager.
+- `runtime/trustcommons_identity.js`: Trust Commons identity bootstrap helper.
+- `runtime/file_indexer.js`: folder ingestion/indexing.
+- `runtime/lumino_crawler.js`: crawl and ingestion pipeline.
+- `runtime/keychain.js`: macOS keychain provider key storage.
 
 ## License
 
 This project is licensed under the GNU Affero General Public License, version 3 or later (`AGPL-3.0-or-later`).
 
-- Full license text: `/Users/srimallyamaitra/codes/subgrapher/LICENSE`
+- Full license text: `LICENSE`
 - If you distribute modified versions (including networked deployments), you must provide corresponding source under AGPL terms.
