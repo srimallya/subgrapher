@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "release_tag": "20260211",
+  "python_version": "3.11.14",
+  "targets": {
+    "darwin-arm64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.11.14+20260211-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "508e8cbf83f542cd94b77b6604ceef4bb008c4aefc13fb6fdfae9a7a80e36faf"
+    },
+    "win32-x64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260211/cpython-3.11.14+20260211-x86_64-pc-windows-msvc-install_only.tar.gz",
+      "sha256": "ca4bb73ae3358a690c498b21ec8f637d824350ebbf5361d76089afee8d68d03e"
+    }
+  }
+}

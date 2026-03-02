@@ -1,0 +1,7 @@
+pygame==2.6.1
+numpy==2.2.2
+matplotlib==3.10.0
+pandas==2.2.3
+scipy==1.15.1
+seaborn==0.13.2
+plotly==5.24.1

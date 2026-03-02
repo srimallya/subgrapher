@@ -1,0 +1,9 @@
+[
+  "numpy",
+  "matplotlib",
+  "pandas",
+  "scipy",
+  "seaborn",
+  "plotly",
+  "pygame"
+]

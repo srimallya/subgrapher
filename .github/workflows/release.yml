@@ -1,0 +1,108 @@
+name: Release Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare bundled Python runtime (mac arm64)
+        run: npm run prepare:python:mac-arm64
+
+      - name: Build macOS DMG (arm64, unsigned)
+        run: npx electron-builder --mac dmg --arm64
+
+      - name: Upload workflow artifact (mac)
+        uses: actions/upload-artifact@v4
+        with:
+          name: subgrapher-mac-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - name: Upload release asset (mac)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            Install first, then open invite links.
+
+            `subgrapher://...` links require Subgrapher to be installed and registered on your machine.
+
+            1. Download and install the DMG/EXE from this release.
+            2. Launch Subgrapher once.
+            3. Open the invite link.
+          files: dist/*.dmg
+
+  build-win:
+    runs-on: windows-latest
+    env:
+      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      WIN_CSC_TIMESTAMP_SERVER: ${{ secrets.WIN_CSC_TIMESTAMP_SERVER }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare bundled Python runtime (win x64)
+        run: npm run prepare:python:win-x64
+
+      - name: Signing mode
+        shell: bash
+        run: |
+          if [ -n "${CSC_LINK}" ] && [ -n "${CSC_KEY_PASSWORD}" ]; then
+            echo "Windows signing configured; signed build path will be attempted."
+          else
+            echo "Windows signing secrets not set; producing unsigned installer."
+          fi
+
+      - name: Build Windows NSIS EXE
+        run: npx electron-builder --win nsis --x64
+
+      - name: Upload workflow artifact (win)
+        uses: actions/upload-artifact@v4
+        with:
+          name: subgrapher-win-exe
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload release asset (win)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            Install first, then open invite links.
+
+            `subgrapher://...` links require Subgrapher to be installed and registered on your machine.
+
+            1. Download and install the DMG/EXE from this release.
+            2. Launch Subgrapher once.
+            3. Open the invite link.
+          files: dist/*.exe

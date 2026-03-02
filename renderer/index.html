@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Subgrapher</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header id="app-topbar">
+    <div class="brand-wrap">
+      <img id="app-logo" src="../assets/icons/app-icon-1024.png" alt="Subgrapher Logo" />
+      <div>
+        <div class="brand-title">Subgrapher</div>
+        <div class="brand-sub">Lumino Agent Workspace</div>
+      </div>
+    </div>
+    <div class="top-controls">
+      <button id="workspace-open-btn" class="top-btn active">Workspace</button>
+      <button id="hyperweb-open-btn" class="top-btn">Hyperweb</button>
+      <button id="private-shares-open-btn" class="top-btn">Private Shares</button>
+      <button id="settings-open-btn" class="top-btn">Settings</button>
+      <button id="history-open-btn" class="top-btn">History</button>
+      <button id="trustcommons-connect-btn" class="top-btn">TrustCommons Connect</button>
+      <label for="default-search-engine-select">Search</label>
+      <select id="default-search-engine-select">
+        <option value="ddg">DuckDuckGo</option>
+        <option value="google">Google</option>
+        <option value="bing">Bing</option>
+      </select>
+      <button id="about-open-btn" class="top-btn">About</button>
+    </div>
+  </header>
+
+  <div id="app-root">
+    <aside class="panel left" id="references-panel">
+      <div class="panel-header">
+        <h2>My References</h2>
+        <div class="panel-controls">
+          <button id="ref-new-empty-btn" title="Create empty reference workspace">+</button>
+        </div>
+      </div>
+      <div class="search-row">
+        <input id="reference-search" type="search" placeholder="Search references..." />
+        <button id="reference-search-clear-btn" title="Clear reference search">×</button>
+      </div>
+      <div class="reference-color-filter-row" id="reference-color-filter-row" aria-label="Reference color filters">
+        <button type="button" class="reference-filter-chip active" data-color-filter="all">All</button>
+        <button type="button" class="reference-filter-chip swatch" data-color-filter="c1" title="Color 1" aria-label="Filter color 1"></button>
+        <button type="button" class="reference-filter-chip swatch" data-color-filter="c2" title="Color 2" aria-label="Filter color 2"></button>
+        <button type="button" class="reference-filter-chip swatch" data-color-filter="c3" title="Color 3" aria-label="Filter color 3"></button>
+        <button type="button" class="reference-filter-chip swatch" data-color-filter="c4" title="Color 4" aria-label="Filter color 4"></button>
+        <button type="button" class="reference-filter-chip swatch" data-color-filter="c5" title="Color 5" aria-label="Filter color 5"></button>
+      </div>
+      <label class="references-auto-filter">
+        <input id="reference-auto-only-toggle" type="checkbox" />
+        <span>AUTO only</span>
+      </label>
+      <div id="references-list" class="list"></div>
+      <div class="left-footer">
+        <div id="active-ref-meta" class="muted">No active reference</div>
+      </div>
+    </aside>
+
+    <main class="panel center" id="workspace-panel">
+      <div class="nav-bar">
+        <button id="browser-reload-btn" title="Reload">Reload</button>
+        <button id="browser-memory-btn" title="Reference memory mode">Memory</button>
+        <button id="browser-marker-mode-btn" title="Marker mode">Marker: Off</button>
+        <input id="browser-url-input" type="text" placeholder="type URL or search query" />
+        <div class="nav-actions">
+          <button id="browser-commit-tab-btn" title="Commit current page to active reference">Commit</button>
+          <button id="browser-new-root-btn" title="Create new root from current page">New Root</button>
+          <button id="browser-fork-child-btn" title="Fork active reference">Fork Child</button>
+        </div>
+      </div>
+
+      <div id="workspace-tabs" class="workspace-tabs"></div>
+
+      <div id="browser-view-container" class="view-container">
+        <div id="browser-placeholder" class="placeholder">
+          <h3>Subgrapher</h3>
+          <p>Open a web tab or artifact to begin.</p>
+        </div>
+
+        <section id="artifact-editor" class="artifact-editor hidden">
+          <div class="artifact-header">
+            <strong id="artifact-title">Artifact</strong>
+            <span id="artifact-type-chip" class="artifact-type-chip">Markdown</span>
+            <span id="artifact-status" class="muted">Saved</span>
+            <span id="artifact-runtime-status" class="muted">Markdown artifact</span>
+            <button id="artifact-mode-code-btn" class="hidden" title="Edit code">Code</button>
+            <button id="artifact-mode-preview-btn" class="hidden" title="Preview artifact">Preview</button>
+            <button id="artifact-run-start-btn" class="hidden" title="Start HTML runtime">Start</button>
+            <button id="artifact-run-stop-btn" class="hidden" title="Stop HTML runtime">Stop</button>
+          </div>
+          <div id="artifact-viewer-shell" class="artifact-body artifact-mode-text-only">
+            <section id="artifact-image-pane" class="artifact-image-pane hidden">
+              <div class="artifact-image-toolbar">
+                <div id="artifact-image-status" class="muted small">No image selected.</div>
+                <div class="artifact-image-actions">
+                  <button id="artifact-zoom-out-btn" title="Zoom out">-</button>
+                  <button id="artifact-zoom-in-btn" title="Zoom in">+</button>
+                  <button id="artifact-save-image-btn" title="Save image" aria-label="Save image">⤓</button>
+                </div>
+              </div>
+              <div id="artifact-image-viewport" class="artifact-image-viewport">
+                <img id="artifact-image" alt="Artifact image preview" />
+              </div>
+              <div id="artifact-carousel" class="artifact-carousel hidden">
+                <button id="artifact-carousel-prev-btn" title="Previous image">Prev</button>
+                <span id="artifact-carousel-index" class="muted small">1 / 1</span>
+                <button id="artifact-carousel-next-btn" title="Next image">Next</button>
+              </div>
+            </section>
+            <div id="artifact-splitter-horizontal" class="artifact-splitter-horizontal hidden" role="separator" tabindex="0" aria-label="Resize artifact image and text panes" aria-orientation="horizontal"></div>
+            <section id="artifact-text-pane" class="artifact-text-pane">
+              <textarea id="artifact-input" spellcheck="false"></textarea>
+            </section>
+            <section id="artifact-html-preview-pane" class="artifact-html-preview-pane hidden">
+              <div id="artifact-html-runtime-host" class="artifact-html-runtime-host"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="files-panel" class="files-panel hidden">
+          <div class="files-header">
+            <strong id="files-title">Files</strong>
+            <span id="files-status" class="muted">No mounts</span>
+          </div>
+          <div id="files-body" class="files-body"></div>
+        </section>
+
+        <section id="skills-panel" class="skills-panel hidden">
+          <div class="skills-header">
+            <strong id="skills-title">Skills</strong>
+            <span id="skills-status" class="muted">No skills linked</span>
+          </div>
+          <div id="skills-body" class="skills-body"></div>
+        </section>
+      </div>
+
+      <div id="memory-rail" class="memory-rail hidden">
+        <div class="memory-rail-controls">
+          <button id="memory-prev-btn" type="button">Prev</button>
+          <button id="memory-play-btn" type="button">Play</button>
+          <button id="memory-next-btn" type="button">Next</button>
+          <div id="memory-position" class="muted small">0 / 0</div>
+          <div class="memory-lane-toggles">
+            <button id="memory-lane-all-btn" type="button" class="active">All</button>
+            <button id="memory-lane-periodic-btn" type="button">Periodic</button>
+            <button id="memory-lane-semantic-btn" type="button">Semantic</button>
+          </div>
+        </div>
+        <div class="memory-rail-right">
+          <div id="memory-checkpoint-label" class="muted small">No checkpoint</div>
+          <button id="memory-diff-btn" type="button">Diff</button>
+          <button id="memory-attach-btn" type="button">Attach to Lumino</button>
+          <button id="memory-commit-btn" type="button">Commit</button>
+          <button id="memory-exit-btn" type="button">Exit</button>
+        </div>
+      </div>
+    </main>
+
+    <aside class="panel right" id="chat-panel">
+      <div class="panel-header">
+        <h2>Ask Lumino</h2>
+        <div class="panel-controls">
+          <button id="lumino-context-add-btn" title="Import .txt/.md context file">+</button>
+          <button id="lumino-refresh-btn" title="Clear chat and auto-fork">Refresh</button>
+        </div>
+      </div>
+      <input id="lumino-context-file-input" type="file" accept=".txt,.md,text/plain,text/markdown" class="hidden" />
+
+      <div class="provider-row">
+        <select id="provider-select">
+          <option value="openai">OpenAI</option>
+          <option value="cerebras">Cerebras</option>
+          <option value="google">Google</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="lmstudio">LM Studio</option>
+        </select>
+        <button id="provider-set-key-btn">Set Key</button>
+        <button id="provider-clear-key-btn">Clear</button>
+      </div>
+
+      <div class="provider-row">
+        <select id="provider-model-select"></select>
+        <button id="provider-refresh-models-btn">Fetch Models</button>
+      </div>
+
+      <div id="provider-status" class="muted small"></div>
+
+      <details id="program-editor-wrap" class="program-editor">
+        <summary>Reference Program</summary>
+        <div class="program-editor-body">
+          <textarea id="program-editor-input" placeholder="Program (persistent system prompt for this reference)"></textarea>
+          <button id="program-editor-save-btn">Save Program</button>
+          <div id="program-editor-status" class="muted small"></div>
+        </div>
+      </details>
+
+      <div id="chat-body" class="chat-body"></div>
+      <div id="context-files" class="context-files"></div>
+      <div id="diff-review" class="diff-review hidden"></div>
+
+      <div class="chat-footer">
+        <input id="chat-input" type="text" placeholder="Ask Lumino about this workspace..." />
+        <button id="chat-send-btn">Send</button>
+      </div>
+    </aside>
+  </div>
+
+  <section id="hyperweb-page" class="hidden">
+    <div class="hyperweb-toolbar">
+      <div id="hyperweb-identity-line" class="muted small">Loading Hyperweb identity...</div>
+      <div class="hyperweb-toolbar-actions">
+        <div class="hyperweb-surface-tabs">
+          <button id="hyperweb-tab-feed-btn" class="active">Public Feed</button>
+          <button id="hyperweb-tab-refs-btn">Public References</button>
+        </div>
+        <button id="hyperweb-reset-filter-btn">Reset View</button>
+        <button id="hyperweb-close-btn">Back to Workspace</button>
+      </div>
+    </div>
+    <div id="hyperweb-grid" class="hyperweb-grid view-feed">
+      <section class="hyperweb-panel" id="hyperweb-nullspace-panel">
+        <div class="hyperweb-panel-header">
+          <h3>Public Feed</h3>
+          <div id="hyperweb-feed-status" class="muted small"></div>
+        </div>
+        <div class="hyperweb-post-search">
+          <input id="hyperweb-post-search-input" type="text" placeholder="Search posts (keyword + semantic)..." />
+          <button id="hyperweb-post-search-btn">Search</button>
+          <button id="hyperweb-post-search-clear-btn">Clear</button>
+        </div>
+        <div id="hyperweb-feed" class="hyperweb-feed"></div>
+        <div class="hyperweb-compose">
+          <textarea id="hyperweb-post-input" placeholder="Post a public idea or question..."></textarea>
+          <button id="hyperweb-post-send-btn">Post</button>
+        </div>
+      </section>
+      <div id="hyperweb-splitter" class="hyperweb-splitter" role="separator" tabindex="0" aria-label="Resize Hyperweb panels" aria-orientation="vertical"></div>
+      <section class="hyperweb-panel" id="hyperweb-public-references-panel">
+        <div class="hyperweb-panel-header">
+          <h3>Public References</h3>
+        </div>
+        <div class="hyperweb-ref-search">
+          <input id="hyperweb-ref-query-input" type="text" placeholder="Search public references semantically..." />
+          <button id="hyperweb-ref-query-btn">Search</button>
+        </div>
+        <div id="hyperweb-ref-status" class="muted small"></div>
+        <div id="hyperweb-ref-results" class="hyperweb-ref-results"></div>
+      </section>
+    </div>
+  </section>
+
+  <section id="private-shares-page" class="hidden">
+    <div class="shares-toolbar">
+      <div>
+        <div class="brand-title">Private Shares</div>
+        <div id="shares-status-line" class="muted small">Share references privately with TTC members.</div>
+      </div>
+      <div class="shares-toolbar-actions">
+        <button id="shares-refresh-btn">Refresh</button>
+        <button id="shares-close-btn">Back to Workspace</button>
+      </div>
+    </div>
+    <div class="shares-tabs">
+      <button id="shares-tab-incoming-btn" class="active">Incoming</button>
+      <button id="shares-tab-outgoing-btn">Outgoing</button>
+      <button id="shares-tab-rooms-btn">Shared Rooms</button>
+    </div>
+    <div id="shares-content" class="shares-content">
+      <section id="shares-incoming-panel" class="shares-panel"></section>
+      <section id="shares-outgoing-panel" class="shares-panel hidden"></section>
+      <section id="shares-rooms-panel" class="shares-panel hidden">
+        <div id="shares-room-list" class="share-room-list"></div>
+        <div id="shares-room-header" class="shares-room-header muted small">Select a room to start collaborating.</div>
+        <div id="shares-room-readonly-note" class="shares-room-readonly-note hidden">Read-only. Accept write access to edit.</div>
+        <textarea id="shares-room-editor" class="shares-room-editor" placeholder="Live collaborative notes will appear here..."></textarea>
+      </section>
+    </div>
+  </section>
+
+  <section id="settings-page" class="hidden">
+    <div class="settings-toolbar">
+      <div>
+        <div class="brand-title">Settings</div>
+        <div id="settings-status-line" class="muted small">Loading settings...</div>
+      </div>
+      <div class="settings-toolbar-actions">
+        <button id="settings-save-btn" disabled>Save</button>
+        <button id="settings-cancel-btn" disabled>Cancel</button>
+        <button id="settings-close-btn">Back to Workspace</button>
+      </div>
+    </div>
+
+    <div class="settings-body">
+      <section class="settings-section">
+        <h3>General</h3>
+        <div class="settings-grid">
+          <label class="settings-field">Default Search Engine
+            <select id="settings-default-search-engine" data-setting="default_search_engine">
+              <option value="ddg">DuckDuckGo</option>
+              <option value="google">Google</option>
+              <option value="bing">Bing</option>
+            </select>
+          </label>
+          <label class="settings-field settings-toggle">
+            <input id="settings-history-enabled" data-setting="history_enabled" type="checkbox" />
+            <span>Enable Private URL History</span>
+          </label>
+          <label class="settings-field">History Max Entries
+            <input id="settings-history-max" data-setting="history_max_entries" type="number" min="500" max="10000" />
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Browser Import</h3>
+        <p class="muted small">Import tabs from your existing browser into a new reference workspace.</p>
+        <div class="settings-inline-actions">
+          <button id="settings-import-chrome-btn">Import from Chrome</button>
+          <button id="settings-import-safari-btn">Import from Safari</button>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>AI Provider Defaults</h3>
+        <div class="settings-grid">
+          <label class="settings-field">Provider
+            <select id="settings-lumino-provider" data-setting="lumino_last_provider">
+              <option value="openai">OpenAI</option>
+              <option value="cerebras">Cerebras</option>
+              <option value="google">Google</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="lmstudio">LM Studio</option>
+            </select>
+          </label>
+          <label class="settings-field">Model
+            <input id="settings-lumino-model" data-setting="lumino_last_model" type="text" placeholder="e.g. gpt-4.1-mini" />
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>LM Studio</h3>
+        <div class="settings-grid">
+          <label class="settings-field">Base URL
+            <input id="settings-lmstudio-base-url" data-setting="lmstudio_base_url" type="text" placeholder="http://127.0.0.1:1234" />
+          </label>
+          <label class="settings-field">Default Model
+            <input id="settings-lmstudio-default-model" data-setting="lmstudio_default_model" type="text" placeholder="e.g. qwen2.5-7b-instruct" />
+          </label>
+          <label class="settings-field">Web Research Provider
+            <select id="settings-orchestrator-web-provider" data-setting="orchestrator_web_provider">
+              <option value="ddg">DuckDuckGo</option>
+              <option value="serpapi">SerpAPI (fallback to DDG)</option>
+            </select>
+          </label>
+        </div>
+        <div class="settings-grid">
+          <label class="settings-field">LM Studio Token (optional)
+            <input id="settings-lmstudio-token-input" type="password" placeholder="Optional token for local server" />
+          </label>
+          <label class="settings-field">SerpAPI Key (optional)
+            <input id="settings-orchestrator-web-key-input" type="password" placeholder="Used when provider is SerpAPI" />
+          </label>
+          <div class="settings-field">
+            <span>Token Status</span>
+            <div id="settings-lmstudio-token-status" class="muted small">Unknown</div>
+            <div class="settings-inline-actions">
+              <button id="settings-lmstudio-token-set-btn">Set Token</button>
+              <button id="settings-lmstudio-token-clear-btn">Clear Token</button>
+            </div>
+          </div>
+          <div class="settings-field">
+            <span>Web Provider Key Status</span>
+            <div id="settings-orchestrator-web-key-status" class="muted small">Unknown</div>
+            <div class="settings-inline-actions">
+              <button id="settings-orchestrator-web-key-set-btn">Set Key</button>
+              <button id="settings-orchestrator-web-key-clear-btn">Clear Key</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Telegram Bot</h3>
+        <div class="settings-grid">
+          <label class="settings-field settings-toggle">
+            <input id="settings-telegram-enabled" data-setting="telegram_enabled" type="checkbox" />
+            <span>Enable Telegram Orchestrator (Path B)</span>
+          </label>
+          <label class="settings-field">Polling Interval (sec)
+            <input id="settings-telegram-poll-interval" data-setting="telegram_poll_interval_sec" type="number" min="1" max="30" />
+          </label>
+        </div>
+        <div class="settings-grid">
+          <label class="settings-field">Bot Token
+            <input id="settings-telegram-token-input" type="password" placeholder="123456:ABC..." />
+          </label>
+          <label class="settings-field">Test Chat ID (optional)
+            <input id="settings-telegram-test-chat-id" type="text" placeholder="Uses first active user chat when empty" />
+          </label>
+          <div class="settings-field">
+            <span>Bot Status</span>
+            <div id="settings-telegram-token-status" class="muted small">Unknown</div>
+            <div class="settings-inline-actions">
+              <button id="settings-telegram-set-token-btn">Set Token</button>
+              <button id="settings-telegram-clear-token-btn">Clear Token</button>
+              <button id="settings-telegram-test-btn">Test Ping</button>
+            </div>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <div class="settings-field settings-field-wide">
+            <span>Active Telegram Users</span>
+            <div id="settings-telegram-users-list" class="settings-user-list muted small">No active users.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" id="settings-provider-keys">
+        <h3>Provider Keys</h3>
+        <p class="muted small">Manage multiple keys per provider, choose a primary key, and fetch models per key.</p>
+        <div id="settings-provider-keys-list" class="settings-provider-keys-list"></div>
+      </section>
+
+      <details class="settings-section" id="settings-advanced-crawler">
+        <summary>Crawler Defaults</summary>
+        <div class="settings-grid">
+          <label class="settings-field">Mode
+            <select id="settings-crawler-mode" data-setting="crawler_mode">
+              <option value="broad">Broad</option>
+              <option value="safe">Safe</option>
+            </select>
+          </label>
+          <label class="settings-field settings-toggle">
+            <input id="settings-crawler-markdown-first" data-setting="crawler_markdown_first" type="checkbox" />
+            <span>Prefer Markdown-first extraction</span>
+          </label>
+          <label class="settings-field">Robots
+            <select id="settings-crawler-robots" data-setting="crawler_robots_default">
+              <option value="respect">Respect</option>
+              <option value="ignore">Ignore</option>
+            </select>
+          </label>
+          <label class="settings-field">Depth
+            <input id="settings-crawler-depth" data-setting="crawler_depth_default" type="number" min="1" max="6" />
+          </label>
+          <label class="settings-field">Page Cap
+            <input id="settings-crawler-cap" data-setting="crawler_page_cap_default" type="number" min="5" max="300" />
+          </label>
+        </div>
+      </details>
+
+      <details class="settings-section" id="settings-advanced-agent">
+        <summary>Agent Mode</summary>
+        <div class="settings-grid">
+          <label class="settings-field settings-toggle">
+            <input id="settings-agent-mode-enabled" data-setting="agent_mode_v1_enabled" type="checkbox" />
+            <span>Enable Agent Mode v1</span>
+          </label>
+        </div>
+      </details>
+
+      <details class="settings-section" id="settings-advanced-trustcommons">
+        <summary>TrustCommons App Paths</summary>
+        <div class="settings-grid">
+          <label class="settings-field">Download URL
+            <input id="settings-tc-download-url" data-setting="trustcommons_download_url" type="text" />
+          </label>
+          <label class="settings-field">Bundle ID
+            <input id="settings-tc-bundle-id" data-setting="trustcommons_app_bundle_id" type="text" />
+          </label>
+        </div>
+      </details>
+
+      <details class="settings-section" id="settings-diagnostics">
+        <summary>Diagnostics</summary>
+        <div class="settings-grid">
+          <div class="settings-readout">
+            <h4>TrustCommons</h4>
+            <pre id="settings-diagnostics-trustcommons"></pre>
+          </div>
+          <div class="settings-readout">
+            <h4>Hyperweb</h4>
+            <pre id="settings-diagnostics-hyperweb"></pre>
+          </div>
+          <div class="settings-readout">
+            <h4>Identity</h4>
+            <pre id="settings-diagnostics-identity"></pre>
+          </div>
+        </div>
+        <div class="settings-inline-actions">
+          <button id="settings-refresh-diagnostics-btn">Refresh Diagnostics</button>
+          <button id="settings-trustcommons-connect-btn">TrustCommons Connect</button>
+          <button id="settings-hyperweb-connect-btn">Hyperweb Connect</button>
+          <button id="settings-hyperweb-disconnect-btn">Hyperweb Disconnect</button>
+        </div>
+      </details>
+
+      <details class="settings-section settings-danger" id="settings-danger-zone">
+        <summary>Danger Zone</summary>
+        <p class="muted small">These actions are destructive and require typing RESET.</p>
+        <div class="settings-inline-actions">
+          <button id="settings-danger-reset-hyperweb-identity-btn">Reset Hyperweb Identity</button>
+          <button id="settings-danger-clear-social-cache-btn">Clear Hyperweb Social Cache</button>
+          <button id="settings-danger-reset-trustcommons-link-btn">Reset TrustCommons Link</button>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section id="history-page" class="hidden">
+    <div class="history-toolbar">
+      <div>
+        <div class="brand-title">History</div>
+        <div id="history-status-line" class="muted small">Loading history...</div>
+      </div>
+      <div class="history-toolbar-actions">
+        <input id="history-search-input" type="text" placeholder="Search visited URLs, titles, or semantic tokens..." />
+        <button id="history-search-btn">Search</button>
+        <button id="history-clear-btn">Delete History</button>
+        <button id="history-close-btn">Back to Workspace</button>
+      </div>
+    </div>
+    <div class="history-grid">
+      <section class="history-panel">
+        <div class="history-panel-header">
+          <h3>Visited URLs</h3>
+          <div id="history-count" class="muted small">0</div>
+        </div>
+        <div id="history-list" class="history-list"></div>
+      </section>
+      <section class="history-panel history-right">
+        <div class="history-preview-wrap">
+          <div class="history-panel-header">
+            <h3>Preview</h3>
+            <div id="history-preview-meta" class="muted small">Select an entry</div>
+          </div>
+          <div id="history-preview-container" class="history-preview-container">
+            <div id="history-preview-placeholder" class="placeholder">
+              <h3>History Preview</h3>
+              <p>Select a URL on the left to view cached snapshot details.</p>
+            </div>
+          </div>
+        </div>
+        <div class="history-map-wrap">
+          <div class="history-panel-header">
+            <h3>Semantic Map</h3>
+            <div id="history-map-status" class="muted small"></div>
+          </div>
+          <div class="history-map-canvas-wrap">
+            <canvas id="history-map-canvas" width="900" height="420"></canvas>
+            <div id="history-map-tooltip" class="history-map-tooltip hidden"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <div id="onboarding-overlay" class="modal-overlay hidden">
+    <div class="modal-card onboarding-card">
+      <div class="onboarding-header">
+        <img class="onboarding-logo" src="../assets/icons/app-icon-1024.png" alt="Subgrapher" />
+        <div>
+          <h2>Welcome to Subgrapher</h2>
+          <p>Set up Lumino, import browser data, and choose default browser settings.</p>
+        </div>
+      </div>
+
+      <div class="onboarding-section">
+        <h3>0. Default search engine</h3>
+        <div class="onboarding-actions">
+          <select id="onboarding-search-engine-select">
+            <option value="ddg">DuckDuckGo</option>
+            <option value="google">Google</option>
+            <option value="bing">Bing</option>
+          </select>
+          <button id="onboarding-apply-search-engine-btn">Apply search engine</button>
+        </div>
+      </div>
+
+      <div class="onboarding-section">
+        <h3>1. Import from existing browser</h3>
+        <div class="onboarding-actions">
+          <button id="onboarding-import-chrome-btn">Import from Chrome</button>
+          <button id="onboarding-import-safari-btn">Import from Safari</button>
+        </div>
+      </div>
+
+      <div class="onboarding-section">
+        <h3>2. Default browser</h3>
+        <div class="onboarding-actions">
+          <button id="onboarding-default-browser-btn">Set Subgrapher as default browser</button>
+        </div>
+      </div>
+
+      <div class="onboarding-section">
+        <h3>3. Lumino API setup</h3>
+        <div class="onboarding-actions stacked">
+          <select id="onboarding-provider-select">
+            <option value="openai">OpenAI</option>
+            <option value="cerebras">Cerebras</option>
+            <option value="google">Google</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="lmstudio">LM Studio</option>
+          </select>
+          <input id="onboarding-api-key-input" type="password" placeholder="Paste API key" />
+          <button id="onboarding-save-key-btn">Save Key & Fetch Models</button>
+          <div id="onboarding-models-status" class="muted small"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <div id="onboarding-status" class="muted"></div>
+        <button id="onboarding-complete-btn">Finish onboarding</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="about-overlay" class="modal-overlay hidden">
+    <div class="modal-card about-card">
+      <h2>About Subgrapher</h2>
+      <p>
+        By Srimallya Maitra, a project originated from The Trust Commons Project.
+        <a class="about-link" href="https://www.thetrustcommons.com/" data-external-url="https://www.thetrustcommons.com/" target="_blank" rel="noopener noreferrer">thetrustcommons.com</a>
+      </p>
+      <p>
+        Contact:
+        <a class="about-link" href="mailto:info@thetrustcommons.com" data-external-url="mailto:info@thetrustcommons.com">info@thetrustcommons.com</a>
+      </p>
+      <div class="modal-footer">
+        <button id="about-close-btn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="publish-snapshot-overlay" class="modal-overlay hidden">
+    <div class="modal-card action-modal">
+      <h2>Publish to Hyperweb</h2>
+      <p>Creates an immutable public snapshot. Your private workspace remains separate.</p>
+      <div id="publish-snapshot-meta" class="muted small"></div>
+      <div class="modal-footer">
+        <button id="publish-snapshot-cancel-btn">Cancel</button>
+        <button id="publish-snapshot-confirm-btn">Publish</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="share-reference-overlay" class="modal-overlay hidden">
+    <div class="modal-card action-modal">
+      <h2>Share Privately</h2>
+      <p>Recipients get immediate read access. Write access begins after they accept.</p>
+      <input id="share-member-search-input" type="text" placeholder="Search TTC members..." />
+      <div id="share-member-list" class="share-member-list"></div>
+      <div class="modal-footer">
+        <button id="share-reference-cancel-btn">Cancel</button>
+        <button id="share-reference-send-btn">Send Share</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="provider-key-overlay" class="modal-overlay hidden">
+    <div class="modal-card action-modal provider-key-modal-card">
+      <h2 id="provider-key-modal-title">Add Provider Key</h2>
+      <div class="provider-key-modal-grid">
+        <label class="settings-field">Provider
+          <select id="provider-key-modal-provider">
+            <option value="openai">OpenAI</option>
+            <option value="cerebras">Cerebras</option>
+            <option value="google">Google</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="lmstudio">LM Studio</option>
+          </select>
+        </label>
+        <label class="settings-field">Label
+          <input id="provider-key-modal-label" type="text" placeholder="e.g. Work key" />
+        </label>
+        <label class="settings-field">API Key
+          <input id="provider-key-modal-api-key" type="password" placeholder="Paste API key" />
+        </label>
+        <label class="settings-field settings-toggle">
+          <input id="provider-key-modal-set-primary" type="checkbox" checked />
+          <span>Set as primary key</span>
+        </label>
+      </div>
+      <div id="provider-key-modal-status" class="muted small"></div>
+      <div class="modal-footer">
+        <button id="provider-key-modal-cancel-btn">Cancel</button>
+        <button id="provider-key-modal-save-btn">Save Key</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

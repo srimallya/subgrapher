@@ -1,0 +1,98 @@
+{
+  "name": "subgrapher",
+  "version": "0.1.0",
+  "description": "Subgrapher standalone browser workspace",
+  "main": "main.js",
+  "author": "Srimallya Maitra",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "prepare:python:mac-arm64": "node scripts/prepare_bundled_python.js --target darwin-arm64",
+    "prepare:python:win-x64": "node scripts/prepare_windows_python_or_placeholder.js",
+    "build:mac": "npm run prepare:python:mac-arm64 && electron-builder --mac dmg --arm64",
+    "build:win": "npm run prepare:python:win-x64 && electron-builder --win nsis --x64",
+    "build:release": "npm run build:mac && npm run build:win"
+  },
+  "dependencies": {
+    "@roamhq/wrtc": "^0.9.1",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.subgrapher.app",
+    "productName": "Subgrapher",
+    "copyright": "Copyright © 2026 Srimallya Maitra",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "browser_view_preload.js",
+      "renderer/**/*",
+      "runtime/**/*",
+      "scripts/**/*",
+      "assets/**/*",
+      "config/**/*",
+      "subgrapher_logo.jpg",
+      "package.json",
+      "package-lock.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/bundled-python/current",
+        "to": "python",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "protocols": [
+      {
+        "name": "Subgrapher Invite",
+        "schemes": [
+          "subgrapher"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icons/app-icon.icns",
+      "artifactName": "Subgrapher-${version}-mac.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "identity": null
+    },
+    "dmg": {
+      "sign": false
+    },
+    "win": {
+      "icon": "assets/icons/app-icon.ico",
+      "artifactName": "Subgrapher-${version}-setup.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

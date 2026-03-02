@@ -1,0 +1,5 @@
+{
+  "embedding_runtime": "hybrid:local-hash-embedding-v1",
+  "bundled": true,
+  "description": "Deterministic on-device embedding fallback used for Path-C similarity scoring."
+}

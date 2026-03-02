@@ -1,0 +1,13 @@
+{
+  "servers": [
+    {
+      "id": "example-local",
+      "name": "Example Local MCP Server",
+      "command": "node",
+      "args": ["./scripts/example_mcp_server.js"],
+      "cwd": "",
+      "env": {},
+      "autostart": false
+    }
+  ]
+}
