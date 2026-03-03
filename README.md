@@ -48,6 +48,9 @@ This implementation delivers:
   - shared web search path is used across Path A, Path B, and Telegram orchestration
   - fallback chain: DDG API -> DDG HTML -> Bing HTML parser
   - empty search result sets are surfaced as valid no-result responses (not transport failures)
+  - explicit web/search intent now requires at least one web-evidence step in agent mode
+  - deterministic recovery executes `web_search` (+ top-result `fetch_webpage`) when a model skips tool calls
+  - citation gate validates deliverable artifact content (when present), avoiding false failures on concise chat acks
 - Skills runtime:
   - save/run local or global skills
   - skills are reference-linkable and manageable from the `skills` tab
@@ -69,6 +72,11 @@ This implementation delivers:
 - Local-file abstraction routing:
   - when abstraction is enabled and a non-LM Studio provider is selected, local mounted files are abstracted before remote use
   - image/doc/pdf/binary context files can be analyzed through LM Studio during abstraction copy generation
+- Local evidence RAG:
+  - hybrid local evidence search uses BM25 + semantic vectors
+  - persistent SQLite index per reference (`semantic_references/<ref>/rag/index.sqlite`)
+  - primary embeddings via LM Studio (`/v1/embeddings`), with automatic local hash-embedding fallback
+  - Settings controls: `rag_enabled`, `rag_embedding_model`, `rag_top_k`, index status, and manual reindex for active workspace
 - Key/secret storage:
   - provider keys and secure refs are implemented via OS keychain on macOS
 - Telegram + orchestrator controls:

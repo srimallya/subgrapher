@@ -1140,6 +1140,24 @@ function buildRecoveryPrompt(missingPhase) {
   return 'Continue and complete required policy phases before finishing.';
 }
 
+function buildDeterministicRecoveryFollowup(recoveryResult = {}) {
+  const result = (recoveryResult && typeof recoveryResult === 'object') ? recoveryResult : {};
+  const steps = Array.isArray(result.steps) ? result.steps : [];
+  const summary = steps.slice(0, 8).map((step, idx) => {
+    const row = (step && typeof step === 'object') ? step : {};
+    const name = String(row.name || 'tool').trim() || 'tool';
+    const status = row.ok === false ? 'error' : 'ok';
+    const note = String(row.message || '').trim();
+    return `${idx + 1}. ${name} (${status})${note ? `: ${note}` : ''}`;
+  }).join('\n');
+  return [
+    'Deterministic recovery executed because the required web phase was missing.',
+    summary ? `Recovered tool summary:\n${summary}` : '',
+    'Use these recovered sources in your synthesis and citation section.',
+    'Do not call finish until required phases are satisfied.',
+  ].filter(Boolean).join('\n');
+}
+
 function isLikelyRateLimitError(err) {
   const message = String((err && err.message) || err || '').trim().toLowerCase();
   if (!message) return false;
@@ -1186,6 +1204,9 @@ async function executeAgenticLoop(options = {}) {
   const opts = (options && typeof options === 'object') ? options : {};
   const callProvider = typeof opts.callProviderWithTools === 'function' ? opts.callProviderWithTools : null;
   const executeTool = typeof opts.executeTool === 'function' ? opts.executeTool : null;
+  const deterministicWebRecovery = typeof opts.deterministicWebRecovery === 'function'
+    ? opts.deterministicWebRecovery
+    : null;
   if (!callProvider || !executeTool) {
     throw new Error('Agent loop requires callProviderWithTools and executeTool handlers.');
   }
@@ -1237,6 +1258,9 @@ async function executeAgenticLoop(options = {}) {
   let webUnavailable = false;
   let localBypassNoted = false;
   let recoveryTurnCount = 0;
+  let deterministicRecoveryAttempted = false;
+  let latestDeliverableArtifactContent = '';
+  let latestDeliverableArtifactType = '';
   const citationSources = new Map();
   const markerSourceKeys = new Set();
   const citationBlockReasons = [];
@@ -1324,11 +1348,14 @@ async function executeAgenticLoop(options = {}) {
 
     if (toolCalls.length === 0) {
       finalText = assistantText || finalText;
+      const citationDraftTargetText = deliverableWritten && latestDeliverableArtifactContent
+        ? latestDeliverableArtifactContent
+        : assistantText;
       const draftCitationGate = evaluateCitationGate(researchPolicy, {
         citationSourcesCount: citationSources.size,
         markerSourcesCount: markerSourceKeys.size,
-        enforceFormat: !!researchPolicy.requiresCitations && !!assistantText,
-        text: assistantText,
+        enforceFormat: !!researchPolicy.requiresCitations && !!String(citationDraftTargetText || '').trim(),
+        text: citationDraftTargetText,
       });
       const missingPhase = computeMissingPhase(
         researchPolicy,
@@ -1338,6 +1365,75 @@ async function executeAgenticLoop(options = {}) {
         webUnavailable,
         draftCitationGate,
       );
+      if (
+        missingPhase === 'web'
+        && deterministicWebRecovery
+        && !deterministicRecoveryAttempted
+      ) {
+        deterministicRecoveryAttempted = true;
+        emitStatus('info', 'agent', 'Recovery: web phase missing; running deterministic web tools.');
+        try {
+          const recoveryRes = await deterministicWebRecovery({
+            query: userPrompt,
+            turn,
+            signal,
+            research_policy: researchPolicy,
+          });
+          const recovery = (recoveryRes && typeof recoveryRes === 'object') ? recoveryRes : {};
+          const recoverySteps = Array.isArray(recovery.steps) ? recovery.steps : [];
+          recoverySteps.forEach((step, idx) => {
+            const normalized = (step && typeof step === 'object') ? step : {};
+            const toolName = String(normalized.name || '').trim() || 'web_search';
+            const toolOutput = normalized.tool_output && typeof normalized.tool_output === 'object'
+              ? normalized.tool_output
+              : { ok: normalized.ok !== false, message: String(normalized.message || '') };
+            const stepOk = normalized.ok !== false && toolOutput.ok !== false;
+            aggregate.tool_steps.push({
+              turn,
+              name: toolName,
+              ok: stepOk,
+              message: String(normalized.message || toolOutput.message || ''),
+            });
+            emitStatus(stepOk ? 'done' : 'error', 'tool', String(normalized.message || `${toolName} completed.`), {
+              tool_name: toolName,
+              meta: { turn, index: idx, deterministic_recovery: true },
+            });
+            if (stepOk && WEB_TOOL_NAMES.has(toolName)) {
+              webEvidenceCount += 1;
+            }
+            if (!stepOk && WEB_TOOL_NAMES.has(toolName) && isWebUnavailableResult(normalized, toolOutput)) {
+              webUnavailable = true;
+            }
+            if (stepOk) {
+              const citationEntries = extractCitationEntriesFromTool(toolName, toolOutput);
+              citationEntries.forEach((entry) => {
+                const key = buildCitationKey(entry);
+                if (!key) return;
+                const normalizedEntry = {
+                  source_key: key,
+                  source_locator: String(entry.source_locator || '').trim(),
+                  url: String(entry.url || '').trim(),
+                  artifact_id: String(entry.artifact_id || '').trim(),
+                  context_file_id: String(entry.context_file_id || '').trim(),
+                  marker_backed: !!entry.marker_backed,
+                };
+                citationSources.set(key, normalizedEntry);
+                if (normalizedEntry.marker_backed) markerSourceKeys.add(key);
+              });
+            }
+          });
+          if (recoverySteps.length > 0) {
+            messages.push({
+              role: 'user',
+              content: buildDeterministicRecoveryFollowup(recovery),
+            });
+            emitStatus('info', 'agent', 'Deterministic web recovery completed; requesting synthesis pass.');
+            continue;
+          }
+        } catch (recoveryErr) {
+          emitStatus('error', 'agent', `Deterministic web recovery failed: ${String((recoveryErr && recoveryErr.message) || 'unknown error')}`);
+        }
+      }
       if (
         missingPhase
         && researchPolicy.allowRecoveryReprompt
@@ -1438,7 +1534,11 @@ async function executeAgenticLoop(options = {}) {
       ) {
         const targetText = isDeliverableTool
           ? String(args.content || '').trim()
-          : String(args.message || '').trim();
+          : (
+            deliverableWritten && latestDeliverableArtifactContent
+              ? latestDeliverableArtifactContent
+              : String(args.message || '').trim()
+          );
         const citationGate = evaluateCitationGate(researchPolicy, {
           citationSourcesCount: citationSources.size,
           markerSourcesCount: markerSourceKeys.size,
@@ -1539,7 +1639,19 @@ async function executeAgenticLoop(options = {}) {
       }
       if (toolOk && isLocalEvidenceTool) localEvidenceCount += 1;
       if (toolOk && isWebTool) webEvidenceCount += 1;
-      if (toolOk && isDeliverableTool) deliverableWritten = true;
+      if (toolOk && isDeliverableTool) {
+        deliverableWritten = true;
+        const candidateContent = String(args.content || '').trim();
+        if (candidateContent) {
+          latestDeliverableArtifactContent = candidateContent;
+          latestDeliverableArtifactType = (
+            toolName === 'write_html_artifact'
+            || String(args.artifact_type || '').trim().toLowerCase() === 'html'
+          )
+            ? 'html'
+            : 'markdown';
+        }
+      }
       if (!toolOk && isWebTool && isWebUnavailableResult(normalizedToolRes, toolOutput)) {
         webUnavailable = true;
         emitStatus('info', 'agent', 'Web research is unavailable; final synthesis will proceed with current evidence.');
@@ -1636,13 +1748,16 @@ async function executeAgenticLoop(options = {}) {
   const finalCitationGate = evaluateCitationGate(researchPolicy, {
     citationSourcesCount: citationSources.size,
     markerSourcesCount: markerSourceKeys.size,
-    enforceFormat: !!researchPolicy.requiresCitations && !!String(finalText || '').trim(),
-    text: finalText,
+    enforceFormat: !!researchPolicy.requiresCitations
+      && !!String((deliverableWritten && latestDeliverableArtifactContent) ? latestDeliverableArtifactContent : finalText).trim(),
+    text: (deliverableWritten && latestDeliverableArtifactContent) ? latestDeliverableArtifactContent : finalText,
   });
   finalCitationGate.reasons.forEach((code) => {
     if (!citationBlockReasons.includes(code)) citationBlockReasons.push(code);
   });
   aggregate.research_policy_state.citation_gate_passed = finalCitationGate.ok;
+  aggregate.research_policy_state.citation_target = deliverableWritten && latestDeliverableArtifactContent ? 'artifact' : 'chat';
+  aggregate.research_policy_state.deliverable_artifact_type = latestDeliverableArtifactType;
   aggregate.policy_diagnostics = {
     missing_phase: computeMissingPhase(
       researchPolicy,

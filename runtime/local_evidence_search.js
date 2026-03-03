@@ -1,5 +1,7 @@
 const fs = require('fs');
 const crypto = require('crypto');
+const { embedTexts, hashEmbedText, HASH_FALLBACK_MODEL, DEFAULT_EMBEDDING_MODEL } = require('./embedding_runtime');
+const { ensureReferenceRagIndex, readReferenceRagStatus } = require('./rag_index');
 
 const VECTOR_DIM = 256;
 const BM25_K1 = 1.2;
@@ -21,7 +23,8 @@ const MAX_CONTEXT_FILES_PER_REF = 80;
 const MAX_CONTEXT_FILE_READ_CHARS = 80_000;
 
 const SUPPORTED_KINDS = new Set(['artifact', 'highlight', 'context_file']);
-const METHOD = 'hybrid:bm25+local-hash-embedding-v1';
+const METHOD_HASH = 'hybrid:bm25+local-hash-embedding-v1';
+const METHOD_LM = 'hybrid:bm25+lmstudio-embedding-v1';
 
 const referenceIndexCache = new Map();
 
@@ -173,7 +176,7 @@ function makeSnippet(parts = []) {
   const text = parts
     .map((item) => String(item || '').trim())
     .filter(Boolean)
-    .join(' \u2014 ');
+    .join(' - ');
   return truncate(text, 280);
 }
 
@@ -454,47 +457,111 @@ function round4(value) {
   return Number(n.toFixed(4));
 }
 
-function searchLocalEvidence(query, scopedRefs = [], options = {}) {
+function normalizeVector(input = []) {
+  if (input instanceof Float32Array) return input;
+  if (!Array.isArray(input)) return new Float32Array(0);
+  return Float32Array.from(input.map((item) => Number(item) || 0));
+}
+
+async function searchLocalEvidence(query, scopedRefs = [], options = {}) {
   const q = String(query || '').trim();
   const refs = Array.isArray(scopedRefs) ? scopedRefs : [];
   const topK = clamp(Number(options.topK || options.top_k || DEFAULT_TOP_K), 1, MAX_TOP_K);
   if (!q) {
-    return { ok: true, method: METHOD, results: [], citations: [] };
+    return {
+      ok: true,
+      method: METHOD_HASH,
+      results: [],
+      citations: [],
+      embedding_runtime: 'local-hash',
+      embedding_model: HASH_FALLBACK_MODEL,
+      fallback_used: true,
+      index_state: 'idle',
+    };
   }
 
   const includeKinds = normalizeKinds(options.includeKinds || options.include_kinds);
   const queryTokens = tokenize(q);
-  const queryEmbedding = embedTokens(queryTokens);
-  const scored = [];
+  const queryHashEmbedding = hashEmbedText(q);
 
-  refs.forEach((ref) => {
+  const ragEnabled = Object.prototype.hasOwnProperty.call(options, 'ragEnabled') ? !!options.ragEnabled : true;
+  const userDataPath = String(options.userDataPath || '').trim();
+  const embeddingConfig = (options.embeddingConfig && typeof options.embeddingConfig === 'object')
+    ? options.embeddingConfig
+    : {};
+  const requestedModel = String(options.embeddingModel || embeddingConfig.model || DEFAULT_EMBEDDING_MODEL).trim() || DEFAULT_EMBEDDING_MODEL;
+
+  const queryEmbeddingRes = await embedTexts([q], {
+    ...embeddingConfig,
+    model: requestedModel,
+  });
+
+  const queryEmbedding = normalizeVector((queryEmbeddingRes && queryEmbeddingRes.embeddings && queryEmbeddingRes.embeddings[0]) || []);
+  const embeddingRuntime = String((queryEmbeddingRes && queryEmbeddingRes.runtime) || 'local-hash').trim() || 'local-hash';
+  const embeddingModel = String((queryEmbeddingRes && queryEmbeddingRes.model) || HASH_FALLBACK_MODEL).trim() || HASH_FALLBACK_MODEL;
+  const fallbackUsed = !!(queryEmbeddingRes && queryEmbeddingRes.fallback_used);
+
+  const scored = [];
+  const ragIndexStates = [];
+
+  for (let r = 0; r < refs.length; r += 1) {
+    const ref = refs[r];
     const cached = getReferenceIndex(ref);
     const index = cached && cached.index ? cached.index : null;
-    if (!index || !Array.isArray(index.rows) || index.rows.length === 0) return;
-    const totalDocs = Number(index.docs_count || 0);
-    if (totalDocs <= 0) return;
+    if (!index || !Array.isArray(index.rows) || index.rows.length === 0) continue;
 
-    index.rows.forEach((row) => {
-      if (!row || !row.doc) return;
+    const totalDocs = Number(index.docs_count || 0);
+    if (totalDocs <= 0) continue;
+
+    let vectorByDoc = new Map();
+    if (ragEnabled && userDataPath) {
+      const ragRes = await ensureReferenceRagIndex({
+        userDataPath,
+        referenceId: String((ref && ref.id) || '').trim(),
+        referenceVersion: cached.version,
+        docs: index.rows.map((row) => row.doc),
+        modelId: embeddingModel,
+        embeddingRuntime,
+        embeddingConfig: {
+          ...embeddingConfig,
+          model: embeddingModel,
+        },
+      });
+      ragIndexStates.push(String((ragRes && ragRes.index_state) || 'error').trim() || 'error');
+      const sameModel = String((ragRes && ragRes.model_id) || '').trim() === embeddingModel;
+      if (ragRes && ragRes.ok && sameModel && ragRes.vector_by_doc instanceof Map) {
+        vectorByDoc = ragRes.vector_by_doc;
+      }
+    }
+
+    for (let i = 0; i < index.rows.length; i += 1) {
+      const row = index.rows[i];
+      if (!row || !row.doc) continue;
       const doc = row.doc;
-      if (!includeKinds.has(String(doc.kind || '').trim().toLowerCase())) return;
+      if (!includeKinds.has(String(doc.kind || '').trim().toLowerCase())) continue;
       const bm25 = bm25Score(queryTokens, row, index.doc_freq, totalDocs, index.avg_doc_len);
-      const semantic = cosineSimilarity(queryEmbedding, row.embedding);
+      const semanticVector = vectorByDoc.get(String(doc.doc_id || '').trim()) || row.embedding;
+      const semanticQuery = semanticVector === row.embedding ? queryHashEmbedding : queryEmbedding;
+      const semantic = cosineSimilarity(semanticQuery, semanticVector);
       scored.push({
         doc,
         bm25,
         semantic,
       });
-    });
-  });
+    }
+  }
 
   if (scored.length === 0) {
     return {
       ok: true,
-      method: METHOD,
+      method: embeddingRuntime === 'lmstudio' && embeddingModel !== HASH_FALLBACK_MODEL ? METHOD_LM : METHOD_HASH,
       results: [],
       citations: [],
       cache_size: referenceIndexCache.size,
+      embedding_runtime: embeddingRuntime,
+      embedding_model: embeddingModel,
+      fallback_used: fallbackUsed,
+      index_state: ragEnabled ? (ragIndexStates.includes('error') ? 'error' : 'empty') : 'disabled',
     };
   }
 
@@ -574,13 +641,92 @@ function searchLocalEvidence(query, scopedRefs = [], options = {}) {
 
   return {
     ok: true,
-    method: METHOD,
+    method: embeddingRuntime === 'lmstudio' && embeddingModel !== HASH_FALLBACK_MODEL ? METHOD_LM : METHOD_HASH,
     results,
     citations,
     cache_size: referenceIndexCache.size,
+    embedding_runtime: embeddingRuntime,
+    embedding_model: embeddingModel,
+    fallback_used: fallbackUsed,
+    index_state: ragEnabled
+      ? (ragIndexStates.includes('error') ? 'error' : (ragIndexStates.includes('ready') ? 'ready' : 'empty'))
+      : 'disabled',
+  };
+}
+
+async function getLocalEvidenceRagStatus(referenceId = '', options = {}) {
+  const cfg = (options && typeof options === 'object') ? options : {};
+  const refId = String(referenceId || '').trim();
+  if (!refId) {
+    return { ok: false, state: 'error', message: 'referenceId is required.' };
+  }
+  const userDataPath = String(cfg.userDataPath || '').trim();
+  return readReferenceRagStatus({ userDataPath, referenceId: refId });
+}
+
+async function reindexLocalEvidenceReference(referenceId = '', scopedRefs = [], options = {}) {
+  const refId = String(referenceId || '').trim();
+  if (!refId) return { ok: false, message: 'referenceId is required.' };
+  const refs = Array.isArray(scopedRefs) ? scopedRefs : [];
+  const targetRef = refs.find((ref) => String((ref && ref.id) || '').trim() === refId);
+  if (!targetRef) return { ok: false, message: 'Reference not found in scope.' };
+
+  const cfg = (options && typeof options === 'object') ? options : {};
+  const userDataPath = String(cfg.userDataPath || '').trim();
+  const ragEnabled = Object.prototype.hasOwnProperty.call(cfg, 'ragEnabled') ? !!cfg.ragEnabled : true;
+  if (!ragEnabled) {
+    return { ok: false, message: 'RAG is disabled in settings.' };
+  }
+
+  const embeddingConfig = (cfg.embeddingConfig && typeof cfg.embeddingConfig === 'object')
+    ? cfg.embeddingConfig
+    : {};
+  const requestedModel = String(cfg.embeddingModel || embeddingConfig.model || DEFAULT_EMBEDDING_MODEL).trim() || DEFAULT_EMBEDDING_MODEL;
+  const probeRes = await embedTexts(['subgrapher rag health check'], {
+    ...embeddingConfig,
+    model: requestedModel,
+  });
+  const modelId = String((probeRes && probeRes.model) || HASH_FALLBACK_MODEL).trim() || HASH_FALLBACK_MODEL;
+  const embeddingRuntime = String((probeRes && probeRes.runtime) || 'local-hash').trim() || 'local-hash';
+
+  const cached = getReferenceIndex(targetRef);
+  const index = cached && cached.index ? cached.index : null;
+  if (!index || !Array.isArray(index.rows) || index.rows.length === 0) {
+    return {
+      ok: true,
+      message: 'No local evidence documents to index.',
+      index_state: 'empty',
+      model_id: modelId,
+      embedding_runtime: embeddingRuntime,
+      doc_count: 0,
+    };
+  }
+
+  const ragRes = await ensureReferenceRagIndex({
+    userDataPath,
+    referenceId: refId,
+    referenceVersion: cached.version,
+    docs: index.rows.map((row) => row.doc),
+    modelId,
+    embeddingRuntime,
+    embeddingConfig: {
+      ...embeddingConfig,
+      model: modelId,
+    },
+    forceRebuild: true,
+  });
+
+  return {
+    ok: !!(ragRes && ragRes.ok),
+    message: ragRes && ragRes.ok
+      ? `RAG index rebuilt (${Number(ragRes.doc_count || 0)} docs).`
+      : String((ragRes && ragRes.message) || 'RAG reindex failed.'),
+    ...(ragRes || {}),
   };
 }
 
 module.exports = {
   searchLocalEvidence,
+  getLocalEvidenceRagStatus,
+  reindexLocalEvidenceReference,
 };

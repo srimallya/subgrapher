@@ -432,6 +432,31 @@
       </section>
 
       <section class="settings-section">
+        <h3>Local RAG</h3>
+        <p class="muted small">Persistent local evidence index with LM Studio embeddings and automatic hash fallback.</p>
+        <div class="settings-grid">
+          <label class="settings-field settings-toggle">
+            <input id="settings-rag-enabled" data-setting="rag_enabled" type="checkbox" />
+            <span>Enable persistent local RAG index</span>
+          </label>
+          <label class="settings-field">Embedding Model (LM Studio)
+            <select id="settings-rag-embedding-model" data-setting="rag_embedding_model"></select>
+          </label>
+          <label class="settings-field">Top-K
+            <input id="settings-rag-top-k" data-setting="rag_top_k" type="number" min="1" max="24" />
+          </label>
+          <div class="settings-field">
+            <span>RAG Actions</span>
+            <div class="settings-inline-actions">
+              <button id="settings-rag-fetch-models-btn">Fetch Embedding Models</button>
+              <button id="settings-rag-reindex-btn">Reindex Active Workspace</button>
+            </div>
+            <div id="settings-rag-status" class="muted small">Unknown</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
         <h3>Telegram Bot</h3>
         <div class="settings-grid">
           <label class="settings-field settings-toggle">

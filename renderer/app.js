@@ -107,6 +107,7 @@ const state = {
   orchestratorWebKeyConfigured: null,
   settingsLmstudioModels: [],
   settingsAbstractionStatus: null,
+  settingsRagStatus: null,
   historyEntries: [],
   historySearchQuery: '',
   historySelectedId: '',
@@ -156,6 +157,8 @@ const UI_ZOOM_STEP = 0.1;
 const UI_MIN_ZOOM = 0.5;
 const UI_MAX_ZOOM = 3.0;
 const IMAGE_ANALYSIS_PROMPT_DEFAULT = 'Describe the image in details and write the context.';
+const RAG_EMBEDDING_MODEL_DEFAULT = 'text-embedding-nomic-embed-text-v1.5';
+const RAG_TOP_K_DEFAULT = 8;
 const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
 const TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC = 8;
 const HISTORY_DEFAULT_MAX_ENTRIES = 5000;
@@ -6006,6 +6009,31 @@ function renderSettingsAbstractionStatus() {
   node.textContent = `ready=${Number(counts.ready || 0)}, building=${Number(counts.building || 0)}, stale=${Number(counts.stale || 0)}, error=${Number(counts.error || 0)}${latestText}`;
 }
 
+function renderSettingsRagStatus() {
+  const node = e('settings-rag-status');
+  if (!node) return;
+  const status = state.settingsRagStatus || null;
+  const draft = normalizeSettingsDraft(state.settingsDraft || {});
+  if (!draft.rag_enabled) {
+    node.textContent = 'RAG is disabled.';
+    return;
+  }
+  if (!status || status.ok === false) {
+    node.textContent = status && status.message ? status.message : 'Unavailable';
+    return;
+  }
+  const counts = status.counts && typeof status.counts === 'object' ? status.counts : {};
+  const refs = Array.isArray(status.references) ? status.references : [];
+  const active = refs[0] && typeof refs[0] === 'object' ? refs[0] : null;
+  const updated = refs.map((item) => Number((item && item.updated_at) || 0)).filter((v) => Number.isFinite(v) && v > 0);
+  const latest = updated.length ? Math.max(...updated) : 0;
+  const latestText = latest > 0 ? ` · updated ${formatAgo(latest)}` : '';
+  const runtimeText = active
+    ? ` · runtime=${String(active.embedding_runtime || 'none') || 'none'} · model=${String(active.model_id || '-').trim() || '-'}`
+    : '';
+  node.textContent = `ready=${Number(counts.ready || 0)}, missing=${Number(counts.missing || 0)}, empty=${Number(counts.empty || 0)}, error=${Number(counts.error || 0)}${runtimeText}${latestText}`;
+}
+
 function normalizeSettingsDraft(raw = {}) {
   const src = (raw && typeof raw === 'object') ? raw : {};
   const telegramAllowedChatIds = parseCommaSeparatedList(src.telegram_allowed_chat_ids);
@@ -6037,6 +6065,11 @@ function normalizeSettingsDraft(raw = {}) {
       : true,
     image_analysis_model: String(src.image_analysis_model || '').trim(),
     image_analysis_prompt: String(src.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim() || IMAGE_ANALYSIS_PROMPT_DEFAULT,
+    rag_enabled: Object.prototype.hasOwnProperty.call(src, 'rag_enabled') ? !!src.rag_enabled : true,
+    rag_embedding_model: String(src.rag_embedding_model || RAG_EMBEDDING_MODEL_DEFAULT).trim() || RAG_EMBEDDING_MODEL_DEFAULT,
+    rag_top_k: Number.isFinite(Number(src.rag_top_k))
+      ? Math.max(1, Math.min(24, Math.round(Number(src.rag_top_k))))
+      : RAG_TOP_K_DEFAULT,
     telegram_enabled: !!src.telegram_enabled,
     telegram_allowed_chat_ids: telegramAllowedChatIds,
     telegram_allowed_usernames: telegramAllowedUsernames,
@@ -6094,6 +6127,9 @@ function validateSettingsDraft(draft = {}) {
   if (!Number.isFinite(d.history_max_entries) || d.history_max_entries < 500 || d.history_max_entries > 10000) {
     errors.history_max_entries = 'History max entries must be 500..10000.';
   }
+  if (!Number.isFinite(d.rag_top_k) || d.rag_top_k < 1 || d.rag_top_k > 24) {
+    errors.rag_top_k = 'RAG Top-K must be 1..24.';
+  }
   return errors;
 }
 
@@ -6147,6 +6183,7 @@ function renderSettingsForm() {
   const draft = normalizeSettingsDraft(state.settingsDraft || {});
   renderSettingsLmstudioModelSelect('settings-abstraction-model', draft.abstraction_model);
   renderSettingsLmstudioModelSelect('settings-image-analysis-model', draft.image_analysis_model);
+  renderSettingsLmstudioModelSelect('settings-rag-embedding-model', draft.rag_embedding_model);
   getSettingsFormElements().forEach((node) => {
     const key = String(node.getAttribute('data-setting') || '').trim();
     if (!key) return;
@@ -6164,6 +6201,7 @@ function renderSettingsForm() {
     node.title = (state.settingsValidationErrors && state.settingsValidationErrors[key]) || '';
   });
   renderSettingsAbstractionStatus();
+  renderSettingsRagStatus();
   renderSettingsStatusLine();
 }
 
@@ -6296,6 +6334,14 @@ async function refreshAbstractionStatus() {
   renderSettingsAbstractionStatus();
 }
 
+async function refreshRagStatus() {
+  if (!api.ragStatus) return;
+  const srId = String(state.activeSrId || '').trim();
+  const res = await api.ragStatus(srId ? { sr_id: srId } : {});
+  state.settingsRagStatus = res || null;
+  renderSettingsRagStatus();
+}
+
 async function loadSettingsData() {
   const prefRes = await api.getPreferences();
   const diagnostics = await api.settingsDiagnostics();
@@ -6314,6 +6360,7 @@ async function loadSettingsData() {
   await refreshLmstudioTokenStatus();
   await refreshOrchestratorWebKeyStatus();
   await refreshAbstractionStatus();
+  await refreshRagStatus();
   if (diagnostics && diagnostics.ok) {
     state.settingsDiagnostics = diagnostics;
     renderSettingsDiagnostics();
@@ -6362,6 +6409,7 @@ async function saveSettingsDraft() {
   await refreshLmstudioTokenStatus();
   await refreshOrchestratorWebKeyStatus();
   await refreshAbstractionStatus();
+  await refreshRagStatus();
   await refreshTrustCommonsStatus();
   await refreshHyperwebStatus();
   renderSettingsForm();
@@ -7510,6 +7558,15 @@ function bindControls() {
     renderSettingsStatusLine();
   });
 
+  e('settings-rag-fetch-models-btn')?.addEventListener('click', async () => {
+    await refreshSettingsLmstudioModelOptions();
+    renderSettingsForm();
+    state.settingsSaveState = (Array.isArray(state.settingsLmstudioModels) && state.settingsLmstudioModels.length > 0)
+      ? `Loaded ${state.settingsLmstudioModels.length} LM Studio model(s).`
+      : 'No LM Studio models found.';
+    renderSettingsStatusLine();
+  });
+
   e('settings-abstraction-rebuild-btn')?.addEventListener('click', async () => {
     if (!api.abstractionRebuild) return;
     state.settingsSaveState = 'Rebuilding abstraction copies...';
@@ -7524,6 +7581,29 @@ function bindControls() {
       await refreshAbstractionStatus();
     }
     renderSettingsAbstractionStatus();
+    renderSettingsStatusLine();
+  });
+
+  e('settings-rag-reindex-btn')?.addEventListener('click', async () => {
+    if (!api.ragReindex) return;
+    const srId = String(state.activeSrId || '').trim();
+    if (!srId) {
+      state.settingsSaveState = 'Select an active workspace before reindexing RAG.';
+      renderSettingsStatusLine();
+      return;
+    }
+    state.settingsSaveState = 'Reindexing local RAG...';
+    renderSettingsStatusLine();
+    const res = await api.ragReindex({ sr_id: srId });
+    state.settingsSaveState = (res && res.ok)
+      ? 'RAG reindex completed.'
+      : ((res && res.result && res.result.message) || (res && res.message) || 'RAG reindex failed.');
+    if (res && res.status) {
+      state.settingsRagStatus = res.status;
+      renderSettingsRagStatus();
+    } else {
+      await refreshRagStatus();
+    }
     renderSettingsStatusLine();
   });
 

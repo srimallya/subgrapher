@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@roamhq/wrtc": "^0.9.1",
-    "socket.io-client": "^4.8.3"
+    "socket.io-client": "^4.8.3",
+    "sql.js": "^1.14.0"
   },
   "devDependencies": {
     "electron": "^28.3.3",

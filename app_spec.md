@@ -67,6 +67,11 @@ Migration is idempotent and safe to run repeatedly.
   - DDG HTML endpoint parser
   - Bing HTML parser fallback
 - No-result search outcomes are represented as successful empty result sets, not transport failures.
+- Explicit web/search intent requests in agent mode must complete at least one web-evidence step.
+- If a model returns no tool calls while web phase is still missing, deterministic recovery executes:
+  - `web_search`
+  - optional top-result `fetch_webpage`
+- Citation gate validation targets deliverable artifact content when an artifact is written, not just final chat summary text.
 
 ## Local Context Ingestion + Abstraction
 - Folder mounts are read-only indexed context with recursive traversal and extension filtering.
@@ -78,6 +83,22 @@ Migration is idempotent and safe to run repeatedly.
   - up to 4MB per file
 - With abstraction routing enabled for non-local providers, local files are summarized into an abstraction copy.
 - Non-text local files (image/doc/pdf/binary) may be analyzed via LM Studio during abstraction construction.
+
+## Local Evidence RAG
+- Local evidence retrieval is hybrid:
+  - BM25 lexical score
+  - semantic cosine score
+- Persistent vector storage:
+  - SQLite index per reference under `semantic_references/<ref>/rag/index.sqlite`
+  - `documents` + `embeddings` tables with schema version marker
+- Embedding runtime:
+  - primary: LM Studio `/v1/embeddings`
+  - fallback: local hash embedding (`hybrid:local-hash-embedding-v1`)
+- Settings/runtime controls:
+  - `rag_enabled`
+  - `rag_embedding_model` (default: `text-embedding-nomic-embed-text-v1.5`)
+  - `rag_top_k`
+  - status + manual reindex action in Settings
 
 ## IPC / Renderer Contract
 Removed from renderer preload usage:

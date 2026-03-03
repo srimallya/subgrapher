@@ -9,7 +9,11 @@ const { pathToFileURL } = require('url');
 const { handleChat, parseChatCommand, executeAgenticLoop, PROGRAMMATIC_TOOL_NAMES } = require('./runtime/agent_runtime');
 const { chatWithProvider, callProviderWithTools } = require('./runtime/provider_chat');
 const { scoreReferencesHybrid, buildReferenceSearchText } = require('./runtime/pathc_similarity');
-const { searchLocalEvidence } = require('./runtime/local_evidence_search');
+const {
+  searchLocalEvidence,
+  getLocalEvidenceRagStatus,
+  reindexLocalEvidenceReference,
+} = require('./runtime/local_evidence_search');
 const { getPathCScopedReferences, buildPathCHarnessPayload } = require('./runtime/pathc_harness');
 const { LuminoCrawler } = require('./runtime/lumino_crawler');
 const { HyperwebManager } = require('./runtime/hyperweb_manager');
@@ -107,6 +111,9 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'abstraction_strict_redaction',
   'image_analysis_model',
   'image_analysis_prompt',
+  'rag_enabled',
+  'rag_embedding_model',
+  'rag_top_k',
 ]);
 const CONTEXT_FILE_MAX_BYTES = 1024 * 1024;
 const FOLDER_MOUNT_MAX_FILES = 500;
@@ -158,6 +165,9 @@ const ABSTRACTION_BINARY_TEXT_MAX_CHARS = 6_000;
 const ABSTRACTION_MAX_MODEL_FILE_ANALYSES = 24;
 const IMAGE_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_ANALYSIS_TIMEOUT_MS = 45_000;
+const RAG_ENABLED_DEFAULT = true;
+const RAG_EMBEDDING_MODEL_DEFAULT = 'text-embedding-nomic-embed-text-v1.5';
+const RAG_TOP_K_DEFAULT = 8;
 const PATH_B_GLOBAL_TOP_K = 12;
 const PATH_B_LINK_VERIFY_THRESHOLD = 0.42;
 const TELEGRAM_SECRET_REF_PREFIX = 'telegram_bot_token';
@@ -1399,6 +1409,85 @@ function buildAbstractionStatusSnapshot(payload = {}) {
     counts,
     references: items,
   };
+}
+
+async function buildRagStatusSnapshot(payload = {}) {
+  const input = (payload && typeof payload === 'object') ? payload : {};
+  const srId = String(input.sr_id || input.srId || '').trim();
+  const settings = readSettings();
+  if (!settings.rag_enabled) {
+    return {
+      ok: true,
+      enabled: false,
+      message: 'RAG is disabled.',
+      model: String(settings.rag_embedding_model || RAG_EMBEDDING_MODEL_DEFAULT),
+      top_k: Number(settings.rag_top_k || RAG_TOP_K_DEFAULT),
+      count: 0,
+      counts: { ready: 0, missing: 0, empty: 0, error: 0 },
+      references: [],
+    };
+  }
+  const refs = getReferences();
+  const filtered = srId
+    ? refs.filter((ref) => String((ref && ref.id) || '').trim() === srId)
+    : refs;
+  const userDataPath = app.getPath('userData');
+  const items = [];
+  for (let i = 0; i < filtered.length; i += 1) {
+    const ref = filtered[i];
+    const refId = String((ref && ref.id) || '').trim();
+    if (!refId) continue;
+    const status = await getLocalEvidenceRagStatus(refId, { userDataPath });
+    const state = String((status && status.state) || 'error').trim() || 'error';
+    items.push({
+      sr_id: refId,
+      title: String((ref && ref.title) || '').trim(),
+      state,
+      model_id: String((status && status.model_id) || ''),
+      embedding_runtime: String((status && status.embedding_runtime) || ''),
+      doc_count: Number((status && status.doc_count) || 0),
+      embedding_count: Number((status && status.embedding_count) || 0),
+      updated_at: Number((status && status.updated_at) || 0),
+      message: String((status && status.message) || ''),
+    });
+  }
+  const counts = {
+    ready: items.filter((item) => item.state === 'ready').length,
+    missing: items.filter((item) => item.state === 'missing').length,
+    empty: items.filter((item) => item.state === 'empty').length,
+    error: items.filter((item) => item.state === 'error').length,
+  };
+  return {
+    ok: true,
+    enabled: true,
+    model: String(settings.rag_embedding_model || RAG_EMBEDDING_MODEL_DEFAULT),
+    top_k: Number(settings.rag_top_k || RAG_TOP_K_DEFAULT),
+    count: items.length,
+    counts,
+    references: items,
+  };
+}
+
+async function queueReferenceRagReindex(srId = '') {
+  const refId = String(srId || '').trim();
+  if (!refId) return { ok: false, message: 'srId is required.' };
+  const settings = readSettings();
+  if (!settings.rag_enabled) {
+    return { ok: false, message: 'RAG is disabled in settings.' };
+  }
+  const refs = getReferences();
+  const scopedRefs = getPathCScopedReferences(refId, refs);
+  const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
+  return reindexLocalEvidenceReference(refId, scopedRefs, {
+    userDataPath: app.getPath('userData'),
+    ragEnabled: !!settings.rag_enabled,
+    embeddingModel: String(settings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
+    embeddingConfig: {
+      baseUrl: String((lmCreds && lmCreds.base_url) || settings.lmstudio_base_url || LMSTUDIO_DEFAULT_BASE_URL).trim(),
+      apiKey: String((lmCreds && lmCreds.apiKey) || ''),
+      model: String(settings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
+    },
+  });
 }
 
 function decodeXmlEntities(value) {
@@ -3272,6 +3361,9 @@ function getDefaultSettings() {
     abstraction_strict_redaction: true,
     image_analysis_model: '',
     image_analysis_prompt: IMAGE_ANALYSIS_PROMPT_DEFAULT,
+    rag_enabled: RAG_ENABLED_DEFAULT,
+    rag_embedding_model: RAG_EMBEDDING_MODEL_DEFAULT,
+    rag_top_k: RAG_TOP_K_DEFAULT,
   };
 }
 
@@ -3307,6 +3399,8 @@ function readSettings() {
     const abstractionModel = String((parsed && parsed.abstraction_model) || defaults.abstraction_model).trim();
     const imageAnalysisModel = String((parsed && parsed.image_analysis_model) || defaults.image_analysis_model).trim();
     const imageAnalysisPrompt = String((parsed && parsed.image_analysis_prompt) || defaults.image_analysis_prompt).trim();
+    const ragEmbeddingModel = String((parsed && parsed.rag_embedding_model) || defaults.rag_embedding_model).trim();
+    const ragTopK = Number((parsed && parsed.rag_top_k) || defaults.rag_top_k);
     return {
       default_search_engine: ['google', 'bing', 'ddg'].includes(engine) ? engine : 'ddg',
       trustcommons_bootstrap_complete: !!(parsed && parsed.trustcommons_bootstrap_complete),
@@ -3377,6 +3471,13 @@ function readSettings() {
         : defaults.abstraction_strict_redaction,
       image_analysis_model: imageAnalysisModel,
       image_analysis_prompt: imageAnalysisPrompt || IMAGE_ANALYSIS_PROMPT_DEFAULT,
+      rag_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'rag_enabled')
+        ? !!parsed.rag_enabled
+        : defaults.rag_enabled,
+      rag_embedding_model: ragEmbeddingModel || defaults.rag_embedding_model,
+      rag_top_k: Number.isFinite(ragTopK)
+        ? Math.max(1, Math.min(24, Math.round(ragTopK)))
+        : defaults.rag_top_k,
     };
   } catch (_) {
     return defaults;
@@ -3499,6 +3600,16 @@ function writeSettings(next) {
       ? input.image_analysis_prompt
       : current.image_analysis_prompt
   ).trim();
+  const requestedRagEmbeddingModel = String(
+    Object.prototype.hasOwnProperty.call(input, 'rag_embedding_model')
+      ? input.rag_embedding_model
+      : current.rag_embedding_model
+  ).trim();
+  const requestedRagTopK = Number(
+    Object.prototype.hasOwnProperty.call(input, 'rag_top_k')
+      ? input.rag_top_k
+      : current.rag_top_k
+  );
   const settings = {
     default_search_engine: ['google', 'bing', 'ddg'].includes(requestedEngine)
       ? requestedEngine
@@ -3609,6 +3720,13 @@ function writeSettings(next) {
       : !!current.abstraction_strict_redaction,
     image_analysis_model: requestedImageAnalysisModel,
     image_analysis_prompt: requestedImageAnalysisPrompt || IMAGE_ANALYSIS_PROMPT_DEFAULT,
+    rag_enabled: Object.prototype.hasOwnProperty.call(input, 'rag_enabled')
+      ? !!input.rag_enabled
+      : !!current.rag_enabled,
+    rag_embedding_model: requestedRagEmbeddingModel || RAG_EMBEDDING_MODEL_DEFAULT,
+    rag_top_k: Number.isFinite(requestedRagTopK)
+      ? Math.max(1, Math.min(24, Math.round(requestedRagTopK)))
+      : RAG_TOP_K_DEFAULT,
   };
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
   return settings;
@@ -10856,7 +10974,7 @@ async function executeLuminoChat(input, options = {}) {
   const isResearchIntent = isPathBDelegation ? false : isResearchIntentRequest(message);
   const researchPolicy = {
     isDetailed,
-    requiresWebResearch: isDetailed && isResearchIntent,
+    requiresWebResearch: isResearchIntent,
     requireDeliverableBeforeFinish: isDetailed,
     localEvidenceAvailable: hasLocalEvidenceForResearch(activeRef),
     requiresCitations: isResearchIntent,
@@ -10922,6 +11040,109 @@ async function executeLuminoChat(input, options = {}) {
         ...((providerOptions && typeof providerOptions === 'object') ? providerOptions : {}),
       }),
       researchPolicy,
+      deterministicWebRecovery: async (recoveryInput = {}) => {
+        const targetQuery = String((recoveryInput && recoveryInput.query) || message || '').trim();
+        if (!targetQuery) return { ok: false, steps: [], message: 'Query is required.' };
+        const steps = [];
+        try {
+          const searchRes = await runOrchestratorWebSearch({
+            query: targetQuery,
+            max_results: 5,
+            timeout_ms: 12_000,
+          });
+          if (!searchRes || !searchRes.ok) {
+            steps.push({
+              name: 'web_search',
+              ok: false,
+              message: String((searchRes && searchRes.message) || 'Web search returned no results.'),
+              tool_output: {
+                ok: false,
+                query: targetQuery,
+                unavailable: false,
+                message: String((searchRes && searchRes.message) || 'Web search returned no results.'),
+              },
+            });
+            return { ok: false, steps };
+          }
+          const results = Array.isArray(searchRes.results) ? searchRes.results : [];
+          steps.push({
+            name: 'web_search',
+            ok: true,
+            message: `Deterministic web_search returned ${results.length} result(s).`,
+            tool_output: {
+              ok: true,
+              query: targetQuery,
+              provider: String(searchRes.provider || ''),
+              results,
+            },
+          });
+          const topUrl = String((((results[0] || {}).url) || '')).trim();
+          if (topUrl) {
+            try {
+              const pageRes = await fetchTextWithTimeout(topUrl, {}, 12_000);
+              if (pageRes && pageRes.ok) {
+                const text = String(pageRes.text || '')
+                  .replace(/<[^>]+>/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .slice(0, 4_000);
+                steps.push({
+                  name: 'fetch_webpage',
+                  ok: true,
+                  message: `Fetched top result ${summarizeUrlForStatus(topUrl)}.`,
+                  tool_output: {
+                    ok: true,
+                    url: topUrl,
+                    content: text,
+                  },
+                });
+              } else {
+                steps.push({
+                  name: 'fetch_webpage',
+                  ok: false,
+                  message: `Failed to fetch ${topUrl}.`,
+                  tool_output: {
+                    ok: false,
+                    url: topUrl,
+                    status: Number((pageRes && pageRes.status) || 0) || null,
+                  },
+                });
+              }
+            } catch (fetchErr) {
+              steps.push({
+                name: 'fetch_webpage',
+                ok: false,
+                message: `Failed to fetch ${topUrl}: ${String((fetchErr && fetchErr.message) || 'unknown error')}`,
+                tool_output: {
+                  ok: false,
+                  unavailable: true,
+                  url: topUrl,
+                  error: String((fetchErr && fetchErr.message) || 'unknown error'),
+                },
+              });
+            }
+          }
+          return {
+            ok: steps.some((step) => step.ok === true),
+            steps,
+          };
+        } catch (searchErr) {
+          return {
+            ok: false,
+            steps: [{
+              name: 'web_search',
+              ok: false,
+              message: `Web search is unavailable: ${String((searchErr && searchErr.message) || 'unknown error')}`,
+              tool_output: {
+                ok: false,
+                unavailable: true,
+                query: targetQuery,
+                error: String((searchErr && searchErr.message) || 'unknown error'),
+              },
+            }],
+          };
+        }
+      },
       executeTool: async (toolInput) => {
         const name = String((toolInput && toolInput.name) || '').trim();
         const args = (toolInput && toolInput.arguments && typeof toolInput.arguments === 'object')
@@ -11113,9 +11334,19 @@ async function executeLuminoChat(input, options = {}) {
           const includeKinds = Array.isArray(args.include_kinds)
             ? args.include_kinds.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
             : [];
-          const searchRes = searchLocalEvidence(query, getToolScopedRefs(), {
+          const activeSettings = readSettings();
+          const lmCreds = resolveProviderRuntimeCredentials('lmstudio', activeSettings);
+          const searchRes = await searchLocalEvidence(query, getToolScopedRefs(), {
             topK,
             includeKinds,
+            userDataPath: app.getPath('userData'),
+            ragEnabled: !!activeSettings.rag_enabled,
+            embeddingModel: String(activeSettings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
+            embeddingConfig: {
+              baseUrl: String((lmCreds && lmCreds.base_url) || activeSettings.lmstudio_base_url || LMSTUDIO_DEFAULT_BASE_URL).trim(),
+              apiKey: String((lmCreds && lmCreds.apiKey) || ''),
+              model: String(activeSettings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
+            },
           });
           const results = Array.isArray(searchRes && searchRes.results) ? searchRes.results : [];
           const citations = Array.isArray(searchRes && searchRes.citations) ? searchRes.citations : [];
@@ -11128,6 +11359,10 @@ async function executeLuminoChat(input, options = {}) {
               method: String((searchRes && searchRes.method) || ''),
               results,
               citations,
+              embedding_runtime: String((searchRes && searchRes.embedding_runtime) || ''),
+              embedding_model: String((searchRes && searchRes.embedding_model) || ''),
+              index_state: String((searchRes && searchRes.index_state) || ''),
+              fallback_used: !!(searchRes && searchRes.fallback_used),
             },
           };
         }
@@ -11769,7 +12004,7 @@ async function executeLuminoChat(input, options = {}) {
       finalResult.message = 'I could not create the requested deliverable artifact in this workspace. Please try again.';
     }
   }
-  if (!isDetailed && isSubstantive && !citationRequirementSatisfied) {
+  if (!isDetailed && isSubstantive && !citationRequirementSatisfied && !deliverableArtifact) {
     const missingPhase = String(policyDiagnostics.missing_phase || '').trim().toLowerCase();
     if (missingPhase === 'citation' || missingPhase === 'citation_format' || missingPhase === 'marker') {
       finalResult.message = 'Citation requirements were not met. Use search_local_evidence, add marker-backed evidence for quoted claims, and provide footnote citations with a Sources section.';
@@ -15116,6 +15351,42 @@ ipcMain.handle('browser:abstractionRebuild', async (_event, payload) => {
     ok: !!(backfill && backfill.ok),
     result: backfill || {},
     status: buildAbstractionStatusSnapshot({}),
+  };
+});
+
+ipcMain.handle('browser:ragStatus', async (_event, payload) => {
+  return buildRagStatusSnapshot(payload || {});
+});
+
+ipcMain.handle('browser:ragReindex', async (_event, payload) => {
+  const input = (payload && typeof payload === 'object') ? payload : {};
+  const srId = String(input.sr_id || input.srId || '').trim();
+  if (srId) {
+    const result = await queueReferenceRagReindex(srId);
+    return {
+      ok: !!(result && result.ok),
+      result: result || {},
+      status: await buildRagStatusSnapshot({ sr_id: srId }),
+    };
+  }
+  const refs = getReferences();
+  let rebuilt = 0;
+  const failures = [];
+  for (let i = 0; i < refs.length; i += 1) {
+    const refId = String(((refs[i] || {}).id) || '').trim();
+    if (!refId) continue;
+    const res = await queueReferenceRagReindex(refId);
+    if (res && res.ok) {
+      rebuilt += 1;
+    } else {
+      failures.push({ sr_id: refId, message: String((res && res.message) || 'RAG reindex failed.') });
+    }
+  }
+  return {
+    ok: failures.length === 0,
+    rebuilt,
+    failures,
+    status: await buildRagStatusSnapshot({}),
   };
 });
 
