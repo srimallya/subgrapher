@@ -18,6 +18,14 @@ const { getPathCScopedReferences, buildPathCHarnessPayload } = require('./runtim
 const { LuminoCrawler } = require('./runtime/lumino_crawler');
 const { HyperwebManager } = require('./runtime/hyperweb_manager');
 const { indexFolderAsContext } = require('./runtime/file_indexer');
+const {
+  ALLOWED_CONTEXT_EXTENSIONS,
+  isTextExtension,
+  detectMimeType,
+  summarizeText,
+  extractContextTextFromFile,
+  extractContextTextFromBuffer,
+} = require('./runtime/context_file_support');
 const { PythonSandboxManager, cleanupStaleSandboxes, spawnPythonInteractiveProcess } = require('./runtime/python_sandbox');
 const { installAllowedPackages } = require('./runtime/python_packages');
 const { createPythonRuntimeResolver } = require('./runtime/python_runtime');
@@ -115,7 +123,6 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'rag_embedding_model',
   'rag_top_k',
 ]);
-const CONTEXT_FILE_MAX_BYTES = 1024 * 1024;
 const FOLDER_MOUNT_MAX_FILES = 500;
 const FOLDER_MOUNT_MAX_FILE_BYTES = 4 * 1024 * 1024;
 const CHAT_REQUEST_TIMEOUT_MS = 60_000;
@@ -13090,6 +13097,18 @@ ipcMain.handle('browser:openExternal', async (_event, payload) => {
     return { ok: false, message: String((err && err.message) || 'Unable to open external link.') };
   }
 });
+ipcMain.handle('browser:openPath', async (_event, payload) => {
+  const target = path.resolve(String((payload && payload.file_path) || (payload && payload.path) || '').trim());
+  if (!target) return { ok: false, message: 'Path is required.' };
+  if (!fs.existsSync(target)) return { ok: false, message: 'Path does not exist.' };
+  try {
+    const errText = await shell.openPath(target);
+    if (errText) return { ok: false, message: errText };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to open file path.') };
+  }
+});
 
 ipcMain.handle('tabs:create', (_event, url) => createRuntimeBrowserTab(url, true));
 ipcMain.handle('tabs:switch', (_event, tabId) => switchRuntimeBrowserTab(tabId));
@@ -14148,8 +14167,8 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
     }
 
     const ext = path.extname(absolutePath).toLowerCase();
-    if (!['.txt', '.md'].includes(ext)) {
-      return { ok: false, message: 'Only .txt and .md files are supported.' };
+    if (!ALLOWED_CONTEXT_EXTENSIONS.has(ext)) {
+      return { ok: false, message: 'Unsupported file type. Use text/code, common office docs, PDFs, or common images.' };
     }
 
     if (!fs.existsSync(absolutePath)) {
@@ -14160,16 +14179,16 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
     if (!stat.isFile()) {
       return { ok: false, message: 'Selected path is not a file.' };
     }
-    if (stat.size > CONTEXT_FILE_MAX_BYTES) {
-      return { ok: false, message: 'Context file exceeds 1MB limit.' };
+    if (stat.size > FOLDER_MOUNT_MAX_FILE_BYTES) {
+      return { ok: false, message: 'Context file exceeds 4MB limit.' };
     }
 
     const refs = getReferences();
     const idx = findReferenceIndex(refs, srId);
     if (idx < 0) return { ok: false, message: 'Reference not found.' };
 
-    const raw = fs.readFileSync(absolutePath, 'utf8');
-    const hash = crypto.createHash('sha256').update(raw, 'utf8').digest('hex');
+    const rawBuffer = fs.readFileSync(absolutePath);
+    const hash = crypto.createHash('sha256').update(rawBuffer).digest('hex');
     refs[idx].context_files = Array.isArray(refs[idx].context_files) ? refs[idx].context_files : [];
     const already = refs[idx].context_files.find((file) => String((file && file.content_hash) || '') === hash);
     if (already) {
@@ -14181,20 +14200,29 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
     fs.mkdirSync(outDir, { recursive: true });
     const safeName = path.basename(absolutePath).replace(/[^a-zA-Z0-9._-]/g, '_');
     const outPath = path.join(outDir, `${fileId}_${safeName}`);
-    fs.writeFileSync(outPath, raw, 'utf8');
+    fs.copyFileSync(absolutePath, outPath);
 
-    const summary = raw.slice(0, 1200).split('\n').slice(0, 12).join(' ').trim();
+    const mimeType = detectMimeType(ext, isTextExtension(ext));
+    const extracted = extractContextTextFromBuffer(rawBuffer, {
+      filePath: absolutePath,
+      filename: path.basename(absolutePath),
+      ext,
+      mimeType,
+      maxChars: 8_000,
+    });
+    const summary = summarizeText(String((extracted && extracted.text) || ''), 560);
     const item = {
       id: fileId,
       source_type: 'external_context_file',
       original_name: path.basename(absolutePath),
       relative_path: path.basename(absolutePath),
       stored_path: outPath,
-      mime_type: ext === '.md' ? 'text/markdown' : 'text/plain',
+      mime_type: mimeType,
       size_bytes: stat.size,
       content_hash: hash,
       ingest_status: 'ready',
-      summary: summary.length > 360 ? `${summary.slice(0, 360)}...` : summary,
+      summary: summary || `${path.basename(absolutePath)} (${String(ext || '').replace(/^\./, '').toUpperCase() || 'FILE'})`,
+      extract_strategy: String((extracted && extracted.strategy) || ''),
       read_only: false,
       created_at: nowTs(),
       updated_at: nowTs(),
@@ -14396,6 +14424,7 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
       size_bytes: file.size_bytes,
       content_hash: file.content_hash,
       summary: file.summary,
+      extract_strategy: String(file.extract_strategy || ''),
       read_only: true,
       created_at: nowTs(),
       updated_at: nowTs(),
@@ -14466,6 +14495,7 @@ ipcMain.handle('browser:srReindexFolderMount', async (_event, payload) => {
       size_bytes: file.size_bytes,
       content_hash: file.content_hash,
       summary: file.summary,
+      extract_strategy: String(file.extract_strategy || ''),
       read_only: true,
       created_at: nowTs(),
       updated_at: nowTs(),
@@ -14555,8 +14585,45 @@ ipcMain.handle('browser:srGetContextFilePreview', (_event, payload) => {
   }
 
   try {
-    const raw = fs.readFileSync(targetPath, 'utf8');
-    return { ok: true, preview: raw.slice(0, 4000), file: item };
+    const title = String(item.original_name || item.relative_path || 'context file').trim() || 'context file';
+    const mimeType = String(item.mime_type || '').trim();
+    const summary = String(item.summary || '').trim();
+    const extracted = extractContextTextFromFile(targetPath, {
+      filePath: targetPath,
+      filename: title,
+      ext: path.extname(targetPath).toLowerCase(),
+      mimeType,
+      maxChars: 12_000,
+    });
+    const mode = String((extracted && extracted.mode) || '').trim().toLowerCase();
+    const strategy = String((extracted && extracted.strategy) || '').trim();
+    if (mode === 'text') {
+      return {
+        ok: true,
+        preview_mode: 'text',
+        preview: String((extracted && extracted.text) || '').slice(0, 12_000),
+        file: item,
+        title,
+        mime_type: mimeType,
+        summary,
+        extract_strategy: strategy,
+      };
+    }
+    const previewMode = mode === 'image' ? 'image' : 'binary';
+    const message = mode === 'image'
+      ? 'Image file detected. Showing metadata summary; use image analysis tools for detailed vision output.'
+      : 'Document/binary file detected. Showing extracted text fragments and index summary instead of raw bytes.';
+    return {
+      ok: true,
+      preview_mode: previewMode,
+      preview: String((extracted && extracted.text) || '').trim(),
+      file: item,
+      title,
+      mime_type: mimeType,
+      summary,
+      message,
+      extract_strategy: strategy,
+    };
   } catch (err) {
     return { ok: false, message: err.message || 'Unable to read context file.' };
   }

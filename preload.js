@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getCurrentUrl: () => ipcRenderer.invoke('browser:getCurrentUrl'),
     getPageContent: () => ipcRenderer.invoke('browser:getPageContent'),
     openExternal: (url) => ipcRenderer.invoke('browser:openExternal', { url }),
+    openPath: (filePath) => ipcRenderer.invoke('browser:openPath', { file_path: filePath }),
     markerSetMode: (enabled) => ipcRenderer.invoke('browser:markerSetMode', enabled),
     markerSetContext: (payload) => ipcRenderer.invoke('browser:markerSetContext', payload),
     markerClearActive: () => ipcRenderer.invoke('browser:markerClearActive'),

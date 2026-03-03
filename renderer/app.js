@@ -2700,12 +2700,119 @@ function isModalOpen(id) {
 
 function hasBlockingOverlay() {
   return (
-    isModalOpen('onboarding-overlay')
+    isModalOpen('context-preview-overlay')
+    || isModalOpen('onboarding-overlay')
     || isModalOpen('about-overlay')
     || isModalOpen('publish-snapshot-overlay')
     || isModalOpen('share-reference-overlay')
     || isModalOpen('provider-key-overlay')
   );
+}
+
+function closeContextPreviewModal(options = {}) {
+  const overlay = e('context-preview-overlay');
+  const title = e('context-preview-title');
+  const meta = e('context-preview-meta');
+  const body = e('context-preview-body');
+  const status = e('context-preview-status');
+  const openPathBtn = e('context-preview-open-path-btn');
+  if (overlay) overlay.classList.add('hidden');
+  if (title) title.textContent = 'Context Preview';
+  if (meta) meta.textContent = '';
+  if (body) body.textContent = '';
+  if (status) status.textContent = '';
+  if (openPathBtn) {
+    openPathBtn.dataset.filePath = '';
+    openPathBtn.disabled = true;
+  }
+  if (!options.skipSurfaceSync) {
+    void syncActiveSurface();
+  }
+}
+
+function buildContextPreviewMeta(preview = {}) {
+  const file = (preview && preview.file && typeof preview.file === 'object') ? preview.file : {};
+  const parts = [];
+  const relativePath = String(file.relative_path || '').trim();
+  const mimeType = String(preview.mime_type || file.mime_type || '').trim();
+  const sizeBytes = Number(file.size_bytes || 0);
+  if (relativePath) parts.push(relativePath);
+  if (mimeType) parts.push(mimeType);
+  if (Number.isFinite(sizeBytes) && sizeBytes > 0) {
+    parts.push(`${sizeBytes.toLocaleString()} bytes`);
+  }
+  return parts.join(' · ');
+}
+
+function buildContextPreviewBody(preview = {}) {
+  const mode = String(preview.preview_mode || 'text').trim().toLowerCase();
+  const summary = String(preview.summary || '').trim();
+  const content = String(preview.preview || '').replace(/\u0000/g, '').trim();
+  if (mode === 'binary') {
+    const rows = [];
+    const notice = String(preview.message || 'Binary format detected.').trim();
+    rows.push(notice || 'Binary format detected.');
+    if (summary) {
+      rows.push('');
+      rows.push(`Index summary: ${summary}`);
+    }
+    rows.push('');
+    if (content) {
+      rows.push('Extracted text fragments:');
+      rows.push(content);
+    } else {
+      rows.push('No extracted text fragments were available.');
+    }
+    return rows.join('\n');
+  }
+  if (content) return content;
+  if (summary) return summary;
+  return '(empty file)';
+}
+
+function openContextPreviewModal(preview = {}) {
+  const overlay = e('context-preview-overlay');
+  const title = e('context-preview-title');
+  const meta = e('context-preview-meta');
+  const body = e('context-preview-body');
+  const status = e('context-preview-status');
+  const openPathBtn = e('context-preview-open-path-btn');
+  if (!overlay || !title || !meta || !body || !status || !openPathBtn) return;
+
+  const file = (preview && preview.file && typeof preview.file === 'object') ? preview.file : {};
+  const titleText = String(
+    preview.title
+    || file.original_name
+    || file.relative_path
+    || 'Context Preview',
+  ).trim() || 'Context Preview';
+  const bodyText = buildContextPreviewBody(preview);
+  const mode = String(preview.preview_mode || 'text').trim().toLowerCase();
+  const message = String(preview.message || '').trim();
+  const pathValue = String(file.stored_path || '').trim();
+
+  title.textContent = titleText;
+  meta.textContent = buildContextPreviewMeta(preview);
+  body.textContent = bodyText;
+  status.textContent = message || (mode === 'binary'
+    ? 'Binary preview mode.'
+    : `Showing ${bodyText.length.toLocaleString()} character(s).`);
+  openPathBtn.dataset.filePath = pathValue;
+  openPathBtn.disabled = !pathValue;
+
+  overlay.classList.remove('hidden');
+  void syncActiveSurface();
+}
+
+async function previewContextFileById(fileId = '') {
+  const targetFileId = String(fileId || '').trim();
+  if (!targetFileId || !state.activeSrId) return;
+  const preview = await api.srGetContextFilePreview(state.activeSrId, targetFileId);
+  if (!preview || !preview.ok) {
+    window.alert((preview && preview.message) || 'Unable to preview file.');
+    return;
+  }
+  openContextPreviewModal(preview);
 }
 
 function isEditableKeyboardTarget(target) {
@@ -3536,13 +3643,7 @@ function renderFilesPanel() {
   body.querySelectorAll('button[data-files-preview]').forEach((button) => {
     button.addEventListener('click', async () => {
       const fileId = String(button.getAttribute('data-files-preview') || '').trim();
-      if (!fileId || !state.activeSrId) return;
-      const preview = await api.srGetContextFilePreview(state.activeSrId, fileId);
-      if (!preview || !preview.ok) {
-        window.alert((preview && preview.message) || 'Unable to preview file.');
-        return;
-      }
-      window.alert(preview.preview || '(empty file)');
+      await previewContextFileById(fileId);
     });
   });
 
@@ -3882,13 +3983,7 @@ function renderContextFiles() {
   holder.querySelectorAll('button[data-preview-context]').forEach((button) => {
     button.addEventListener('click', async () => {
       const fileId = String(button.getAttribute('data-preview-context') || '').trim();
-      if (!fileId) return;
-      const preview = await api.srGetContextFilePreview(state.activeSrId, fileId);
-      if (!preview || !preview.ok) {
-        window.alert((preview && preview.message) || 'Unable to preview file.');
-        return;
-      }
-      window.alert(preview.preview || '(empty file)');
+      await previewContextFileById(fileId);
     });
   });
 
@@ -7789,6 +7884,34 @@ function bindControls() {
     if (!PROVIDERS.includes(provider)) return;
     state.providerKeyModal.provider = provider;
   });
+  e('context-preview-close-btn')?.addEventListener('click', () => {
+    closeContextPreviewModal();
+  });
+  e('context-preview-overlay')?.addEventListener('click', (event) => {
+    if (event.target && event.target.id === 'context-preview-overlay') closeContextPreviewModal();
+  });
+  e('context-preview-open-path-btn')?.addEventListener('click', async () => {
+    const button = e('context-preview-open-path-btn');
+    const targetPath = String((button && button.dataset && button.dataset.filePath) || '').trim();
+    if (!targetPath || !api.openPath) return;
+    const res = await api.openPath(targetPath);
+    if (!res || !res.ok) {
+      showPassiveNotification((res && res.message) ? res.message : 'Unable to open file path.');
+      return;
+    }
+    showPassiveNotification('Opened in default app.', 1200);
+  });
+
+  if (!document.__contextPreviewEscBound) {
+    document.addEventListener('keydown', (event) => {
+      if (!event || event.defaultPrevented || event.key !== 'Escape') return;
+      if (!isModalOpen('context-preview-overlay')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeContextPreviewModal();
+    }, true);
+    document.__contextPreviewEscBound = true;
+  }
 
   e('shares-room-editor')?.addEventListener('input', (event) => {
     const room = state.privateActiveRoom;

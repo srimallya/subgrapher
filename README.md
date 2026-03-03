@@ -40,9 +40,9 @@ This implementation delivers:
   - Path B: orchestrator lane for reference resolution, web intake, and Path A delegation
 - Context ingestion:
   - mount folders as read-only indexed context (recursive with limits)
-  - indexed extensions include text/code plus document/binary formats (`.pdf`, Office/OpenDocument, `.msg`, `.eml`)
+  - indexed extensions include text/code, common docs (`.pdf`, Office/OpenDocument, `.msg`, `.eml`), and common images (`.png`, `.jpg/.jpeg`, `.gif`, `.webp`, `.bmp`, `.tif/.tiff`, `.heic/.heif`)
   - default folder mount limits: up to 500 files, up to 4MB per file
-  - import `.txt` / `.md` context files
+  - import local context files across the same supported extension set (text/code/docs/images)
   - web crawler commands: `/crawl <url>`, `/crawl status`, `/crawl stop`
 - Web research reliability:
   - shared web search path is used across Path A, Path B, and Telegram orchestration

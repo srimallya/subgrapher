@@ -2,6 +2,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { embedTexts, hashEmbedText, HASH_FALLBACK_MODEL, DEFAULT_EMBEDDING_MODEL } = require('./embedding_runtime');
 const { ensureReferenceRagIndex, readReferenceRagStatus } = require('./rag_index');
+const { extractContextTextFromFile } = require('./context_file_support');
 
 const VECTOR_DIM = 256;
 const BM25_K1 = 1.2;
@@ -285,7 +286,13 @@ function readContextFileContent(file = {}) {
   if (!storedPath) return '';
   try {
     if (!fs.existsSync(storedPath)) return '';
-    const raw = fs.readFileSync(storedPath, 'utf8');
+    const extracted = extractContextTextFromFile(storedPath, {
+      filePath: storedPath,
+      filename: String((file && file.original_name) || (file && file.relative_path) || '').trim(),
+      mimeType: String((file && file.mime_type) || '').trim(),
+      maxChars: MAX_CONTEXT_FILE_READ_CHARS,
+    });
+    const raw = String((extracted && extracted.text) || '').trim();
     if (!raw) return '';
     return raw.slice(0, MAX_CONTEXT_FILE_READ_CHARS);
   } catch (_) {

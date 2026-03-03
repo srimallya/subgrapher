@@ -2787,6 +2787,54 @@ textarea {
   margin-top: 10px;
 }
 
+.context-preview-card {
+  width: min(980px, 96vw);
+  max-height: 94vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.context-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.context-preview-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.context-preview-close {
+  min-width: 34px;
+  padding: 5px 10px;
+  line-height: 1;
+}
+
+.context-preview-body {
+  margin: 8px 0 0 0;
+  padding: 12px;
+  min-height: 220px;
+  max-height: 60vh;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(120, 146, 182, 0.35);
+  background: rgba(7, 14, 23, 0.8);
+  color: #d9e7f5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#context-preview-open-path-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 @media (max-width: 1320px) {
   :root {
     --side-panel-width: 330px;

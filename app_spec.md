@@ -75,12 +75,15 @@ Migration is idempotent and safe to run repeatedly.
 
 ## Local Context Ingestion + Abstraction
 - Folder mounts are read-only indexed context with recursive traversal and extension filtering.
-- Indexed types include text/code plus binary document formats:
+- Indexed types include text/code, common images, and binary document formats:
+  - `.png`, `.jpg/.jpeg`, `.gif`, `.webp`, `.bmp`, `.tif/.tiff`, `.heic/.heif`
   - `.pdf`, `.doc/.docx`, `.xls/.xlsx`, `.ppt/.pptx`, `.rtf`
   - `.odt/.ods/.odp`, `.msg`, `.eml`
 - Default ingest caps:
   - up to 500 files
   - up to 4MB per file
+- Manual local context import uses the same extension allowlist as folder mounts.
+- Preview no longer dumps raw bytes for binary files; docs/images show extracted text/metadata summaries with open-in-default-app fallback.
 - With abstraction routing enabled for non-local providers, local files are summarized into an abstraction copy.
 - Non-text local files (image/doc/pdf/binary) may be analyzed via LM Studio during abstraction construction.
 

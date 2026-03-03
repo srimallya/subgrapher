@@ -632,6 +632,23 @@
     </div>
   </section>
 
+  <div id="context-preview-overlay" class="modal-overlay hidden">
+    <div class="modal-card context-preview-card">
+      <div class="context-preview-header">
+        <h3 id="context-preview-title">Context Preview</h3>
+        <button id="context-preview-close-btn" class="context-preview-close" aria-label="Close preview">X</button>
+      </div>
+      <div id="context-preview-meta" class="muted small"></div>
+      <pre id="context-preview-body" class="context-preview-body"></pre>
+      <div class="modal-footer">
+        <div id="context-preview-status" class="muted small"></div>
+        <div class="settings-inline-actions">
+          <button id="context-preview-open-path-btn" disabled>Open in Default App</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="onboarding-overlay" class="modal-overlay hidden">
     <div class="modal-card onboarding-card">
       <div class="onboarding-header">
