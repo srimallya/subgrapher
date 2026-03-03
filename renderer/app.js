@@ -156,6 +156,9 @@ const UI_ZOOM_STEP = 0.1;
 const UI_MIN_ZOOM = 0.5;
 const UI_MAX_ZOOM = 3.0;
 const IMAGE_ANALYSIS_PROMPT_DEFAULT = 'Describe the image in details and write the context.';
+const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
+const TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC = 8;
+const HISTORY_DEFAULT_MAX_ENTRIES = 5000;
 let passiveNoticeTimer = null;
 
 function e(id) {
@@ -5946,6 +5949,18 @@ function normalizeSettingsDraft(raw = {}) {
   const telegramAllowedChatIds = parseCommaSeparatedList(src.telegram_allowed_chat_ids);
   const telegramAllowedUsernames = parseCommaSeparatedList(src.telegram_allowed_usernames)
     .map((item) => item.toLowerCase().replace(/^@/, ''));
+  const trustSyncPortRaw = Number(src.trustcommons_sync_port);
+  const trustSyncIntervalRaw = Number(src.trustcommons_sync_interval_sec);
+  const historyMaxRaw = Number(src.history_max_entries);
+  const trustcommonsSyncPort = Number.isFinite(trustSyncPortRaw)
+    ? Math.round(trustSyncPortRaw)
+    : TRUSTCOMMONS_SYNC_DEFAULT_PORT;
+  const trustcommonsSyncIntervalSec = Number.isFinite(trustSyncIntervalRaw)
+    ? Math.round(trustSyncIntervalRaw)
+    : TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC;
+  const historyMaxEntries = Number.isFinite(historyMaxRaw)
+    ? Math.max(500, Math.min(10000, Math.round(historyMaxRaw)))
+    : HISTORY_DEFAULT_MAX_ENTRIES;
   return {
     default_search_engine: String(src.default_search_engine || 'ddg').trim().toLowerCase(),
     lumino_last_provider: String(src.lumino_last_provider || 'openai').trim().toLowerCase(),
@@ -5967,9 +5982,9 @@ function normalizeSettingsDraft(raw = {}) {
     hyperweb_enabled: !!src.hyperweb_enabled,
     hyperweb_relay_url: String(src.hyperweb_relay_url || '').trim(),
     trustcommons_sync_enabled: !!src.trustcommons_sync_enabled,
-    trustcommons_sync_port: Number(src.trustcommons_sync_port || 0),
+    trustcommons_sync_port: trustcommonsSyncPort,
     trustcommons_peer_sync_url: String(src.trustcommons_peer_sync_url || '').trim(),
-    trustcommons_sync_interval_sec: Number(src.trustcommons_sync_interval_sec || 0),
+    trustcommons_sync_interval_sec: trustcommonsSyncIntervalSec,
     crawler_mode: String(src.crawler_mode || 'broad').trim().toLowerCase(),
     crawler_markdown_first: !!src.crawler_markdown_first,
     crawler_robots_default: String(src.crawler_robots_default || 'respect').trim().toLowerCase(),
@@ -5979,7 +5994,7 @@ function normalizeSettingsDraft(raw = {}) {
     trustcommons_download_url: String(src.trustcommons_download_url || '').trim(),
     trustcommons_app_bundle_id: String(src.trustcommons_app_bundle_id || '').trim(),
     history_enabled: Object.prototype.hasOwnProperty.call(src, 'history_enabled') ? !!src.history_enabled : true,
-    history_max_entries: Number(src.history_max_entries || 5000),
+    history_max_entries: historyMaxEntries,
   };
 }
 
