@@ -14,7 +14,7 @@ const BUILD_ROOT = path.join(REPO_ROOT, 'build', 'bundled-python');
 const CACHE_DIR = path.join(BUILD_ROOT, 'cache');
 const OUTPUT_DIR = path.join(BUILD_ROOT, 'current');
 
-const IMPORT_SMOKE_PACKAGES = ['pygame', 'numpy', 'matplotlib', 'pandas', 'scipy', 'seaborn', 'plotly'];
+const IMPORT_SMOKE_PACKAGES = ['pygame', 'numpy', 'matplotlib', 'pandas', 'scipy', 'seaborn', 'plotly', 'requests'];
 
 function fail(message) {
   throw new Error(String(message || 'Unknown error'));

@@ -2256,11 +2256,13 @@ function renderWorkspaceTabs() {
     ${filesTabs.map((tab) => `
       <div class="workspace-tab ${(state.activeSurface.kind === 'files' && String(state.activeSurface.filesTabId || '') === String(tab.id || '')) ? 'active' : ''}" data-kind="files" data-tab-id="${escapeHtml(tab.id)}">
         <span class="workspace-tab-label-wrap"><span class="workspace-tab-label" title="${escapeHtml(tab.title || 'Files')}">${escapeHtml(tab.title || 'Files')}</span></span>
+        <button data-close-files="${escapeHtml(tab.id)}" title="Close files tab">×</button>
       </div>
     `).join('')}
     ${skillsTabs.map((tab) => `
       <div class="workspace-tab ${(state.activeSurface.kind === 'skills' && String(state.activeSurface.skillsTabId || '') === String(tab.id || '')) ? 'active' : ''}" data-kind="skills" data-tab-id="${escapeHtml(tab.id)}">
         <span class="workspace-tab-label-wrap"><span class="workspace-tab-label" title="${escapeHtml(tab.title || 'Skills')}">${escapeHtml(tab.title || 'Skills')}</span></span>
+        <button data-close-skills="${escapeHtml(tab.id)}" title="Close skills tab">×</button>
       </div>
     `).join('')}
     ${artifacts.map((artifact) => `
@@ -2432,7 +2434,8 @@ function renderWorkspaceTabs() {
   });
 
   holder.querySelectorAll('.workspace-tab[data-kind="files"]').forEach((node) => {
-    node.addEventListener('click', async () => {
+    node.addEventListener('click', async (event) => {
+      if (event.target && event.target.matches('button[data-close-files]')) return;
       const tabId = String(node.getAttribute('data-tab-id') || '').trim();
       if (!tabId || !state.activeSrId) return;
       if (replayMode) {
@@ -2454,8 +2457,32 @@ function renderWorkspaceTabs() {
     });
   });
 
+  holder.querySelectorAll('button[data-close-files]').forEach((btn) => {
+    btn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (replayMode) {
+        showPassiveNotification('Memory replay is read-only.');
+        return;
+      }
+      const tabId = String(btn.getAttribute('data-close-files') || '').trim();
+      if (!tabId || !state.activeSrId) return;
+      const wasActive = state.activeSurface.kind === 'files'
+        && String(state.activeSurface.filesTabId || '') === tabId;
+      const res = await api.srRemoveTab(state.activeSrId, tabId);
+      if (!res || !res.ok) return;
+      state.references = res.references || state.references;
+      if (wasActive) {
+        state.activeSurface = makeActiveSurface('web');
+        rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      }
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+    });
+  });
+
   holder.querySelectorAll('.workspace-tab[data-kind="skills"]').forEach((node) => {
-    node.addEventListener('click', async () => {
+    node.addEventListener('click', async (event) => {
+      if (event.target && event.target.matches('button[data-close-skills]')) return;
       const tabId = String(node.getAttribute('data-tab-id') || '').trim();
       if (!tabId || !state.activeSrId) return;
       if (replayMode) {
@@ -2472,6 +2499,29 @@ function renderWorkspaceTabs() {
       }
       state.activeSurface = makeActiveSurface('skills', { skillsTabId: tabId });
       rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+    });
+  });
+
+  holder.querySelectorAll('button[data-close-skills]').forEach((btn) => {
+    btn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (replayMode) {
+        showPassiveNotification('Memory replay is read-only.');
+        return;
+      }
+      const tabId = String(btn.getAttribute('data-close-skills') || '').trim();
+      if (!tabId || !state.activeSrId) return;
+      const wasActive = state.activeSurface.kind === 'skills'
+        && String(state.activeSurface.skillsTabId || '') === tabId;
+      const res = await api.srRemoveTab(state.activeSrId, tabId);
+      if (!res || !res.ok) return;
+      state.references = res.references || state.references;
+      if (wasActive) {
+        state.activeSurface = makeActiveSurface('web');
+        rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      }
       renderWorkspaceTabs();
       await syncActiveSurface();
     });
@@ -3451,6 +3501,9 @@ function renderFilesPanel() {
       renderContextFiles();
       renderFilesPanel();
       renderDiffPanel();
+      const indexed = Number((res && res.mount && res.mount.file_count) || 0);
+      const skipped = Number((res && res.mount && res.mount.skipped_count) || 0);
+      showPassiveNotification(`Reindex complete: ${indexed} indexed, ${skipped} skipped.`);
       await syncActiveSurface();
     });
   });
@@ -5927,6 +5980,15 @@ function renderSettingsAbstractionStatus() {
   const node = e('settings-abstraction-status');
   if (!node) return;
   const status = state.settingsAbstractionStatus || null;
+  const draft = normalizeSettingsDraft(state.settingsDraft || {});
+  const draftEnabled = !!draft.abstraction_enabled;
+  const persistedEnabled = status && status.ok !== false ? !!status.enabled : null;
+  if (state.settingsDirty && persistedEnabled != null && draftEnabled !== persistedEnabled) {
+    node.textContent = draftEnabled
+      ? 'Abstraction will be enabled after save.'
+      : 'Abstraction will be disabled after save.';
+    return;
+  }
   if (!status || status.ok === false) {
     node.textContent = status && status.message ? status.message : 'Unavailable';
     return;
@@ -6005,8 +6067,8 @@ function validateSettingsDraft(draft = {}) {
   if (!PROVIDERS.includes(d.lumino_last_provider)) errors.lumino_last_provider = 'Unsupported provider.';
   if (!/^https?:\/\//i.test(d.lmstudio_base_url || '')) errors.lmstudio_base_url = 'LM Studio URL must start with http:// or https://';
   if (!['ddg', 'serpapi'].includes(d.orchestrator_web_provider)) errors.orchestrator_web_provider = 'Invalid web provider.';
-  if (d.abstraction_enabled && !String(d.abstraction_model || '').trim()) {
-    errors.abstraction_model = 'Abstraction model is required when abstraction is enabled.';
+  if (d.abstraction_enabled && !String(d.abstraction_model || d.image_analysis_model || '').trim()) {
+    errors.abstraction_model = 'Abstraction model is required when abstraction is enabled (or set Image Analysis Model as fallback).';
   }
   if (!Number.isFinite(d.telegram_poll_interval_sec) || d.telegram_poll_interval_sec < 1 || d.telegram_poll_interval_sec > 30) {
     errors.telegram_poll_interval_sec = 'Polling interval must be 1..30 sec.';

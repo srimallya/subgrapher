@@ -40,8 +40,14 @@ This implementation delivers:
   - Path B: orchestrator lane for reference resolution, web intake, and Path A delegation
 - Context ingestion:
   - mount folders as read-only indexed context (recursive with limits)
+  - indexed extensions include text/code plus document/binary formats (`.pdf`, Office/OpenDocument, `.msg`, `.eml`)
+  - default folder mount limits: up to 500 files, up to 4MB per file
   - import `.txt` / `.md` context files
   - web crawler commands: `/crawl <url>`, `/crawl status`, `/crawl stop`
+- Web research reliability:
+  - shared web search path is used across Path A, Path B, and Telegram orchestration
+  - fallback chain: DDG API -> DDG HTML -> Bing HTML parser
+  - empty search result sets are surfaced as valid no-result responses (not transport failures)
 - Skills runtime:
   - save/run local or global skills
   - skills are reference-linkable and manageable from the `skills` tab
@@ -56,6 +62,13 @@ This implementation delivers:
   - per-provider key profiles (multiple keys + primary selection)
   - model fetch per provider/key
   - LM Studio base URL, default model, optional token
+  - unified image analysis tool path:
+    - tries active provider native image understanding first (when available for selected model)
+    - falls back automatically to LM Studio image analysis on native failure/unavailability
+    - supports `image_url`, `local_path`, and mounted-file `context_file_id`
+- Local-file abstraction routing:
+  - when abstraction is enabled and a non-LM Studio provider is selected, local mounted files are abstracted before remote use
+  - image/doc/pdf/binary context files can be analyzed through LM Studio during abstraction copy generation
 - Key/secret storage:
   - provider keys and secure refs are implemented via OS keychain on macOS
 - Telegram + orchestrator controls:
@@ -73,6 +86,8 @@ This implementation delivers:
 - Python runtime policy:
   - packaged builds use immutable runtime policy (`pip install` disabled at runtime)
   - if bundled Python is missing in Windows packaging, app falls back to system Python for tool execution where available
+  - `requests` is available via bundled dependency and sandbox fallback shim
+  - pygame compatibility is gated: pygame runtime hooks are enabled only when user code imports/uses `pygame`
 
 ## Run
 

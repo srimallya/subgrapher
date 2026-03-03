@@ -109,6 +109,8 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'image_analysis_prompt',
 ]);
 const CONTEXT_FILE_MAX_BYTES = 1024 * 1024;
+const FOLDER_MOUNT_MAX_FILES = 500;
+const FOLDER_MOUNT_MAX_FILE_BYTES = 4 * 1024 * 1024;
 const CHAT_REQUEST_TIMEOUT_MS = 60_000;
 const DECISION_TRACE_MAX_STEPS = 240;
 const GRAPH_MAX_NODES = 600;
@@ -150,6 +152,10 @@ const ABSTRACTION_MAX_FILES = 240;
 const ABSTRACTION_MAX_FILE_CHARS = 12_000;
 const ABSTRACTION_MAX_TOTAL_CHARS = 140_000;
 const ABSTRACTION_SUMMARY_TIMEOUT_MS = 70_000;
+const ABSTRACTION_PER_FILE_TIMEOUT_MS = 25_000;
+const ABSTRACTION_BINARY_TEXT_PROBE_BYTES = 220 * 1024;
+const ABSTRACTION_BINARY_TEXT_MAX_CHARS = 6_000;
+const ABSTRACTION_MAX_MODEL_FILE_ANALYSES = 24;
 const IMAGE_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_ANALYSIS_TIMEOUT_MS = 45_000;
 const PATH_B_GLOBAL_TOP_K = 12;
@@ -825,6 +831,113 @@ function readTextFileForAbstraction(filePath = '', maxChars = ABSTRACTION_MAX_FI
   }
 }
 
+function resolveAbstractionPrimaryModel(settings = readSettings(), options = {}) {
+  const input = (options && typeof options === 'object') ? options : {};
+  const explicit = String((input && (input.model || input.abstraction_model)) || '').trim();
+  if (explicit) return explicit;
+  const configured = String((settings && settings.abstraction_model) || '').trim();
+  if (configured) return configured;
+  return String((settings && settings.image_analysis_model) || '').trim();
+}
+
+function isImageMimeTypeForAbstraction(mimeType = '') {
+  return String(mimeType || '').trim().toLowerCase().startsWith('image/');
+}
+
+function isTextMimeTypeForAbstraction(mimeType = '') {
+  const mime = String(mimeType || '').trim().toLowerCase();
+  if (!mime) return false;
+  if (mime.startsWith('text/')) return true;
+  return [
+    'application/json',
+    'application/xml',
+    'application/yaml',
+    'application/toml',
+    'application/javascript',
+    'application/x-javascript',
+  ].some((prefix) => mime.startsWith(prefix));
+}
+
+function readBinaryTextForAbstraction(filePath = '', maxChars = ABSTRACTION_BINARY_TEXT_MAX_CHARS) {
+  const target = String(filePath || '').trim();
+  if (!target || !fs.existsSync(target)) return '';
+  try {
+    const raw = fs.readFileSync(target);
+    const sample = Buffer.isBuffer(raw)
+      ? raw.subarray(0, Math.min(raw.length, ABSTRACTION_BINARY_TEXT_PROBE_BYTES))
+      : Buffer.alloc(0);
+    if (!sample.length) return '';
+    const text = sample.toString('latin1');
+    const matches = text.match(/[A-Za-z0-9][A-Za-z0-9_.,:/@%$()\- ]{5,}/g) || [];
+    const seen = new Set();
+    const rows = [];
+    for (const item of matches) {
+      const clean = String(item || '').replace(/\s+/g, ' ').trim();
+      if (clean.length < 6) continue;
+      const key = clean.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(clean);
+      if (rows.length >= 100) break;
+    }
+    return rows.join('\n').slice(0, Math.max(0, Math.round(maxChars)));
+  } catch (_) {
+    return '';
+  }
+}
+
+async function summarizeNonTextFileWithLmStudioForAbstraction(file = {}, settings = readSettings(), options = {}) {
+  const model = resolveAbstractionPrimaryModel(settings, options);
+  if (!model) return { ok: false, message: 'Abstraction model is not configured.' };
+  const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
+  if (!lmCreds || !lmCreds.ok) {
+    return { ok: false, message: String((lmCreds && lmCreds.message) || 'LM Studio runtime credentials are unavailable.') };
+  }
+
+  const storedPath = String((file && file.stored_path) || '').trim();
+  const fileName = String((file && file.original_name) || (file && file.relative_path) || path.basename(storedPath) || 'file').trim();
+  const mime = String((file && file.mime_type) || '').trim().toLowerCase();
+  const fileSummary = String((file && file.summary) || '').replace(/\s+/g, ' ').trim().slice(0, 420);
+  const rawText = readBinaryTextForAbstraction(storedPath, ABSTRACTION_BINARY_TEXT_MAX_CHARS);
+  const sizeBytes = Number((file && file.size_bytes) || 0);
+
+  const systemPrompt = [
+    'You summarize non-text local files for a privacy-preserving abstraction copy.',
+    'Use the provided metadata and extracted text fragments only.',
+    'Do not invent facts not supported by the input.',
+    'Return concise markdown bullets with key technical details.',
+  ].join('\n');
+  const userPrompt = [
+    `File name: ${fileName || 'file'}`,
+    `MIME: ${mime || 'unknown'}`,
+    `Size bytes: ${sizeBytes}`,
+    fileSummary ? `Indexer summary: ${fileSummary}` : 'Indexer summary: (none)',
+    '',
+    'Extracted text-like fragments from file bytes:',
+    rawText || '(none)',
+    '',
+    'Write a precise abstraction of this file content and likely purpose.',
+  ].join('\n');
+
+  try {
+    const modelRes = await chatWithProvider({
+      provider: 'lmstudio',
+      model,
+      apiKey: String((lmCreds && lmCreds.apiKey) || ''),
+      baseUrl: String((lmCreds && lmCreds.base_url) || ''),
+      systemPrompt,
+      userPrompt,
+    }, {
+      timeoutMs: Math.min(ABSTRACTION_PER_FILE_TIMEOUT_MS, ABSTRACTION_SUMMARY_TIMEOUT_MS),
+    });
+    const text = String((modelRes && modelRes.text) || '').trim();
+    if (!text) return { ok: false, message: 'LM Studio returned empty non-text abstraction.' };
+    return { ok: true, text };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'LM Studio non-text abstraction failed.') };
+  }
+}
+
 function redactSensitiveText(input = '') {
   let out = String(input || '');
   const replacements = [
@@ -861,30 +974,88 @@ function buildAbstractionSourceHash(ref = {}, files = [], model = '') {
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
-function buildAbstractionPromptBundle(ref = {}, files = []) {
+async function buildAbstractionPromptBundle(ref = {}, files = [], settings = readSettings(), options = {}) {
   const list = Array.isArray(files) ? files : [];
   const snippets = [];
+  const abstractionModel = resolveAbstractionPrimaryModel(settings, options);
+  const imageModel = String((options && options.imageModel) || (settings && settings.image_analysis_model) || '').trim();
   let totalChars = 0;
+  let modelAnalyses = 0;
+  const analysisStats = {
+    total_files: list.length,
+    text_files: 0,
+    non_text_files: 0,
+    image_files: 0,
+    lmstudio_analyses: 0,
+    lmstudio_failures: 0,
+    lmstudio_skipped_budget: 0,
+  };
   for (let i = 0; i < list.length; i += 1) {
     if (snippets.length >= ABSTRACTION_MAX_FILES || totalChars >= ABSTRACTION_MAX_TOTAL_CHARS) break;
     const file = list[i] || {};
     const storedPath = String(file.stored_path || '').trim();
-    const raw = readTextFileForAbstraction(storedPath, ABSTRACTION_MAX_FILE_CHARS);
-    if (!raw) continue;
-    const remaining = Math.max(0, ABSTRACTION_MAX_TOTAL_CHARS - totalChars);
-    const excerpt = raw.slice(0, remaining);
-    if (!excerpt) continue;
-    totalChars += excerpt.length;
     const name = String(file.original_name || file.relative_path || path.basename(storedPath) || file.id || 'file').trim();
     const summary = String(file.summary || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+    const mimeType = String((file && file.mime_type) || '').trim().toLowerCase();
+    const isImage = isImageMimeTypeForAbstraction(mimeType);
+    const isTextLike = isTextMimeTypeForAbstraction(mimeType) || !mimeType;
+    let excerpt = '';
+    if (isTextLike) {
+      excerpt = readTextFileForAbstraction(storedPath, ABSTRACTION_MAX_FILE_CHARS);
+      if (excerpt) analysisStats.text_files += 1;
+    }
+
+    if (!excerpt) {
+      analysisStats.non_text_files += 1;
+      if (isImage) analysisStats.image_files += 1;
+      if (modelAnalyses >= ABSTRACTION_MAX_MODEL_FILE_ANALYSES || !abstractionModel) {
+        analysisStats.lmstudio_skipped_budget += 1;
+        excerpt = summary || `Binary file (${mimeType || 'unknown mime'})`;
+      } else if (isImage) {
+        modelAnalyses += 1;
+        const imagePrompt = `Analyze this local context image (${name || 'image'}) for abstraction. Describe visible text, entities, layout, and actionable details.`;
+        const analysisRes = await analyzeImageWithLmStudio({
+          local_path: storedPath,
+          prompt: imagePrompt,
+          model_override: imageModel || abstractionModel,
+        }, settings);
+        if (analysisRes && analysisRes.ok && String(analysisRes.description || '').trim()) {
+          analysisStats.lmstudio_analyses += 1;
+          excerpt = String(analysisRes.description || '').trim();
+        } else {
+          analysisStats.lmstudio_failures += 1;
+          excerpt = summary || `Image context file (${mimeType || 'image'})`;
+        }
+      } else {
+        modelAnalyses += 1;
+        const binaryRes = await summarizeNonTextFileWithLmStudioForAbstraction(file, settings, {
+          model: abstractionModel,
+        });
+        if (binaryRes && binaryRes.ok && String(binaryRes.text || '').trim()) {
+          analysisStats.lmstudio_analyses += 1;
+          excerpt = String(binaryRes.text || '').trim();
+        } else {
+          analysisStats.lmstudio_failures += 1;
+          excerpt = summary || `Document/binary context file (${mimeType || 'unknown'})`;
+        }
+      }
+    }
+
+    if (!excerpt) continue;
+    const remaining = Math.max(0, ABSTRACTION_MAX_TOTAL_CHARS - totalChars);
+    const boundedExcerpt = excerpt.slice(0, remaining);
+    if (!boundedExcerpt) continue;
+    totalChars += boundedExcerpt.length;
     snippets.push({
       name: name || 'file',
       summary,
-      excerpt,
+      excerpt: boundedExcerpt,
+      mime_type: mimeType,
     });
   }
   const context = snippets.map((item, idx) => ([
     `File ${idx + 1}: ${item.name}`,
+    item.mime_type ? `MIME: ${item.mime_type}` : 'MIME: (unknown)',
     item.summary ? `Summary: ${item.summary}` : 'Summary: (none)',
     'Content excerpt:',
     item.excerpt,
@@ -899,13 +1070,15 @@ function buildAbstractionPromptBundle(ref = {}, files = []) {
   const userPrompt = [
     `Reference: ${String((ref && ref.title) || 'Untitled Reference')}`,
     `Intent: ${String((ref && ref.intent) || '').slice(0, 1200)}`,
+    `LM Studio per-file analyses: ${analysisStats.lmstudio_analyses}`,
+    `LM Studio per-file analysis failures: ${analysisStats.lmstudio_failures}`,
     '',
     'Create an abstraction copy covering key modules, data flow, constraints, and notable implementation details.',
     'Keep enough detail so another model can reason accurately without needing the raw local files.',
     '',
     context || '(no readable local file content)',
   ].join('\n');
-  return { systemPrompt, userPrompt, snippets };
+  return { systemPrompt, userPrompt, snippets, analysis_stats: analysisStats };
 }
 
 function buildFallbackAbstractionMarkdown(ref = {}, files = []) {
@@ -989,7 +1162,7 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
     return { ok: true, changed: false, skipped: true, message: 'Abstraction is disabled.' };
   }
 
-  const model = String((settings && settings.abstraction_model) || '').trim();
+  const model = resolveAbstractionPrimaryModel(settings);
   const strictRedaction = settings && Object.prototype.hasOwnProperty.call(settings, 'abstraction_strict_redaction')
     ? !!settings.abstraction_strict_redaction
     : true;
@@ -999,7 +1172,8 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
 
   const localFiles = (Array.isArray(target.context_files) ? target.context_files : [])
     .filter((file) => isLocalContextFileForAbstraction(file));
-  const sourceHash = buildAbstractionSourceHash(target, localFiles, model);
+  const imageAnalysisModel = String((settings && settings.image_analysis_model) || '').trim();
+  const sourceHash = buildAbstractionSourceHash(target, localFiles, `${model}::image=${imageAnalysisModel}`);
   const prevCache = normalizeAbstractionCache(target.abstraction_cache || {}, refId);
 
   const setCache = (patch = {}) => {
@@ -1047,8 +1221,12 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
   fs.mkdirSync(outDir, { recursive: true });
 
   let modelText = '';
+  let promptBundle = { systemPrompt: '', userPrompt: '', snippets: [], analysis_stats: null };
   if (localFiles.length > 0) {
-    const promptBundle = buildAbstractionPromptBundle(target, localFiles);
+    promptBundle = await buildAbstractionPromptBundle(target, localFiles, settings, {
+      model,
+      imageModel: imageAnalysisModel,
+    });
     const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
     if (lmCreds && lmCreds.ok) {
       try {
@@ -1071,12 +1249,16 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
 
   const fallback = buildFallbackAbstractionMarkdown(target, localFiles);
   const abstractionBody = (strictRedaction ? redactSensitiveText(modelText || fallback) : String(modelText || fallback)).trim() || fallback;
+  const lmStudioAnalysisCount = Number((((promptBundle || {}).analysis_stats || {}).lmstudio_analyses) || 0);
+  const lmStudioFailureCount = Number((((promptBundle || {}).analysis_stats || {}).lmstudio_failures) || 0);
   const abstractionContent = [
     '# Abstraction Copy',
     '',
     `Generated: ${new Date().toISOString()}`,
     `Reference: ${String(target.title || refId)}`,
     `Local files considered: ${localFiles.length}`,
+    `LM Studio file analyses: ${lmStudioAnalysisCount}`,
+    `LM Studio analysis failures: ${lmStudioFailureCount}`,
     '',
     abstractionBody,
     '',
@@ -1104,7 +1286,7 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
     status: 'ready',
     message: localFiles.length > 0 ? 'Abstraction copy is ready.' : 'No local files available; generated empty abstraction copy.',
     local_file_count: localFiles.length,
-    summary: `${localFiles.length} local file(s) abstracted with strict redaction.`,
+    summary: `${localFiles.length} local file(s) abstracted with strict redaction; ${lmStudioAnalysisCount} file(s) processed by LM Studio.`,
   });
   return {
     ok: true,
@@ -1931,6 +2113,32 @@ function extractOpenAiLikeTextFromChatJson(json = {}) {
   return '';
 }
 
+function extractAnthropicTextFromMessageJson(json = {}) {
+  const content = Array.isArray(json && json.content) ? json.content : [];
+  return content.map((item) => {
+    if (!item || typeof item !== 'object') return '';
+    if (String(item.type || '').trim().toLowerCase() !== 'text') return '';
+    return String(item.text || '');
+  }).join('');
+}
+
+function extractGoogleTextFromGenerateContentJson(json = {}) {
+  const candidates = Array.isArray(json && json.candidates) ? json.candidates : [];
+  const first = candidates[0] || {};
+  const parts = Array.isArray(first && first.content && first.content.parts) ? first.content.parts : [];
+  return parts.map((part) => String((part && part.text) || '')).join('');
+}
+
+function normalizeProviderModelId(model = '') {
+  return String(model || '').trim().replace(/^models\//, '');
+}
+
+function extractBase64PayloadFromDataUrl(dataUrl = '') {
+  const match = String(dataUrl || '').match(/^data:[^;]+;base64,(.+)$/i);
+  if (!match || !match[1]) return '';
+  return String(match[1] || '');
+}
+
 async function loadImagePayloadForAnalysis(args = {}) {
   const input = (args && typeof args === 'object') ? args : {};
   const localPathRaw = String(input.local_path || '').trim();
@@ -2026,18 +2234,347 @@ async function loadImagePayloadForAnalysis(args = {}) {
   }
 }
 
-async function analyzeImageWithLmStudio(args = {}, settings = readSettings()) {
-  const model = String((settings && settings.image_analysis_model) || '').trim();
-  if (!model) {
-    return { ok: false, message: 'Image analysis model is not configured in Settings.' };
+async function analyzeImageWithOpenAiLikeProvider(provider = 'openai', model = '', imagePayload = {}, prompt = '', creds = {}, options = {}) {
+  const targetProvider = String(provider || '').trim().toLowerCase();
+  const modelId = normalizeProviderModelId(model);
+  if (!modelId) return { ok: false, message: 'Model is required for image analysis.' };
+  const payload = (imagePayload && typeof imagePayload === 'object') ? imagePayload : {};
+  if (!payload.data_url) return { ok: false, message: 'Image payload is missing.' };
+  const timeoutMs = Math.max(6_000, Number((options && options.timeoutMs) || IMAGE_ANALYSIS_TIMEOUT_MS));
+  const defaultBaseUrl = targetProvider === 'cerebras'
+    ? 'https://api.cerebras.ai'
+    : (
+      targetProvider === 'lmstudio'
+        ? LMSTUDIO_DEFAULT_BASE_URL
+        : 'https://api.openai.com'
+    );
+  const endpointBase = targetProvider === 'openai' || targetProvider === 'cerebras'
+    ? defaultBaseUrl
+    : normalizeHttpBaseUrl(String((creds && creds.base_url) || defaultBaseUrl), defaultBaseUrl);
+  const endpoint = `${endpointBase}/v1/chat/completions`;
+  const headers = { 'content-type': 'application/json' };
+  const apiKey = String((creds && creds.apiKey) || '').trim();
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+
+  const body = {
+    model: modelId,
+    temperature: 0.2,
+    messages: [
+      {
+        role: 'system',
+        content: 'You provide high-fidelity visual analysis. Explain objects, layout, text, style, and likely context clearly.',
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: String(prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT) },
+          { type: 'image_url', image_url: { url: String(payload.data_url || '') } },
+        ],
+      },
+    ],
+  };
+
+  const { controller, timer } = makeTimeoutSignal(timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response || !response.ok) {
+      const fail = await readResponseJson(response);
+      const message = (
+        (fail && fail.json && fail.json.error && fail.json.error.message)
+        || (fail && fail.json && fail.json.error)
+        || (fail && fail.raw)
+        || `${targetProvider} image analysis request failed (${response ? response.status : 'unknown'}).`
+      );
+      return { ok: false, message: String(message).slice(0, 320) };
+    }
+    const okPayload = await readResponseJson(response);
+    const description = extractOpenAiLikeTextFromChatJson((okPayload && okPayload.json) || {}).trim();
+    if (!description) return { ok: false, message: `${targetProvider} image analysis returned no text.` };
+    return {
+      ok: true,
+      provider: targetProvider,
+      model: modelId,
+      description,
+      source: String(payload.source || ''),
+      mime_type: String(payload.mime || ''),
+      bytes: Number(payload.bytes || 0),
+      prompt: String(prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT),
+    };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || `${targetProvider} image analysis failed.`) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function analyzeImageWithAnthropicProvider(model = '', imagePayload = {}, prompt = '', apiKey = '', options = {}) {
+  const modelId = normalizeProviderModelId(model);
+  if (!modelId) return { ok: false, message: 'Model is required for Anthropic image analysis.' };
+  if (!apiKey) return { ok: false, message: 'Anthropic API key is not configured.' };
+  const payload = (imagePayload && typeof imagePayload === 'object') ? imagePayload : {};
+  const base64 = extractBase64PayloadFromDataUrl(String(payload.data_url || ''));
+  if (!base64) return { ok: false, message: 'Unsupported image payload for Anthropic.' };
+  const timeoutMs = Math.max(6_000, Number((options && options.timeoutMs) || IMAGE_ANALYSIS_TIMEOUT_MS));
+  const body = {
+    model: modelId,
+    max_tokens: 700,
+    temperature: 0.2,
+    system: 'You provide high-fidelity visual analysis. Explain objects, layout, text, style, and likely context clearly.',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: String(prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT) },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: String(payload.mime || 'image/png'),
+            data: base64,
+          },
+        },
+      ],
+    }],
+  };
+  const { controller, timer } = makeTimeoutSignal(timeoutMs);
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': String(apiKey || ''),
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response || !response.ok) {
+      const fail = await readResponseJson(response);
+      const message = (
+        (fail && fail.json && fail.json.error && fail.json.error.message)
+        || (fail && fail.json && fail.json.error)
+        || (fail && fail.raw)
+        || `Anthropic image analysis request failed (${response ? response.status : 'unknown'}).`
+      );
+      return { ok: false, message: String(message).slice(0, 320) };
+    }
+    const okPayload = await readResponseJson(response);
+    const description = extractAnthropicTextFromMessageJson((okPayload && okPayload.json) || {}).trim();
+    if (!description) return { ok: false, message: 'Anthropic image analysis returned no text.' };
+    return {
+      ok: true,
+      provider: 'anthropic',
+      model: modelId,
+      description,
+      source: String(payload.source || ''),
+      mime_type: String(payload.mime || ''),
+      bytes: Number(payload.bytes || 0),
+      prompt: String(prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT),
+    };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Anthropic image analysis failed.') };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function analyzeImageWithGoogleProvider(model = '', imagePayload = {}, prompt = '', apiKey = '', options = {}) {
+  const modelId = normalizeProviderModelId(model);
+  if (!modelId) return { ok: false, message: 'Model is required for Google image analysis.' };
+  if (!apiKey) return { ok: false, message: 'Google API key is not configured.' };
+  const payload = (imagePayload && typeof imagePayload === 'object') ? imagePayload : {};
+  const base64 = extractBase64PayloadFromDataUrl(String(payload.data_url || ''));
+  if (!base64) return { ok: false, message: 'Unsupported image payload for Google.' };
+  const timeoutMs = Math.max(6_000, Number((options && options.timeoutMs) || IMAGE_ANALYSIS_TIMEOUT_MS));
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(String(apiKey || ''))}`;
+  const body = {
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: String(prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT) },
+        { inlineData: { mimeType: String(payload.mime || 'image/png'), data: base64 } },
+      ],
+    }],
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 700,
+    },
+  };
+  const { controller, timer } = makeTimeoutSignal(timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response || !response.ok) {
+      const fail = await readResponseJson(response);
+      const message = (
+        (fail && fail.json && fail.json.error && fail.json.error.message)
+        || (fail && fail.json && fail.json.error)
+        || (fail && fail.raw)
+        || `Google image analysis request failed (${response ? response.status : 'unknown'}).`
+      );
+      return { ok: false, message: String(message).slice(0, 320) };
+    }
+    const okPayload = await readResponseJson(response);
+    const description = extractGoogleTextFromGenerateContentJson((okPayload && okPayload.json) || {}).trim();
+    if (!description) return { ok: false, message: 'Google image analysis returned no text.' };
+    return {
+      ok: true,
+      provider: 'google',
+      model: modelId,
+      description,
+      source: String(payload.source || ''),
+      mime_type: String(payload.mime || ''),
+      bytes: Number(payload.bytes || 0),
+      prompt: String(prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT),
+    };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Google image analysis failed.') };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function analyzeImageWithPreferredProvider(args = {}, settings = readSettings(), runtime = {}) {
+  const runtimeInput = (runtime && typeof runtime === 'object') ? runtime : {};
+  const preferredProvider = String(runtimeInput.provider || '').trim().toLowerCase();
+  if (!preferredProvider || !PROVIDERS.includes(preferredProvider)) {
+    return { ok: false, message: 'Preferred provider is unavailable for image analysis.' };
+  }
+  if (preferredProvider === 'lmstudio') {
+    return analyzeImageWithLmStudio(args, settings, runtimeInput);
   }
 
-  const imagePayload = await loadImagePayloadForAnalysis(args);
+  const imagePayload = runtimeInput.imagePayload && runtimeInput.imagePayload.ok
+    ? runtimeInput.imagePayload
+    : await loadImagePayloadForAnalysis(args);
   if (!imagePayload || !imagePayload.ok) {
     return { ok: false, message: String((imagePayload && imagePayload.message) || 'Unable to load image source.') };
   }
 
-  const prompt = String(args.prompt || settings.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim() || IMAGE_ANALYSIS_PROMPT_DEFAULT;
+  const prompt = String(runtimeInput.prompt || args.prompt || settings.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim()
+    || IMAGE_ANALYSIS_PROMPT_DEFAULT;
+  const model = normalizeProviderModelId(
+    runtimeInput.model
+    || args.model_override
+    || args.model
+    || settings.lumino_last_model
+    || PROVIDER_SUMMARY_MODEL_FALLBACK[preferredProvider]
+    || '',
+  );
+  if (!model) {
+    return { ok: false, message: `No model configured for ${preferredProvider} image analysis.` };
+  }
+
+  const creds = (
+    runtimeInput.credentials
+    && typeof runtimeInput.credentials === 'object'
+    && runtimeInput.credentials.ok !== false
+  )
+    ? runtimeInput.credentials
+    : resolveProviderRuntimeCredentials(preferredProvider, settings, String(runtimeInput.key_id || ''));
+  if (!creds || creds.ok === false) {
+    return { ok: false, message: String((creds && creds.message) || `${preferredProvider} credentials are unavailable.`) };
+  }
+  const effectiveCreds = {
+    apiKey: String(runtimeInput.apiKey || creds.apiKey || '').trim(),
+    base_url: String(runtimeInput.base_url || runtimeInput.baseUrl || creds.base_url || '').trim(),
+  };
+
+  if (preferredProvider === 'anthropic') {
+    return analyzeImageWithAnthropicProvider(model, imagePayload, prompt, effectiveCreds.apiKey, runtimeInput);
+  }
+  if (preferredProvider === 'google') {
+    return analyzeImageWithGoogleProvider(model, imagePayload, prompt, effectiveCreds.apiKey, runtimeInput);
+  }
+  return analyzeImageWithOpenAiLikeProvider(preferredProvider, model, imagePayload, prompt, effectiveCreds, runtimeInput);
+}
+
+async function analyzeImageWithProviderFallback(args = {}, settings = readSettings(), runtime = {}) {
+  const runtimeInput = (runtime && typeof runtime === 'object') ? runtime : {};
+  const preferredProvider = String(runtimeInput.provider || '').trim().toLowerCase();
+  const imagePayload = runtimeInput.imagePayload && runtimeInput.imagePayload.ok
+    ? runtimeInput.imagePayload
+    : await loadImagePayloadForAnalysis(args);
+  if (!imagePayload || !imagePayload.ok) {
+    return { ok: false, message: String((imagePayload && imagePayload.message) || 'Unable to load image source.') };
+  }
+  const prompt = String(runtimeInput.prompt || args.prompt || settings.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim()
+    || IMAGE_ANALYSIS_PROMPT_DEFAULT;
+
+  let nativeRes = null;
+  if (preferredProvider && PROVIDERS.includes(preferredProvider)) {
+    nativeRes = await analyzeImageWithPreferredProvider(args, settings, {
+      ...runtimeInput,
+      provider: preferredProvider,
+      imagePayload,
+      prompt,
+    });
+    if (nativeRes && nativeRes.ok) {
+      return {
+        ...nativeRes,
+        fallback_used: false,
+        attempted_provider: preferredProvider,
+      };
+    }
+  }
+
+  const shouldUseLmFallback = preferredProvider !== 'lmstudio';
+  if (!shouldUseLmFallback) {
+    return nativeRes || { ok: false, message: 'Image analysis failed.' };
+  }
+  const lmRes = await analyzeImageWithLmStudio(args, settings, {
+    imagePayload,
+    prompt,
+  });
+  if (lmRes && lmRes.ok) {
+    return {
+      ...lmRes,
+      fallback_used: true,
+      attempted_provider: preferredProvider || '',
+      native_error: String((nativeRes && nativeRes.message) || ''),
+    };
+  }
+  const reasons = [];
+  if (nativeRes && nativeRes.message) reasons.push(`Native ${preferredProvider || 'provider'} image analysis failed: ${String(nativeRes.message)}`);
+  if (lmRes && lmRes.message) reasons.push(`LM Studio fallback failed: ${String(lmRes.message)}`);
+  return {
+    ok: false,
+    message: reasons.join(' ') || 'Image analysis failed.',
+  };
+}
+
+async function analyzeImageWithLmStudio(args = {}, settings = readSettings(), options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const modelOverride = String(
+    opts.model
+    || opts.model_override
+    || (args && (args.model_override || args.model))
+    || '',
+  ).trim();
+  const model = modelOverride
+    || String((settings && settings.image_analysis_model) || '').trim()
+    || String((settings && settings.abstraction_model) || '').trim();
+  if (!model) {
+    return { ok: false, message: 'Image analysis model is not configured (set Image Analysis Model or Abstraction Model).' };
+  }
+
+  const imagePayload = opts.imagePayload && opts.imagePayload.ok
+    ? opts.imagePayload
+    : await loadImagePayloadForAnalysis(args);
+  if (!imagePayload || !imagePayload.ok) {
+    return { ok: false, message: String((imagePayload && imagePayload.message) || 'Unable to load image source.') };
+  }
+
+  const prompt = String(opts.prompt || args.prompt || settings.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim()
+    || IMAGE_ANALYSIS_PROMPT_DEFAULT;
   const creds = resolveProviderRuntimeCredentials('lmstudio', settings);
   if (!creds || !creds.ok) {
     return { ok: false, message: String((creds && creds.message) || 'LM Studio credentials are unavailable.') };
@@ -2091,6 +2628,7 @@ async function analyzeImageWithLmStudio(args = {}, settings = readSettings()) {
     }
     return {
       ok: true,
+      provider: 'lmstudio',
       description,
       source: String(imagePayload.source || ''),
       mime_type: String(imagePayload.mime || ''),
@@ -3302,7 +3840,7 @@ function parseDdgHtmlSearchResults(html = '') {
   const raw = String(html || '');
   if (!raw) return [];
   const rows = [];
-  const re = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a[^>]+class="[^"]*(?:result__a|result-link)[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let match;
   while ((match = re.exec(raw)) !== null) {
     const href = decodeHtmlEntities(String(match[1] || '').trim());
@@ -3310,7 +3848,7 @@ function parseDdgHtmlSearchResults(html = '') {
     if (!href || !title) continue;
     let url = href;
     if (href.startsWith('//')) url = `https:${href}`;
-    if (href.startsWith('/l/?kh=')) {
+    if (href.startsWith('/l/?')) {
       const m = href.match(/[?&]uddg=([^&]+)/i);
       if (m && m[1]) {
         try {
@@ -3326,6 +3864,27 @@ function parseDdgHtmlSearchResults(html = '') {
       url,
       snippet: '',
     });
+    if (rows.length >= 30) break;
+  }
+  return rows;
+}
+
+function parseBingHtmlSearchResults(html = '') {
+  const raw = String(html || '');
+  if (!raw) return [];
+  const rows = [];
+  const blockRe = /<li[^>]+class="[^"]*b_algo[^"]*"[\s\S]*?<\/li>/gi;
+  let blockMatch;
+  while ((blockMatch = blockRe.exec(raw)) !== null) {
+    const block = String(blockMatch[0] || '');
+    const hrefMatch = block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"/i) || block.match(/<a[^>]+href="([^"]+)"/i);
+    const titleMatch = block.match(/<h2[^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i) || block.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
+    const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    const href = decodeHtmlEntities(String((hrefMatch && hrefMatch[1]) || '').trim());
+    const title = decodeHtmlEntities(String((titleMatch && titleMatch[1]) || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    const snippet = decodeHtmlEntities(String((snippetMatch && snippetMatch[1]) || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    if (!/^https?:\/\//i.test(href) || !title) continue;
+    rows.push({ title, url: href, snippet });
     if (rows.length >= 30) break;
   }
   return rows;
@@ -3411,7 +3970,7 @@ async function runOrchestratorWebSearch(params = {}) {
   const normalizedInstant = dedupeWebResults(rows);
   if (normalizedInstant.length < Math.min(5, maxResults)) {
     try {
-      const ddgHtmlUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+      const ddgHtmlUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
       const htmlRes = await fetchTextWithTimeout(ddgHtmlUrl, {
         headers: {
           'user-agent': 'Subgrapher/1.0 (+https://subgrapher.local)',
@@ -3426,20 +3985,38 @@ async function runOrchestratorWebSearch(params = {}) {
     }
   }
 
-  const normalized = dedupeWebResults(rows).slice(0, maxResults);
+  let normalized = dedupeWebResults(rows).slice(0, maxResults);
+  let fallbackProvider = 'ddg';
+  if (normalized.length === 0) {
+    try {
+      const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=en-US`;
+      const bingRes = await fetchTextWithTimeout(bingUrl, {
+        headers: {
+          'user-agent': 'Subgrapher/1.0 (+https://subgrapher.local)',
+        },
+      }, Math.max(6_000, Number(params.timeout_ms || 12_000)));
+      if (bingRes && bingRes.ok) {
+        normalized = dedupeWebResults(parseBingHtmlSearchResults(String(bingRes.text || ''))).slice(0, maxResults);
+        if (normalized.length > 0) fallbackProvider = 'bing';
+      }
+    } catch (_) {
+      // Keep graceful fallback.
+    }
+  }
   if (normalized.length === 0) {
     return {
-      ok: false,
-      provider: 'ddg',
+      ok: true,
+      provider: fallbackProvider,
       query,
       results: [],
+      no_results: true,
       message: 'Web search returned no results.',
     };
   }
 
   return {
     ok: true,
-    provider: 'ddg',
+    provider: fallbackProvider,
     query,
     results: normalized,
   };
@@ -10044,7 +10621,7 @@ function formatToolStatusStart(toolName, args = {}) {
     return `Reading webpage: ${summarizeUrlForStatus(payload.url)}`;
   }
   if (name === 'analyze_image') {
-    const target = String(payload.local_path || payload.image_url || '').trim();
+    const target = String(payload.local_path || payload.image_url || payload.context_file_id || '').trim();
     return `Analyzing image: ${trimStatusText(target, 96) || '(selected image)'}`;
   }
   if (name === 'write_markdown_artifact' || name === 'write_html_artifact') {
@@ -10886,48 +11463,36 @@ async function executeLuminoChat(input, options = {}) {
             return { ok: false, message: 'query is required.', tool_output: { ok: false, message: 'query is required.' } };
           }
           const maxResults = Math.max(1, Math.min(Number(Number.isFinite(Number(args.max_results)) ? args.max_results : 5), 10));
-          const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1`;
           try {
-            const fetchRes = await fetchJsonWithTimeout(ddgUrl, {}, 10_000);
-            if (!fetchRes.ok) {
+            const searchRes = await runOrchestratorWebSearch({
+              query,
+              max_results: maxResults,
+              timeout_ms: 12_000,
+            });
+            if (!searchRes || !searchRes.ok) {
+              const noResultMessage = String((searchRes && searchRes.message) || 'Web search returned no results.');
               return {
-                ok: false,
-                unavailable: true,
-                message: `Web search is unavailable right now (status ${fetchRes.status || 'unknown'}).`,
+                ok: true,
+                message: noResultMessage,
                 tool_output: {
-                  ok: false,
+                  ok: true,
                   query,
-                  unavailable: true,
-                  status: Number(fetchRes.status || 0) || null,
-                  message: 'Web search request failed.',
+                  provider: String((searchRes && searchRes.provider) || ''),
+                  results: [],
+                  message: noResultMessage,
                 },
               };
             }
-            const results = [];
-            if (fetchRes.json) {
-              const j = fetchRes.json;
-              if (j.AbstractText && j.AbstractURL) {
-                results.push({
-                  title: String(j.Heading || query).slice(0, 120),
-                  url: j.AbstractURL,
-                  snippet: String(j.AbstractText).slice(0, 300),
-                });
-              }
-              const topics = Array.isArray(j.RelatedTopics) ? j.RelatedTopics : [];
-              topics.slice(0, maxResults).forEach((t) => {
-                if (t && t.FirstURL && t.Text) {
-                  results.push({
-                    title: String(t.Text).slice(0, 120),
-                    url: t.FirstURL,
-                    snippet: String(t.Text).slice(0, 300),
-                  });
-                }
-              });
-            }
+            const results = Array.isArray(searchRes.results) ? searchRes.results : [];
             return {
               ok: true,
               message: `Found ${results.length} result(s) for "${query}".`,
-              tool_output: { ok: true, query, results },
+              tool_output: {
+                ok: true,
+                query,
+                provider: String(searchRes.provider || ''),
+                results,
+              },
             };
           } catch (searchErr) {
             return {
@@ -10988,15 +11553,35 @@ async function executeLuminoChat(input, options = {}) {
 
         if (name === 'analyze_image') {
           const imageUrl = String(args.image_url || '').trim();
-          const localPath = String(args.local_path || '').trim();
+          let localPath = String(args.local_path || '').trim();
+          const contextFileId = String(args.context_file_id || '').trim();
+          if (!imageUrl && !localPath && contextFileId) {
+            const refs = getReferences();
+            const refIdx = findReferenceIndex(refs, srId);
+            if (refIdx >= 0) {
+              const contextFiles = Array.isArray(refs[refIdx].context_files) ? refs[refIdx].context_files : [];
+              const contextFile = contextFiles.find((file) => String((file && file.id) || '').trim() === contextFileId);
+              if (contextFile) {
+                localPath = String((contextFile && contextFile.stored_path) || '').trim();
+              }
+            }
+          }
           if (!imageUrl && !localPath) {
             return {
               ok: false,
-              message: 'Either image_url or local_path is required.',
-              tool_output: { ok: false, message: 'Either image_url or local_path is required.' },
+              message: 'Either image_url, local_path, or context_file_id is required.',
+              tool_output: { ok: false, message: 'Either image_url, local_path, or context_file_id is required.' },
             };
           }
-          const analysisRes = await analyzeImageWithLmStudio(args, readSettings());
+          const analysisRes = await analyzeImageWithProviderFallback({
+            ...args,
+            local_path: localPath || String(args.local_path || '').trim(),
+          }, readSettings(), {
+            provider,
+            model,
+            apiKey: providerApiKey,
+            base_url: providerBaseUrl,
+          });
           if (!analysisRes || !analysisRes.ok) {
             return {
               ok: false,
@@ -11014,8 +11599,13 @@ async function executeLuminoChat(input, options = {}) {
               ok: true,
               description: String(analysisRes.description || ''),
               source: String(analysisRes.source || ''),
+              provider: String(analysisRes.provider || ''),
+              attempted_provider: String(analysisRes.attempted_provider || ''),
+              fallback_used: !!analysisRes.fallback_used,
+              native_error: String(analysisRes.native_error || ''),
               model: String(analysisRes.model || ''),
               prompt: String(analysisRes.prompt || ''),
+              context_file_id: contextFileId || '',
               mime_type: String(analysisRes.mime_type || ''),
               bytes: Number(analysisRes.bytes || 0),
             },
@@ -13534,8 +14124,8 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
 
   const mountId = makeId('mount');
   const ingest = indexFolderAsContext(targetFolder, {
-    maxFiles: 250,
-    maxFileBytes: 256 * 1024,
+    maxFiles: FOLDER_MOUNT_MAX_FILES,
+    maxFileBytes: FOLDER_MOUNT_MAX_FILE_BYTES,
   });
 
   refs[idx].folder_mounts = Array.isArray(refs[idx].folder_mounts) ? refs[idx].folder_mounts : [];
@@ -13618,8 +14208,8 @@ ipcMain.handle('browser:srReindexFolderMount', async (_event, payload) => {
   }
 
   const ingest = indexFolderAsContext(targetFolder, {
-    maxFiles: 250,
-    maxFileBytes: 256 * 1024,
+    maxFiles: FOLDER_MOUNT_MAX_FILES,
+    maxFileBytes: FOLDER_MOUNT_MAX_FILE_BYTES,
   });
 
   refs[idx].context_files = refs[idx].context_files.filter((file) => String((file && file.mount_id) || '') !== mountId);

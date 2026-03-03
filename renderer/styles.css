@@ -1881,6 +1881,8 @@ textarea {
 #workspace-panel.memory-replay-mode .nav-actions button,
 #workspace-panel.memory-replay-mode #workspace-add-tab-btn,
 #workspace-panel.memory-replay-mode .workspace-tab button[data-close-web],
+#workspace-panel.memory-replay-mode .workspace-tab button[data-close-files],
+#workspace-panel.memory-replay-mode .workspace-tab button[data-close-skills],
 #workspace-panel.memory-replay-mode .workspace-tab button[data-delete-artifact] {
   opacity: 0.45;
   pointer-events: none;
