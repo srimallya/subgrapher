@@ -167,6 +167,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     historyClear: (phrase = '') => ipcRenderer.invoke('browser:historyClear', { phrase }),
     historySemanticMap: (payload = {}) => ipcRenderer.invoke('browser:historySemanticMap', payload || {}),
     updatePreferences: (payload) => ipcRenderer.invoke('browser:updatePreferences', payload || {}),
+    abstractionStatus: (payload = {}) => ipcRenderer.invoke('browser:abstractionStatus', payload || {}),
+    abstractionRebuild: (payload = {}) => ipcRenderer.invoke('browser:abstractionRebuild', payload || {}),
     settingsDiagnostics: () => ipcRenderer.invoke('browser:settingsDiagnostics'),
     settingsDangerResetHyperwebIdentity: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerResetHyperwebIdentity', payload),
     settingsDangerClearHyperwebSocialCache: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerClearHyperwebSocialCache', payload),

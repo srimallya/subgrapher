@@ -23,6 +23,7 @@ const PATH_B_DENIED = new Set([
   'add_web_highlight',
   'add_artifact_highlight',
   'clear_highlights',
+  'analyze_image',
   'run_python',
   'pip_install',
   'save_skill',

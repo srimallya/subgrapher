@@ -333,23 +333,31 @@ body.zen-mode .settings-body {
 }
 
 .settings-field input,
-.settings-field select {
+.settings-field select,
+.settings-field textarea {
   color: var(--text);
   background: rgba(8, 16, 26, 0.88);
   border-color: rgba(121, 149, 184, 0.35);
 }
 
 .settings-field input:focus,
-.settings-field select:focus {
+.settings-field select:focus,
+.settings-field textarea:focus {
   outline: none;
   border-color: color-mix(in oklab, var(--accent) 66%, transparent);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 22%, transparent);
 }
 
 .settings-field input.invalid,
-.settings-field select.invalid {
+.settings-field select.invalid,
+.settings-field textarea.invalid {
   border-color: rgba(255, 122, 122, 0.7);
   box-shadow: 0 0 0 1px rgba(255, 122, 122, 0.2);
+}
+
+.settings-field textarea {
+  resize: vertical;
+  min-height: 96px;
 }
 
 .settings-toggle {

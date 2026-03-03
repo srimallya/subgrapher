@@ -105,6 +105,8 @@ const state = {
   orchestratorUsersLoading: false,
   lmstudioTokenConfigured: null,
   orchestratorWebKeyConfigured: null,
+  settingsLmstudioModels: [],
+  settingsAbstractionStatus: null,
   historyEntries: [],
   historySearchQuery: '',
   historySelectedId: '',
@@ -153,6 +155,7 @@ const BROWSER_VIEW_MAX_ZOOM = 5;
 const UI_ZOOM_STEP = 0.1;
 const UI_MIN_ZOOM = 0.5;
 const UI_MAX_ZOOM = 3.0;
+const IMAGE_ANALYSIS_PROMPT_DEFAULT = 'Describe the image in details and write the context.';
 let passiveNoticeTimer = null;
 
 function e(id) {
@@ -5889,6 +5892,55 @@ function parseCommaSeparatedList(value) {
     .filter(Boolean);
 }
 
+function renderSettingsLmstudioModelSelect(selectId, selectedValue = '') {
+  const select = e(selectId);
+  if (!select) return;
+  const models = Array.isArray(state.settingsLmstudioModels) ? state.settingsLmstudioModels.filter(Boolean) : [];
+  const uniqueModels = Array.from(new Set(models));
+  const preferred = String(selectedValue || '').trim();
+  if (!uniqueModels.length) {
+    if (preferred) {
+      select.innerHTML = `<option value="${escapeHtml(preferred)}">${escapeHtml(preferred)} (saved)</option>`;
+      select.value = preferred;
+    } else {
+      select.innerHTML = '<option value="">No models loaded</option>';
+      select.value = '';
+    }
+    return;
+  }
+  let options = uniqueModels.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
+  if (preferred && !uniqueModels.includes(preferred)) {
+    options = `<option value="${escapeHtml(preferred)}">${escapeHtml(preferred)} (saved)</option>${options}`;
+  }
+  select.innerHTML = options;
+  if (preferred) {
+    select.value = preferred;
+  } else {
+    select.value = uniqueModels[0];
+  }
+}
+
+function renderSettingsAbstractionStatus() {
+  const node = e('settings-abstraction-status');
+  if (!node) return;
+  const status = state.settingsAbstractionStatus || null;
+  if (!status || status.ok === false) {
+    node.textContent = status && status.message ? status.message : 'Unavailable';
+    return;
+  }
+  if (status.enabled === false) {
+    node.textContent = String(status.message || 'Abstraction is disabled.');
+    return;
+  }
+  const counts = status.counts && typeof status.counts === 'object' ? status.counts : {};
+  const updated = Array.isArray(status.references)
+    ? status.references.map((item) => Number((item && item.updated_at) || 0)).filter((value) => Number.isFinite(value) && value > 0)
+    : [];
+  const latest = updated.length ? Math.max(...updated) : 0;
+  const latestText = latest > 0 ? ` · updated ${formatAgo(latest)}` : '';
+  node.textContent = `ready=${Number(counts.ready || 0)}, building=${Number(counts.building || 0)}, stale=${Number(counts.stale || 0)}, error=${Number(counts.error || 0)}${latestText}`;
+}
+
 function normalizeSettingsDraft(raw = {}) {
   const src = (raw && typeof raw === 'object') ? raw : {};
   const telegramAllowedChatIds = parseCommaSeparatedList(src.telegram_allowed_chat_ids);
@@ -5901,6 +5953,13 @@ function normalizeSettingsDraft(raw = {}) {
     lmstudio_base_url: String(src.lmstudio_base_url || 'http://127.0.0.1:1234').trim(),
     lmstudio_default_model: String(src.lmstudio_default_model || '').trim(),
     orchestrator_web_provider: String(src.orchestrator_web_provider || 'ddg').trim().toLowerCase(),
+    abstraction_enabled: !!src.abstraction_enabled,
+    abstraction_model: String(src.abstraction_model || '').trim(),
+    abstraction_strict_redaction: Object.prototype.hasOwnProperty.call(src, 'abstraction_strict_redaction')
+      ? !!src.abstraction_strict_redaction
+      : true,
+    image_analysis_model: String(src.image_analysis_model || '').trim(),
+    image_analysis_prompt: String(src.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim() || IMAGE_ANALYSIS_PROMPT_DEFAULT,
     telegram_enabled: !!src.telegram_enabled,
     telegram_allowed_chat_ids: telegramAllowedChatIds,
     telegram_allowed_usernames: telegramAllowedUsernames,
@@ -5931,6 +5990,9 @@ function validateSettingsDraft(draft = {}) {
   if (!PROVIDERS.includes(d.lumino_last_provider)) errors.lumino_last_provider = 'Unsupported provider.';
   if (!/^https?:\/\//i.test(d.lmstudio_base_url || '')) errors.lmstudio_base_url = 'LM Studio URL must start with http:// or https://';
   if (!['ddg', 'serpapi'].includes(d.orchestrator_web_provider)) errors.orchestrator_web_provider = 'Invalid web provider.';
+  if (d.abstraction_enabled && !String(d.abstraction_model || '').trim()) {
+    errors.abstraction_model = 'Abstraction model is required when abstraction is enabled.';
+  }
   if (!Number.isFinite(d.telegram_poll_interval_sec) || d.telegram_poll_interval_sec < 1 || d.telegram_poll_interval_sec > 30) {
     errors.telegram_poll_interval_sec = 'Polling interval must be 1..30 sec.';
   }
@@ -6006,6 +6068,8 @@ function renderSettingsStatusLine() {
 
 function renderSettingsForm() {
   const draft = normalizeSettingsDraft(state.settingsDraft || {});
+  renderSettingsLmstudioModelSelect('settings-abstraction-model', draft.abstraction_model);
+  renderSettingsLmstudioModelSelect('settings-image-analysis-model', draft.image_analysis_model);
   getSettingsFormElements().forEach((node) => {
     const key = String(node.getAttribute('data-setting') || '').trim();
     if (!key) return;
@@ -6022,6 +6086,7 @@ function renderSettingsForm() {
     node.classList.toggle('invalid', !!(state.settingsValidationErrors && state.settingsValidationErrors[key]));
     node.title = (state.settingsValidationErrors && state.settingsValidationErrors[key]) || '';
   });
+  renderSettingsAbstractionStatus();
   renderSettingsStatusLine();
 }
 
@@ -6137,9 +6202,27 @@ async function refreshOrchestratorWebKeyStatus() {
   renderOrchestratorWebKeyStatus();
 }
 
+async function refreshSettingsLmstudioModelOptions() {
+  if (!api.providerListModels) return;
+  const res = await api.providerListModels('lmstudio', '');
+  if (!res || !res.ok) {
+    state.settingsLmstudioModels = [];
+    return;
+  }
+  state.settingsLmstudioModels = Array.isArray(res.models) ? res.models : [];
+}
+
+async function refreshAbstractionStatus() {
+  if (!api.abstractionStatus) return;
+  const res = await api.abstractionStatus({});
+  state.settingsAbstractionStatus = res || null;
+  renderSettingsAbstractionStatus();
+}
+
 async function loadSettingsData() {
   const prefRes = await api.getPreferences();
   const diagnostics = await api.settingsDiagnostics();
+  await refreshSettingsLmstudioModelOptions();
   await refreshProviderKeysState({ renderSettings: true });
   if (prefRes && prefRes.ok) {
     state.settingsPersisted = normalizeSettingsDraft(prefRes);
@@ -6153,6 +6236,7 @@ async function loadSettingsData() {
   await refreshOrchestratorUsersList();
   await refreshLmstudioTokenStatus();
   await refreshOrchestratorWebKeyStatus();
+  await refreshAbstractionStatus();
   if (diagnostics && diagnostics.ok) {
     state.settingsDiagnostics = diagnostics;
     renderSettingsDiagnostics();
@@ -6200,6 +6284,7 @@ async function saveSettingsDraft() {
   await refreshTelegramSettingsStatus();
   await refreshLmstudioTokenStatus();
   await refreshOrchestratorWebKeyStatus();
+  await refreshAbstractionStatus();
   await refreshTrustCommonsStatus();
   await refreshHyperwebStatus();
   renderSettingsForm();
@@ -7328,6 +7413,41 @@ function bindControls() {
       renderSettingsStatusLine();
     }
     await refreshLmstudioTokenStatus();
+  });
+
+  e('settings-abstraction-fetch-models-btn')?.addEventListener('click', async () => {
+    await refreshSettingsLmstudioModelOptions();
+    renderSettingsForm();
+    state.settingsSaveState = (Array.isArray(state.settingsLmstudioModels) && state.settingsLmstudioModels.length > 0)
+      ? `Loaded ${state.settingsLmstudioModels.length} LM Studio model(s).`
+      : 'No LM Studio models found.';
+    renderSettingsStatusLine();
+  });
+
+  e('settings-image-analysis-fetch-models-btn')?.addEventListener('click', async () => {
+    await refreshSettingsLmstudioModelOptions();
+    renderSettingsForm();
+    state.settingsSaveState = (Array.isArray(state.settingsLmstudioModels) && state.settingsLmstudioModels.length > 0)
+      ? `Loaded ${state.settingsLmstudioModels.length} LM Studio model(s).`
+      : 'No LM Studio models found.';
+    renderSettingsStatusLine();
+  });
+
+  e('settings-abstraction-rebuild-btn')?.addEventListener('click', async () => {
+    if (!api.abstractionRebuild) return;
+    state.settingsSaveState = 'Rebuilding abstraction copies...';
+    renderSettingsStatusLine();
+    const res = await api.abstractionRebuild({});
+    state.settingsSaveState = (res && res.ok)
+      ? 'Abstraction rebuild completed.'
+      : ((res && res.message) ? res.message : 'Abstraction rebuild failed.');
+    if (res && res.status) {
+      state.settingsAbstractionStatus = res.status;
+    } else {
+      await refreshAbstractionStatus();
+    }
+    renderSettingsAbstractionStatus();
+    renderSettingsStatusLine();
   });
 
   e('settings-orchestrator-web-key-set-btn')?.addEventListener('click', async () => {

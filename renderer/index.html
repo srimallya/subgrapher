@@ -387,6 +387,51 @@
       </section>
 
       <section class="settings-section">
+        <h3>Abstraction</h3>
+        <p class="muted small">Build a redacted abstraction copy of local files for remote/API model use.</p>
+        <div class="settings-grid">
+          <label class="settings-field settings-toggle">
+            <input id="settings-abstraction-enabled" data-setting="abstraction_enabled" type="checkbox" />
+            <span>Enable local-file abstraction routing</span>
+          </label>
+          <label class="settings-field settings-toggle">
+            <input id="settings-abstraction-strict-redaction" data-setting="abstraction_strict_redaction" type="checkbox" />
+            <span>Strict redaction (emails, keys, paths, URLs, tokens)</span>
+          </label>
+          <label class="settings-field">Abstraction Model (LM Studio)
+            <select id="settings-abstraction-model" data-setting="abstraction_model"></select>
+          </label>
+          <div class="settings-field">
+            <span>Abstraction Actions</span>
+            <div class="settings-inline-actions">
+              <button id="settings-abstraction-fetch-models-btn">Fetch Models</button>
+              <button id="settings-abstraction-rebuild-btn">Rebuild Abstraction</button>
+            </div>
+            <div id="settings-abstraction-status" class="muted small">Unknown</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Image Analysis</h3>
+        <p class="muted small">Configure LM Studio VLM for detailed image-to-text analysis in Lumino tools.</p>
+        <div class="settings-grid">
+          <label class="settings-field">Image Analysis Model (LM Studio)
+            <select id="settings-image-analysis-model" data-setting="image_analysis_model"></select>
+          </label>
+          <div class="settings-field">
+            <span>Image Model Actions</span>
+            <div class="settings-inline-actions">
+              <button id="settings-image-analysis-fetch-models-btn">Fetch Models</button>
+            </div>
+          </div>
+          <label class="settings-field settings-field-wide">Default Image Prompt
+            <textarea id="settings-image-analysis-prompt" data-setting="image_analysis_prompt" rows="4" placeholder="Describe the image in details and write the context."></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
         <h3>Telegram Bot</h3>
         <div class="settings-grid">
           <label class="settings-field settings-toggle">

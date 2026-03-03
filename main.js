@@ -102,6 +102,11 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'lmstudio_base_url',
   'lmstudio_default_model',
   'orchestrator_web_provider',
+  'abstraction_enabled',
+  'abstraction_model',
+  'abstraction_strict_redaction',
+  'image_analysis_model',
+  'image_analysis_prompt',
 ]);
 const CONTEXT_FILE_MAX_BYTES = 1024 * 1024;
 const CHAT_REQUEST_TIMEOUT_MS = 60_000;
@@ -140,6 +145,13 @@ const PROVIDER_SUMMARY_MODEL_FALLBACK = {
 const PROVIDER_PRIMARY_KEY_ID = 'primary';
 const LMSTUDIO_DEFAULT_BASE_URL = 'http://127.0.0.1:1234';
 const ORCHESTRATOR_WEB_PROVIDER_DEFAULT = 'ddg';
+const IMAGE_ANALYSIS_PROMPT_DEFAULT = 'Describe the image in details and write the context.';
+const ABSTRACTION_MAX_FILES = 240;
+const ABSTRACTION_MAX_FILE_CHARS = 12_000;
+const ABSTRACTION_MAX_TOTAL_CHARS = 140_000;
+const ABSTRACTION_SUMMARY_TIMEOUT_MS = 70_000;
+const IMAGE_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_ANALYSIS_TIMEOUT_MS = 45_000;
 const PATH_B_GLOBAL_TOP_K = 12;
 const PATH_B_LINK_VERIFY_THRESHOLD = 0.42;
 const TELEGRAM_SECRET_REF_PREFIX = 'telegram_bot_token';
@@ -187,6 +199,7 @@ let markerModeEnabled = false;
 let markerContext = { srId: '', artifactId: '' };
 let memorySemanticTimer = null;
 const activeChatRequests = new Map();
+const abstractionRefreshInFlight = new Map();
 const pythonSandboxManagers = new Map();
 let pythonRuntimeResolver = null;
 let secureSecretStore = null;
@@ -743,6 +756,18 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
   }
 }
 
+async function readResponseJson(response) {
+  if (!response) return { raw: '', json: null };
+  const raw = await response.text();
+  let json = null;
+  try {
+    json = raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    json = null;
+  }
+  return { raw, json };
+}
+
 async function fetchTextWithTimeout(url, options = {}, timeoutMs = 12000) {
   const { controller, timer } = makeTimeoutSignal(timeoutMs);
   try {
@@ -752,6 +777,446 @@ async function fetchTextWithTimeout(url, options = {}, timeoutMs = 12000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function isLocalContextFileForAbstraction(file = {}) {
+  const source = String((file && file.source_type) || '').trim().toLowerCase();
+  if (source === 'external_context_file' || source === 'folder_mount') return true;
+  if (source === 'youtube_transcript' || source === 'abstraction_copy') return false;
+  const storedPath = String((file && file.stored_path) || '').trim();
+  return !!storedPath;
+}
+
+function normalizeAbstractionCache(cache = {}, srId = '') {
+  const source = (cache && typeof cache === 'object') ? cache : {};
+  const statusRaw = String(source.status || '').trim().toLowerCase();
+  const status = ['ready', 'building', 'stale', 'error'].includes(statusRaw) ? statusRaw : 'stale';
+  const fallbackId = srId ? `ctx_abs_${String(srId).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100)}` : 'ctx_abs';
+  return {
+    id: String(source.id || fallbackId).trim() || fallbackId,
+    stored_path: String(source.stored_path || '').trim(),
+    source_hash: String(source.source_hash || '').trim(),
+    model: String(source.model || '').trim(),
+    updated_at: Number(source.updated_at || 0),
+    status,
+    message: String(source.message || '').trim(),
+    local_file_count: Number(source.local_file_count || 0) || 0,
+    summary: String(source.summary || '').trim(),
+  };
+}
+
+function getAbstractionOutputPath(srId = '') {
+  const safeSrId = String(srId || '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 180) || 'sr_unknown';
+  const outDir = path.join(app.getPath('userData'), 'semantic_references', safeSrId, 'abstraction');
+  return {
+    outDir,
+    outPath: path.join(outDir, 'abstracted_context.md'),
+  };
+}
+
+function readTextFileForAbstraction(filePath = '', maxChars = ABSTRACTION_MAX_FILE_CHARS) {
+  const target = String(filePath || '').trim();
+  if (!target || !fs.existsSync(target)) return '';
+  try {
+    const raw = fs.readFileSync(target, 'utf8');
+    return String(raw || '').slice(0, Math.max(0, Math.round(maxChars)));
+  } catch (_) {
+    return '';
+  }
+}
+
+function redactSensitiveText(input = '') {
+  let out = String(input || '');
+  const replacements = [
+    { re: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, val: '[REDACTED_EMAIL]' },
+    { re: /\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)\d{3,4}[-.\s]?\d{3,4}\b/g, val: '[REDACTED_PHONE]' },
+    { re: /\bhttps?:\/\/[^\s)]+/gi, val: '[REDACTED_URL]' },
+    { re: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, val: '[REDACTED_IP]' },
+    { re: /\b(?:[A-Za-z]:\\|\/)(?:[^ \n\r\t:<>\"|?*]+[\\\/])*[^ \n\r\t:<>\"|?*]*/g, val: '[REDACTED_PATH]' },
+    { re: /\bsk-[A-Za-z0-9]{20,}\b/g, val: '[REDACTED_KEY]' },
+    { re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, val: '[REDACTED_KEY]' },
+    { re: /\bAIza[0-9A-Za-z\-_]{20,}\b/g, val: '[REDACTED_KEY]' },
+    { re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, val: '[REDACTED_KEY]' },
+    { re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, val: '[REDACTED_JWT]' },
+    { re: /\b(?=[A-Za-z0-9_-]{24,}\b)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_-]+\b/g, val: '[REDACTED_TOKEN]' },
+  ];
+  replacements.forEach((item) => {
+    out = out.replace(item.re, item.val);
+  });
+  return out;
+}
+
+function buildAbstractionSourceHash(ref = {}, files = [], model = '') {
+  const payload = {
+    reference_id: String((ref && ref.id) || '').trim(),
+    model: String(model || '').trim(),
+    files: (Array.isArray(files) ? files : []).map((file) => ({
+      id: String((file && file.id) || '').trim(),
+      source_type: String((file && file.source_type) || '').trim(),
+      stored_path: String((file && file.stored_path) || '').trim(),
+      content_hash: String((file && file.content_hash) || '').trim(),
+      updated_at: Number((file && file.updated_at) || 0),
+    })),
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+function buildAbstractionPromptBundle(ref = {}, files = []) {
+  const list = Array.isArray(files) ? files : [];
+  const snippets = [];
+  let totalChars = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    if (snippets.length >= ABSTRACTION_MAX_FILES || totalChars >= ABSTRACTION_MAX_TOTAL_CHARS) break;
+    const file = list[i] || {};
+    const storedPath = String(file.stored_path || '').trim();
+    const raw = readTextFileForAbstraction(storedPath, ABSTRACTION_MAX_FILE_CHARS);
+    if (!raw) continue;
+    const remaining = Math.max(0, ABSTRACTION_MAX_TOTAL_CHARS - totalChars);
+    const excerpt = raw.slice(0, remaining);
+    if (!excerpt) continue;
+    totalChars += excerpt.length;
+    const name = String(file.original_name || file.relative_path || path.basename(storedPath) || file.id || 'file').trim();
+    const summary = String(file.summary || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+    snippets.push({
+      name: name || 'file',
+      summary,
+      excerpt,
+    });
+  }
+  const context = snippets.map((item, idx) => ([
+    `File ${idx + 1}: ${item.name}`,
+    item.summary ? `Summary: ${item.summary}` : 'Summary: (none)',
+    'Content excerpt:',
+    item.excerpt,
+  ].join('\n'))).join('\n\n---\n\n');
+
+  const systemPrompt = [
+    'You are summarizing LOCAL files for safe external model routing.',
+    'Return detailed factual abstraction in markdown.',
+    'Preserve technical meaning, dependencies, architecture, and intent.',
+    'Do not include secrets, tokens, or direct personal identifiers when possible.',
+  ].join('\n');
+  const userPrompt = [
+    `Reference: ${String((ref && ref.title) || 'Untitled Reference')}`,
+    `Intent: ${String((ref && ref.intent) || '').slice(0, 1200)}`,
+    '',
+    'Create an abstraction copy covering key modules, data flow, constraints, and notable implementation details.',
+    'Keep enough detail so another model can reason accurately without needing the raw local files.',
+    '',
+    context || '(no readable local file content)',
+  ].join('\n');
+  return { systemPrompt, userPrompt, snippets };
+}
+
+function buildFallbackAbstractionMarkdown(ref = {}, files = []) {
+  const list = Array.isArray(files) ? files : [];
+  const lines = [
+    '# Local Files Abstraction',
+    '',
+    `Reference: ${String((ref && ref.title) || 'Untitled Reference')}`,
+    '',
+    '## Notes',
+    '- Model abstraction fallback was used.',
+    '- Sensitive tokens are redacted.',
+    '',
+    `## Local File Count: ${list.length}`,
+  ];
+  list.slice(0, 160).forEach((file) => {
+    const name = String((file && file.original_name) || (file && file.relative_path) || (file && file.id) || 'file').trim();
+    const summary = String((file && file.summary) || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+    lines.push(`- ${name}${summary ? `: ${summary}` : ''}`);
+  });
+  return lines.join('\n');
+}
+
+function buildAbstractionContextFileFromRef(ref = {}) {
+  const refId = String((ref && ref.id) || '').trim();
+  if (!refId) return null;
+  const cache = normalizeAbstractionCache((ref && ref.abstraction_cache) || {}, refId);
+  if (cache.status !== 'ready' || !cache.stored_path || !fs.existsSync(cache.stored_path)) return null;
+  return {
+    id: cache.id,
+    source_type: 'abstraction_copy',
+    original_name: 'abstracted_context.md',
+    relative_path: 'abstraction/abstracted_context.md',
+    stored_path: cache.stored_path,
+    mime_type: 'text/markdown',
+    size_bytes: (() => {
+      try {
+        return fs.statSync(cache.stored_path).size;
+      } catch (_) {
+        return 0;
+      }
+    })(),
+    content_hash: cache.source_hash,
+    ingest_status: 'ready',
+    summary: cache.summary || 'Redacted abstraction copy of local files.',
+    read_only: true,
+    synthetic: true,
+    created_at: Number(cache.updated_at || 0),
+    updated_at: Number(cache.updated_at || 0),
+  };
+}
+
+function shouldRouteLocalToolingThroughAbstraction(provider = '', settings = readSettings()) {
+  const targetProvider = String(provider || '').trim().toLowerCase();
+  return !!(settings && settings.abstraction_enabled) && targetProvider !== 'lmstudio';
+}
+
+function buildScopedRefsForToolExecution(scopedRefs = [], provider = '', settings = readSettings()) {
+  if (!shouldRouteLocalToolingThroughAbstraction(provider, settings)) {
+    return Array.isArray(scopedRefs) ? scopedRefs : [];
+  }
+  return (Array.isArray(scopedRefs) ? scopedRefs : []).map((ref) => {
+    const next = deepClone(ref);
+    const contextFiles = Array.isArray(next.context_files) ? next.context_files : [];
+    const nonLocal = contextFiles.filter((file) => !isLocalContextFileForAbstraction(file));
+    const localCount = contextFiles.length - nonLocal.length;
+    const abstractionFile = buildAbstractionContextFileFromRef(ref);
+    next.context_files = nonLocal;
+    if (localCount > 0 && abstractionFile) {
+      next.context_files.push(abstractionFile);
+    }
+    return next;
+  });
+}
+
+async function rebuildReferenceAbstraction(ref, settings = readSettings(), options = {}) {
+  const target = (ref && typeof ref === 'object') ? ref : null;
+  if (!target) return { ok: false, changed: false, message: 'Reference not found.' };
+  const abstractionEnabled = !!(settings && settings.abstraction_enabled);
+  if (!abstractionEnabled) {
+    return { ok: true, changed: false, skipped: true, message: 'Abstraction is disabled.' };
+  }
+
+  const model = String((settings && settings.abstraction_model) || '').trim();
+  const strictRedaction = settings && Object.prototype.hasOwnProperty.call(settings, 'abstraction_strict_redaction')
+    ? !!settings.abstraction_strict_redaction
+    : true;
+  const force = !!(options && options.force);
+  const refId = String(target.id || '').trim();
+  if (!refId) return { ok: false, changed: false, message: 'Reference ID is missing.' };
+
+  const localFiles = (Array.isArray(target.context_files) ? target.context_files : [])
+    .filter((file) => isLocalContextFileForAbstraction(file));
+  const sourceHash = buildAbstractionSourceHash(target, localFiles, model);
+  const prevCache = normalizeAbstractionCache(target.abstraction_cache || {}, refId);
+
+  const setCache = (patch = {}) => {
+    const nextCache = normalizeAbstractionCache({
+      ...prevCache,
+      ...(target.abstraction_cache && typeof target.abstraction_cache === 'object' ? target.abstraction_cache : {}),
+      ...patch,
+    }, refId);
+    const before = JSON.stringify(target.abstraction_cache || null);
+    target.abstraction_cache = nextCache;
+    return before !== JSON.stringify(nextCache);
+  };
+
+  if (!model) {
+    const changed = setCache({
+      status: 'error',
+      message: 'Abstraction model is not configured.',
+      model: '',
+      source_hash: sourceHash,
+      local_file_count: localFiles.length,
+    });
+    return { ok: false, changed, message: 'Abstraction model is not configured.' };
+  }
+
+  const cacheReady = (
+    prevCache.status === 'ready'
+    && prevCache.model === model
+    && prevCache.source_hash === sourceHash
+    && prevCache.stored_path
+    && fs.existsSync(prevCache.stored_path)
+  );
+  if (!force && cacheReady) {
+    return { ok: true, changed: false, skipped: true, message: 'Abstraction is already up to date.' };
+  }
+
+  setCache({
+    status: 'building',
+    message: localFiles.length > 0 ? 'Building abstraction copy.' : 'No local files to abstract.',
+    model,
+    source_hash: sourceHash,
+    local_file_count: localFiles.length,
+  });
+
+  const { outDir, outPath } = getAbstractionOutputPath(refId);
+  fs.mkdirSync(outDir, { recursive: true });
+
+  let modelText = '';
+  if (localFiles.length > 0) {
+    const promptBundle = buildAbstractionPromptBundle(target, localFiles);
+    const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
+    if (lmCreds && lmCreds.ok) {
+      try {
+        const modelRes = await chatWithProvider({
+          provider: 'lmstudio',
+          model,
+          apiKey: String(lmCreds.apiKey || ''),
+          baseUrl: String(lmCreds.base_url || ''),
+          systemPrompt: promptBundle.systemPrompt,
+          userPrompt: promptBundle.userPrompt,
+        }, {
+          timeoutMs: ABSTRACTION_SUMMARY_TIMEOUT_MS,
+        });
+        modelText = String((modelRes && modelRes.text) || '').trim();
+      } catch (_) {
+        modelText = '';
+      }
+    }
+  }
+
+  const fallback = buildFallbackAbstractionMarkdown(target, localFiles);
+  const abstractionBody = (strictRedaction ? redactSensitiveText(modelText || fallback) : String(modelText || fallback)).trim() || fallback;
+  const abstractionContent = [
+    '# Abstraction Copy',
+    '',
+    `Generated: ${new Date().toISOString()}`,
+    `Reference: ${String(target.title || refId)}`,
+    `Local files considered: ${localFiles.length}`,
+    '',
+    abstractionBody,
+    '',
+  ].join('\n');
+
+  try {
+    fs.writeFileSync(outPath, abstractionContent, 'utf8');
+  } catch (err) {
+    const changed = setCache({
+      status: 'error',
+      message: String((err && err.message) || 'Unable to write abstraction file.'),
+      model,
+      source_hash: sourceHash,
+      local_file_count: localFiles.length,
+    });
+    return { ok: false, changed, message: String((err && err.message) || 'Unable to write abstraction file.') };
+  }
+
+  const changed = setCache({
+    id: prevCache.id || `ctx_abs_${refId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100)}`,
+    stored_path: outPath,
+    source_hash: sourceHash,
+    model,
+    updated_at: nowTs(),
+    status: 'ready',
+    message: localFiles.length > 0 ? 'Abstraction copy is ready.' : 'No local files available; generated empty abstraction copy.',
+    local_file_count: localFiles.length,
+    summary: `${localFiles.length} local file(s) abstracted with strict redaction.`,
+  });
+  return {
+    ok: true,
+    changed,
+    message: String((target.abstraction_cache && target.abstraction_cache.message) || 'Abstraction copy is ready.'),
+    cache: target.abstraction_cache,
+  };
+}
+
+function markReferenceAbstractionStale(ref, reason = 'Local files changed.') {
+  if (!ref || typeof ref !== 'object') return false;
+  const refId = String(ref.id || '').trim();
+  if (!refId) return false;
+  const prev = normalizeAbstractionCache(ref.abstraction_cache || {}, refId);
+  const next = normalizeAbstractionCache({
+    ...prev,
+    status: 'stale',
+    message: String(reason || 'Local files changed.'),
+  }, refId);
+  const before = JSON.stringify(ref.abstraction_cache || null);
+  ref.abstraction_cache = next;
+  return before !== JSON.stringify(next);
+}
+
+async function queueReferenceAbstractionRefresh(srId = '', options = {}) {
+  const refId = String(srId || '').trim();
+  if (!refId) return { ok: false, message: 'srId is required.' };
+  const force = !!(options && options.force);
+  if (abstractionRefreshInFlight.has(refId)) {
+    return abstractionRefreshInFlight.get(refId);
+  }
+  const task = (async () => {
+    const settings = readSettings();
+    if (!settings.abstraction_enabled) {
+      return { ok: true, skipped: true, message: 'Abstraction disabled.' };
+    }
+    const refs = getReferences();
+    const idx = findReferenceIndex(refs, refId);
+    if (idx < 0) return { ok: false, message: 'Reference not found.' };
+    const rebuildRes = await rebuildReferenceAbstraction(refs[idx], settings, { force });
+    if (rebuildRes && rebuildRes.changed) {
+      refs[idx].updated_at = nowTs();
+      setReferences(refs, { skipMemoryCapture: true });
+    }
+    return rebuildRes;
+  })();
+  abstractionRefreshInFlight.set(refId, task);
+  return task.finally(() => {
+    abstractionRefreshInFlight.delete(refId);
+  });
+}
+
+async function queueAbstractionBackfillForAllReferences(options = {}) {
+  const force = !!(options && options.force);
+  const settings = readSettings();
+  if (!settings.abstraction_enabled) return { ok: true, skipped: true, count: 0 };
+  const refs = getReferences();
+  let rebuilt = 0;
+  for (let i = 0; i < refs.length; i += 1) {
+    const ref = refs[i];
+    const refId = String((ref && ref.id) || '').trim();
+    if (!refId) continue;
+    const res = await queueReferenceAbstractionRefresh(refId, { force });
+    if (res && res.ok && !res.skipped) rebuilt += 1;
+  }
+  return { ok: true, count: rebuilt };
+}
+
+function buildAbstractionStatusSnapshot(payload = {}) {
+  const input = (payload && typeof payload === 'object') ? payload : {};
+  const srId = String(input.sr_id || input.srId || '').trim();
+  const settings = readSettings();
+  if (!settings.abstraction_enabled) {
+    return {
+      ok: true,
+      enabled: false,
+      message: 'Abstraction is disabled.',
+      count: 0,
+      counts: { ready: 0, building: 0, stale: 0, error: 0 },
+      references: [],
+    };
+  }
+  const refs = getReferences();
+  const filtered = srId
+    ? refs.filter((ref) => String((ref && ref.id) || '').trim() === srId)
+    : refs;
+  const items = filtered.map((ref) => {
+    const refId = String((ref && ref.id) || '').trim();
+    const cache = normalizeAbstractionCache((ref && ref.abstraction_cache) || {}, refId);
+    return {
+      sr_id: refId,
+      title: String((ref && ref.title) || '').trim(),
+      status: cache.status,
+      updated_at: Number(cache.updated_at || 0),
+      local_file_count: Number(cache.local_file_count || 0),
+      model: String(cache.model || ''),
+      message: String(cache.message || ''),
+    };
+  });
+  const counts = {
+    ready: items.filter((item) => item.status === 'ready').length,
+    building: items.filter((item) => item.status === 'building').length,
+    stale: items.filter((item) => item.status === 'stale').length,
+    error: items.filter((item) => item.status === 'error').length,
+  };
+  return {
+    ok: true,
+    enabled: true,
+    count: items.length,
+    counts,
+    references: items,
+  };
 }
 
 function decodeXmlEntities(value) {
@@ -1437,6 +1902,209 @@ function sanitizeFilename(name, fallback = 'artifact-image.png') {
   return `${safe}.png`;
 }
 
+function guessImageMimeTypeFromPath(filePath = '') {
+  const ext = String(path.extname(String(filePath || '')).toLowerCase() || '');
+  if (ext === '.png') return 'image/png';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.bmp') return 'image/bmp';
+  if (ext === '.svg') return 'image/svg+xml';
+  if (ext === '.tif' || ext === '.tiff') return 'image/tiff';
+  return 'application/octet-stream';
+}
+
+function extractOpenAiLikeTextFromChatJson(json = {}) {
+  const choices = Array.isArray(json && json.choices) ? json.choices : [];
+  const message = choices[0] && choices[0].message ? choices[0].message : {};
+  const content = message && Object.prototype.hasOwnProperty.call(message, 'content')
+    ? message.content
+    : '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part.text === 'string') return part.text;
+      return '';
+    }).join('');
+  }
+  return '';
+}
+
+async function loadImagePayloadForAnalysis(args = {}) {
+  const input = (args && typeof args === 'object') ? args : {};
+  const localPathRaw = String(input.local_path || '').trim();
+  const imageUrlRaw = String(input.image_url || '').trim();
+  if (!localPathRaw && !imageUrlRaw) {
+    return { ok: false, message: 'Either local_path or image_url is required.' };
+  }
+
+  if (localPathRaw) {
+    const resolvedPath = path.resolve(localPathRaw);
+    if (!fs.existsSync(resolvedPath)) {
+      return { ok: false, message: 'local_path does not exist.' };
+    }
+    let stat = null;
+    try {
+      stat = fs.statSync(resolvedPath);
+    } catch (_) {
+      stat = null;
+    }
+    if (!stat || !stat.isFile()) {
+      return { ok: false, message: 'local_path is not a file.' };
+    }
+    if (stat.size > IMAGE_ANALYSIS_MAX_BYTES) {
+      return { ok: false, message: `Image exceeds ${Math.round(IMAGE_ANALYSIS_MAX_BYTES / (1024 * 1024))}MB limit.` };
+    }
+    let data = null;
+    try {
+      data = fs.readFileSync(resolvedPath);
+    } catch (err) {
+      return { ok: false, message: String((err && err.message) || 'Unable to read local image file.') };
+    }
+    const mime = guessImageMimeTypeFromPath(resolvedPath);
+    return {
+      ok: true,
+      source: `file:${resolvedPath}`,
+      mime,
+      bytes: data.length,
+      data_url: `data:${mime};base64,${data.toString('base64')}`,
+    };
+  }
+
+  if (/^data:image\//i.test(imageUrlRaw)) {
+    const dataMatch = imageUrlRaw.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+    if (!dataMatch) return { ok: false, message: 'Unsupported data URL format.' };
+    const mime = String(dataMatch[1] || '').toLowerCase();
+    const b64 = String(dataMatch[2] || '');
+    const size = Buffer.byteLength(b64, 'base64');
+    if (size > IMAGE_ANALYSIS_MAX_BYTES) {
+      return { ok: false, message: `Image exceeds ${Math.round(IMAGE_ANALYSIS_MAX_BYTES / (1024 * 1024))}MB limit.` };
+    }
+    return {
+      ok: true,
+      source: 'data_url',
+      mime,
+      bytes: size,
+      data_url: imageUrlRaw,
+    };
+  }
+
+  if (/^file:\/\//i.test(imageUrlRaw)) {
+    const filePath = filePathFromFileUrl(imageUrlRaw);
+    return loadImagePayloadForAnalysis({ local_path: filePath });
+  }
+
+  if (!/^https?:\/\//i.test(imageUrlRaw)) {
+    return { ok: false, message: 'image_url must be http(s), file://, or data URL.' };
+  }
+
+  const { controller, timer } = makeTimeoutSignal(IMAGE_ANALYSIS_TIMEOUT_MS);
+  try {
+    const response = await fetch(imageUrlRaw, { signal: controller.signal });
+    if (!response || !response.ok) {
+      return { ok: false, message: `Image request failed (${response ? response.status : 'unknown'}).` };
+    }
+    const arr = await response.arrayBuffer();
+    const buf = Buffer.from(arr);
+    if (buf.length > IMAGE_ANALYSIS_MAX_BYTES) {
+      return { ok: false, message: `Image exceeds ${Math.round(IMAGE_ANALYSIS_MAX_BYTES / (1024 * 1024))}MB limit.` };
+    }
+    const contentType = String((response.headers && response.headers.get && response.headers.get('content-type')) || '').trim().toLowerCase();
+    const mime = contentType.startsWith('image/') ? contentType.split(';')[0] : 'image/png';
+    return {
+      ok: true,
+      source: imageUrlRaw,
+      mime,
+      bytes: buf.length,
+      data_url: `data:${mime};base64,${buf.toString('base64')}`,
+    };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to fetch image URL.') };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function analyzeImageWithLmStudio(args = {}, settings = readSettings()) {
+  const model = String((settings && settings.image_analysis_model) || '').trim();
+  if (!model) {
+    return { ok: false, message: 'Image analysis model is not configured in Settings.' };
+  }
+
+  const imagePayload = await loadImagePayloadForAnalysis(args);
+  if (!imagePayload || !imagePayload.ok) {
+    return { ok: false, message: String((imagePayload && imagePayload.message) || 'Unable to load image source.') };
+  }
+
+  const prompt = String(args.prompt || settings.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim() || IMAGE_ANALYSIS_PROMPT_DEFAULT;
+  const creds = resolveProviderRuntimeCredentials('lmstudio', settings);
+  if (!creds || !creds.ok) {
+    return { ok: false, message: String((creds && creds.message) || 'LM Studio credentials are unavailable.') };
+  }
+  const baseUrl = String((creds && creds.base_url) || '').trim() || LMSTUDIO_DEFAULT_BASE_URL;
+  const endpoint = `${normalizeHttpBaseUrl(baseUrl, LMSTUDIO_DEFAULT_BASE_URL)}/v1/chat/completions`;
+  const headers = { 'content-type': 'application/json' };
+  const apiKey = String((creds && creds.apiKey) || '');
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+
+  const body = {
+    model,
+    temperature: 0.2,
+    messages: [
+      {
+        role: 'system',
+        content: 'You provide high-fidelity visual analysis. Explain objects, layout, text, style, and likely context clearly.',
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: String(imagePayload.data_url || '') } },
+        ],
+      },
+    ],
+  };
+
+  const { controller, timer } = makeTimeoutSignal(IMAGE_ANALYSIS_TIMEOUT_MS);
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response || !response.ok) {
+      const fail = await readResponseJson(response);
+      const message = (
+        (fail && fail.json && fail.json.error && fail.json.error.message)
+        || (fail && fail.json && fail.json.error)
+        || (fail && fail.raw)
+        || `Image analysis request failed (${response ? response.status : 'unknown'}).`
+      );
+      return { ok: false, message: String(message).slice(0, 300) };
+    }
+    const okPayload = await readResponseJson(response);
+    const description = extractOpenAiLikeTextFromChatJson((okPayload && okPayload.json) || {}).trim();
+    if (!description) {
+      return { ok: false, message: 'Image analysis returned no text.' };
+    }
+    return {
+      ok: true,
+      description,
+      source: String(imagePayload.source || ''),
+      mime_type: String(imagePayload.mime || ''),
+      bytes: Number(imagePayload.bytes || 0),
+      model,
+      prompt,
+    };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Image analysis failed.') };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function saveArtifactImageForReference(srId, sourceUrl, suggestedName) {
   const refId = String(srId || '').trim();
   const src = String(sourceUrl || '').trim();
@@ -2061,6 +2729,11 @@ function getDefaultSettings() {
     lmstudio_token_ref: '',
     orchestrator_web_provider: ORCHESTRATOR_WEB_PROVIDER_DEFAULT,
     orchestrator_web_provider_key_ref: '',
+    abstraction_enabled: false,
+    abstraction_model: '',
+    abstraction_strict_redaction: true,
+    image_analysis_model: '',
+    image_analysis_prompt: IMAGE_ANALYSIS_PROMPT_DEFAULT,
   };
 }
 
@@ -2093,6 +2766,9 @@ function readSettings() {
     const lmstudioBaseUrl = String((parsed && parsed.lmstudio_base_url) || defaults.lmstudio_base_url).trim();
     const lmstudioDefaultModel = String((parsed && parsed.lmstudio_default_model) || defaults.lmstudio_default_model).trim();
     const orchestratorWebProvider = String((parsed && parsed.orchestrator_web_provider) || defaults.orchestrator_web_provider).trim().toLowerCase();
+    const abstractionModel = String((parsed && parsed.abstraction_model) || defaults.abstraction_model).trim();
+    const imageAnalysisModel = String((parsed && parsed.image_analysis_model) || defaults.image_analysis_model).trim();
+    const imageAnalysisPrompt = String((parsed && parsed.image_analysis_prompt) || defaults.image_analysis_prompt).trim();
     return {
       default_search_engine: ['google', 'bing', 'ddg'].includes(engine) ? engine : 'ddg',
       trustcommons_bootstrap_complete: !!(parsed && parsed.trustcommons_bootstrap_complete),
@@ -2154,6 +2830,15 @@ function readSettings() {
         ? orchestratorWebProvider
         : defaults.orchestrator_web_provider,
       orchestrator_web_provider_key_ref: String((parsed && parsed.orchestrator_web_provider_key_ref) || defaults.orchestrator_web_provider_key_ref).trim(),
+      abstraction_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'abstraction_enabled')
+        ? !!parsed.abstraction_enabled
+        : defaults.abstraction_enabled,
+      abstraction_model: abstractionModel,
+      abstraction_strict_redaction: parsed && Object.prototype.hasOwnProperty.call(parsed, 'abstraction_strict_redaction')
+        ? !!parsed.abstraction_strict_redaction
+        : defaults.abstraction_strict_redaction,
+      image_analysis_model: imageAnalysisModel,
+      image_analysis_prompt: imageAnalysisPrompt || IMAGE_ANALYSIS_PROMPT_DEFAULT,
     };
   } catch (_) {
     return defaults;
@@ -2261,6 +2946,21 @@ function writeSettings(next) {
       ? input.orchestrator_web_provider
       : current.orchestrator_web_provider
   ).trim().toLowerCase();
+  const requestedAbstractionModel = String(
+    Object.prototype.hasOwnProperty.call(input, 'abstraction_model')
+      ? input.abstraction_model
+      : current.abstraction_model
+  ).trim();
+  const requestedImageAnalysisModel = String(
+    Object.prototype.hasOwnProperty.call(input, 'image_analysis_model')
+      ? input.image_analysis_model
+      : current.image_analysis_model
+  ).trim();
+  const requestedImageAnalysisPrompt = String(
+    Object.prototype.hasOwnProperty.call(input, 'image_analysis_prompt')
+      ? input.image_analysis_prompt
+      : current.image_analysis_prompt
+  ).trim();
   const settings = {
     default_search_engine: ['google', 'bing', 'ddg'].includes(requestedEngine)
       ? requestedEngine
@@ -2362,6 +3062,15 @@ function writeSettings(next) {
         ? input.orchestrator_web_provider_key_ref
         : current.orchestrator_web_provider_key_ref
     ).trim(),
+    abstraction_enabled: Object.prototype.hasOwnProperty.call(input, 'abstraction_enabled')
+      ? !!input.abstraction_enabled
+      : !!current.abstraction_enabled,
+    abstraction_model: requestedAbstractionModel,
+    abstraction_strict_redaction: Object.prototype.hasOwnProperty.call(input, 'abstraction_strict_redaction')
+      ? !!input.abstraction_strict_redaction
+      : !!current.abstraction_strict_redaction,
+    image_analysis_model: requestedImageAnalysisModel,
+    image_analysis_prompt: requestedImageAnalysisPrompt || IMAGE_ANALYSIS_PROMPT_DEFAULT,
   };
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
   return settings;
@@ -6869,6 +7578,7 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
     history: { ok: true, changed: false },
     telegram: { ok: true, changed: false },
     orchestrator_scheduler: { ok: true, changed: false },
+    abstraction: { ok: true, changed: false },
   };
 
   const hyperwebChanged = (
@@ -6931,6 +7641,29 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
     const schedulerStatus = ensureOrchestratorSchedulerRuntime();
     applied.orchestrator_scheduler.ok = !!(schedulerStatus && schedulerStatus.ok);
     applied.orchestrator_scheduler.status = schedulerStatus || {};
+  }
+
+  const abstractionChanged = (
+    prev.abstraction_enabled !== next.abstraction_enabled
+    || String(prev.abstraction_model || '') !== String(next.abstraction_model || '')
+    || !!prev.abstraction_strict_redaction !== !!next.abstraction_strict_redaction
+  );
+  if (abstractionChanged) {
+    applied.abstraction.changed = true;
+    if (next.abstraction_enabled) {
+      try {
+        const backfill = await queueAbstractionBackfillForAllReferences({ force: true });
+        applied.abstraction.ok = !!(backfill && backfill.ok);
+        applied.abstraction.message = backfill && backfill.skipped
+          ? 'Abstraction backfill skipped.'
+          : `Abstraction backfill completed for ${Number((backfill && backfill.count) || 0)} reference(s).`;
+      } catch (err) {
+        applied.abstraction.ok = false;
+        applied.abstraction.message = String((err && err.message) || 'Abstraction backfill failed.');
+      }
+    } else {
+      applied.abstraction.message = 'Abstraction disabled.';
+    }
   }
 
   return applied;
@@ -7945,6 +8678,14 @@ function getReferences() {
       ref.program = String(ref.program || '');
       changed = true;
     }
+    if (ref.abstraction_cache && typeof ref.abstraction_cache === 'object') {
+      const prevAbstractionRaw = JSON.stringify(ref.abstraction_cache);
+      const normalizedAbstraction = normalizeAbstractionCache(ref.abstraction_cache, String(ref.id || '').trim());
+      if (JSON.stringify(normalizedAbstraction) !== prevAbstractionRaw) {
+        ref.abstraction_cache = normalizedAbstraction;
+        changed = true;
+      }
+    }
     const nextAgentMeta = normalizeReferenceAgentMeta(ref.agent_meta);
     const prevAgentMetaRaw = JSON.stringify((ref.agent_meta && typeof ref.agent_meta === 'object') ? ref.agent_meta : null);
     if (JSON.stringify(nextAgentMeta) !== prevAgentMetaRaw) {
@@ -8047,6 +8788,9 @@ function setReferences(refs, options = {}) {
       ? ref.artifacts.slice(0, 80).map((artifact) => createArtifact(artifact))
       : [createArtifact({ type: 'markdown', title: 'Research Draft', content: '' })];
     ref.agent_meta = normalizeReferenceAgentMeta(ref.agent_meta);
+    if (ref.abstraction_cache && typeof ref.abstraction_cache === 'object') {
+      ref.abstraction_cache = normalizeAbstractionCache(ref.abstraction_cache, String(ref.id || '').trim());
+    }
     pruneYouTubeTranscriptContextFiles(ref);
     if (!skipMemoryCapture) {
       capturePeriodicMemoryCheckpoints(ref);
@@ -9299,6 +10043,10 @@ function formatToolStatusStart(toolName, args = {}) {
   if (name === 'fetch_webpage') {
     return `Reading webpage: ${summarizeUrlForStatus(payload.url)}`;
   }
+  if (name === 'analyze_image') {
+    const target = String(payload.local_path || payload.image_url || '').trim();
+    return `Analyzing image: ${trimStatusText(target, 96) || '(selected image)'}`;
+  }
   if (name === 'write_markdown_artifact' || name === 'write_html_artifact') {
     return `Writing artifact "${trimStatusText(payload.title || 'Research Draft', 80)}"...`;
   }
@@ -9503,10 +10251,26 @@ async function executeLuminoChat(input, options = {}) {
   }
   const providerApiKey = String(providerCreds.apiKey || '');
   const providerBaseUrl = String(providerCreds.base_url || '').trim();
+  const runtimeSettings = readSettings();
+
+  if (runtimeSettings.abstraction_enabled) {
+    try {
+      await queueReferenceAbstractionRefresh(srId, { force: false });
+    } catch (_) {
+      // Keep chat flow resilient if abstraction refresh fails.
+    }
+  }
+
+  const getToolScopedRefs = () => {
+    const freshScoped = getPathCScopedReferences(srId, getReferences());
+    return buildScopedRefsForToolExecution(freshScoped, provider, readSettings());
+  };
 
   const providerSupportsAgentMode = AGENT_MODE_SUPPORTED_PROVIDERS.includes(provider);
   const canUseAgentMode = providerSupportsAgentMode;
-  const prompts = buildLuminoProviderPrompts(message, activeRef, scopedRefs, {
+  const promptScopedRefs = buildScopedRefsForToolExecution(scopedRefs, provider, runtimeSettings);
+  const promptActiveRef = promptScopedRefs.find((item) => String((item && item.id) || '') === srId) || activeRef;
+  const prompts = buildLuminoProviderPrompts(message, promptActiveRef, promptScopedRefs, {
     toolingEnabled: canUseAgentMode,
     activeArtifactContext,
   });
@@ -9622,7 +10386,7 @@ async function executeLuminoChat(input, options = {}) {
               tool_name: bridgeName,
             });
             try {
-              const bridgeResult = dispatchProgrammaticTool(bridgeReq, { srId, refs: getReferences() });
+              const bridgeResult = dispatchProgrammaticTool(bridgeReq, { srId, refs: getToolScopedRefs() });
               const hasError = !!(bridgeResult && typeof bridgeResult === 'object' && String(bridgeResult.error || '').trim());
               if (hasError) {
                 emitStatus('error', 'python_bridge', `Python bridge ${bridgeName || 'tool'} failed: ${String(bridgeResult.error || '').trim()}`, {
@@ -9772,7 +10536,7 @@ async function executeLuminoChat(input, options = {}) {
           const includeKinds = Array.isArray(args.include_kinds)
             ? args.include_kinds.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
             : [];
-          const searchRes = searchLocalEvidence(query, scopedRefs, {
+          const searchRes = searchLocalEvidence(query, getToolScopedRefs(), {
             topK,
             includeKinds,
           });
@@ -10038,7 +10802,7 @@ async function executeLuminoChat(input, options = {}) {
           || name === 'read_context_file'
         ) {
           try {
-            const directResult = dispatchProgrammaticTool({ name, args }, { srId, refs: getReferences() });
+            const directResult = dispatchProgrammaticTool({ name, args }, { srId, refs: getToolScopedRefs() });
             const hasError = !!(directResult && typeof directResult === 'object' && String(directResult.error || '').trim());
             if (hasError) {
               return {
@@ -10220,6 +10984,42 @@ async function executeLuminoChat(input, options = {}) {
               },
             };
           }
+        }
+
+        if (name === 'analyze_image') {
+          const imageUrl = String(args.image_url || '').trim();
+          const localPath = String(args.local_path || '').trim();
+          if (!imageUrl && !localPath) {
+            return {
+              ok: false,
+              message: 'Either image_url or local_path is required.',
+              tool_output: { ok: false, message: 'Either image_url or local_path is required.' },
+            };
+          }
+          const analysisRes = await analyzeImageWithLmStudio(args, readSettings());
+          if (!analysisRes || !analysisRes.ok) {
+            return {
+              ok: false,
+              message: String((analysisRes && analysisRes.message) || 'Image analysis failed.'),
+              tool_output: {
+                ok: false,
+                message: String((analysisRes && analysisRes.message) || 'Image analysis failed.'),
+              },
+            };
+          }
+          return {
+            ok: true,
+            message: 'Image analysis completed.',
+            tool_output: {
+              ok: true,
+              description: String(analysisRes.description || ''),
+              source: String(analysisRes.source || ''),
+              model: String(analysisRes.model || ''),
+              prompt: String(analysisRes.prompt || ''),
+              mime_type: String(analysisRes.mime_type || ''),
+              bytes: Number(analysisRes.bytes || 0),
+            },
+          };
         }
 
         if (name === 'write_markdown_artifact' || name === 'write_html_artifact') {
@@ -12514,7 +13314,7 @@ ipcMain.handle('browser:srListPendingDiffOps', () => {
   return { ok: true, diff_ops: [] };
 });
 
-ipcMain.handle('browser:srAddContextFile', (_event, payload) => {
+ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
   try {
     const srId = String((payload && payload.srId) || '').trim();
     const absolutePath = String((payload && payload.absolutePath) || '').trim();
@@ -12576,8 +13376,10 @@ ipcMain.handle('browser:srAddContextFile', (_event, payload) => {
     };
     refs[idx].context_files.push(item);
     const filesTabRes = ensureSingleFilesTab(refs[idx]);
+    markReferenceAbstractionStale(refs[idx], 'Local file added.');
     refs[idx].updated_at = nowTs();
     setReferences(refs);
+    queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
     return {
       ok: true,
       file: item,
@@ -12779,8 +13581,10 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
 
   const filesTabRes = ensureSingleFilesTab(refs[idx]);
 
+  markReferenceAbstractionStale(refs[idx], 'Folder mount indexed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
+  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
 
   return {
     ok: true,
@@ -12794,7 +13598,7 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
   };
 });
 
-ipcMain.handle('browser:srReindexFolderMount', (_event, payload) => {
+ipcMain.handle('browser:srReindexFolderMount', async (_event, payload) => {
   const srId = String((payload && payload.srId) || '').trim();
   const mountId = String((payload && payload.mountId) || '').trim();
   if (!srId || !mountId) return { ok: false, message: 'srId and mountId are required.' };
@@ -12851,8 +13655,10 @@ ipcMain.handle('browser:srReindexFolderMount', (_event, payload) => {
   mount.truncated = ingest.truncated;
 
   const filesTabRes = ensureSingleFilesTab(refs[idx]);
+  markReferenceAbstractionStale(refs[idx], 'Folder mount reindexed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
+  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
 
   return {
     ok: true,
@@ -12866,7 +13672,7 @@ ipcMain.handle('browser:srReindexFolderMount', (_event, payload) => {
   };
 });
 
-ipcMain.handle('browser:srUnmountFolder', (_event, payload) => {
+ipcMain.handle('browser:srUnmountFolder', async (_event, payload) => {
   const srId = String((payload && payload.srId) || '').trim();
   const mountId = String((payload && payload.mountId) || '').trim();
   if (!srId || !mountId) return { ok: false, message: 'srId and mountId are required.' };
@@ -12885,8 +13691,10 @@ ipcMain.handle('browser:srUnmountFolder', (_event, payload) => {
 
   refs[idx].context_files = refs[idx].context_files.filter((file) => String((file && file.mount_id) || '') !== mountId);
   const filesTabRes = ensureSingleFilesTab(refs[idx]);
+  markReferenceAbstractionStale(refs[idx], 'Folder mount removed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
+  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
 
   return {
     ok: true,
@@ -12929,7 +13737,7 @@ ipcMain.handle('browser:srGetContextFilePreview', (_event, payload) => {
   }
 });
 
-ipcMain.handle('browser:srRemoveContextFile', (_event, payload) => {
+ipcMain.handle('browser:srRemoveContextFile', async (_event, payload) => {
   const srId = String((payload && payload.srId) || '').trim();
   const fileId = String((payload && payload.fileId) || '').trim();
   const refs = getReferences();
@@ -12941,8 +13749,10 @@ ipcMain.handle('browser:srRemoveContextFile', (_event, payload) => {
   if (next.length === prev.length) return { ok: false, message: 'Context file not found.' };
 
   refs[idx].context_files = next;
+  markReferenceAbstractionStale(refs[idx], 'Context file removed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
+  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
 
   return { ok: true, reference: refs[idx], references: refs };
 });
@@ -13693,6 +14503,29 @@ ipcMain.handle('browser:updatePreferences', async (_event, payload) => {
     ok: true,
     settings: updated,
     applied_runtime: appliedRuntime,
+  };
+});
+
+ipcMain.handle('browser:abstractionStatus', (_event, payload) => {
+  return buildAbstractionStatusSnapshot(payload || {});
+});
+
+ipcMain.handle('browser:abstractionRebuild', async (_event, payload) => {
+  const input = (payload && typeof payload === 'object') ? payload : {};
+  const srId = String(input.sr_id || input.srId || '').trim();
+  if (srId) {
+    const res = await queueReferenceAbstractionRefresh(srId, { force: true });
+    return {
+      ok: !!(res && res.ok),
+      result: res || {},
+      status: buildAbstractionStatusSnapshot({ sr_id: srId }),
+    };
+  }
+  const backfill = await queueAbstractionBackfillForAllReferences({ force: true });
+  return {
+    ok: !!(backfill && backfill.ok),
+    result: backfill || {},
+    status: buildAbstractionStatusSnapshot({}),
   };
 });
 

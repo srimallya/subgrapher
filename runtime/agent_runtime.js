@@ -523,6 +523,20 @@ const AGENT_TOOLS = [
     },
   },
   {
+    name: 'analyze_image',
+    allowed_callers: ['direct'],
+    description: 'Analyze a web or local image and return a detailed textual description with context.',
+    parameters: {
+      type: 'object',
+      properties: {
+        image_url: { type: 'string', description: 'HTTP(S), file://, or data URL image source.' },
+        local_path: { type: 'string', description: 'Absolute local filesystem path to an image file.' },
+        prompt: { type: 'string', description: 'Optional analysis prompt override.' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'open_web_tab',
     allowed_callers: ['direct'],
     description: 'Open a URL in a web tab in the active reference workspace.',
