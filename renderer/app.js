@@ -384,6 +384,39 @@ function getReferenceById(srId) {
   return state.references.find((ref) => String((ref && ref.id) || '') === id) || null;
 }
 
+function ensureReferencesArray() {
+  if (!Array.isArray(state.references)) state.references = [];
+}
+
+function repairActiveReferenceSelection() {
+  ensureReferencesArray();
+  const refs = state.references;
+  const activeId = String(state.activeSrId || '').trim();
+  const hasActive = !!(activeId && refs.some((ref) => String((ref && ref.id) || '') === activeId));
+  if (hasActive) return false;
+  const fallbackId = String(((refs[0] && refs[0].id) || '')).trim();
+  state.activeSrId = fallbackId || null;
+  if (fallbackId) {
+    const fallbackRef = getReferenceById(fallbackId);
+    state.activeSurface = restoreSurfaceForReference(fallbackRef);
+    rememberSurfaceForReference(fallbackId, state.activeSurface);
+  }
+  return true;
+}
+
+async function refreshAndRepairActiveReferenceSelection() {
+  const list = await api.srList();
+  state.references = Array.isArray(list) ? list : [];
+  const changed = repairActiveReferenceSelection();
+  if (changed) {
+    renderReferences();
+    renderWorkspaceTabs();
+    renderContextFiles();
+    renderDiffPanel();
+  }
+  return !!String(state.activeSrId || '').trim();
+}
+
 function getActiveReference() {
   if (
     state.memoryReplay
@@ -2225,6 +2258,7 @@ async function sendPrivateShareFromModal() {
 
 function renderWorkspaceTabs() {
   const holder = e('workspace-tabs');
+  repairActiveReferenceSelection();
   const ref = getActiveReference();
   const replayMode = isMemoryReplayActive();
   if (!holder) return;
@@ -2755,11 +2789,18 @@ function buildContextPreviewBody(preview = {}) {
   const mode = String(preview.preview_mode || 'text').trim().toLowerCase();
   const summary = String(preview.summary || '').trim();
   const content = String(preview.preview || '').replace(/\u0000/g, '').trim();
+  const looksScrambled = (text) => {
+    const value = String(text || '').trim();
+    if (!value) return false;
+    const suspicious = (value.match(/[^\x09\x0A\x0D\x20-\x7E]/g) || []).length;
+    const ratio = suspicious / Math.max(1, value.length);
+    return ratio > 0.12;
+  };
   if (mode === 'binary') {
     const rows = [];
     const notice = String(preview.message || 'Binary format detected.').trim();
     rows.push(notice || 'Binary format detected.');
-    if (summary) {
+    if (summary && !looksScrambled(summary)) {
       rows.push('');
       rows.push(`Index summary: ${summary}`);
     }
@@ -4651,7 +4692,10 @@ async function applyPendingUpdates(response, targetSrId = null) {
 async function sendChatMessage() {
   if (blockIfMemoryReplay('Memory replay is read-only. Exit memory mode to chat with Lumino.')) return;
   if (state.activeChatRequestId) return;
-  if (!state.activeSrId) {
+  if (!state.activeSrId || !getReferenceById(state.activeSrId)) {
+    await refreshAndRepairActiveReferenceSelection();
+  }
+  if (!state.activeSrId || !getReferenceById(state.activeSrId)) {
     window.alert('Select a reference first.');
     return;
   }
@@ -6137,12 +6181,14 @@ function renderSettingsAbstractionStatus() {
     return;
   }
   const counts = status.counts && typeof status.counts === 'object' ? status.counts : {};
+  const refs = Array.isArray(status.references) ? status.references : [];
+  const totalLocalFiles = refs.reduce((acc, item) => acc + Number((item && item.local_file_count) || 0), 0);
   const updated = Array.isArray(status.references)
     ? status.references.map((item) => Number((item && item.updated_at) || 0)).filter((value) => Number.isFinite(value) && value > 0)
     : [];
   const latest = updated.length ? Math.max(...updated) : 0;
   const latestText = latest > 0 ? ` · updated ${formatAgo(latest)}` : '';
-  node.textContent = `ready=${Number(counts.ready || 0)}, building=${Number(counts.building || 0)}, stale=${Number(counts.stale || 0)}, error=${Number(counts.error || 0)}${latestText}`;
+  node.textContent = `refs: ready=${Number(counts.ready || 0)}, building=${Number(counts.building || 0)}, stale=${Number(counts.stale || 0)}, error=${Number(counts.error || 0)} · local files=${Number(totalLocalFiles || 0)}${latestText}`;
 }
 
 function renderSettingsRagStatus() {

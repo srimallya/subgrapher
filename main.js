@@ -128,6 +128,7 @@ const FOLDER_MOUNT_MAX_FILES = 500;
 const CONTEXT_FILE_MAX_BYTES = 32 * 1024 * 1024;
 const FOLDER_MOUNT_MAX_FILE_BYTES = CONTEXT_FILE_MAX_BYTES;
 const CHAT_REQUEST_TIMEOUT_MS = 60_000;
+const CHAT_REQUEST_TIMEOUT_MAX_MS = 300_000;
 const DECISION_TRACE_MAX_STEPS = 240;
 const GRAPH_MAX_NODES = 600;
 const GRAPH_MAX_EDGES = 1200;
@@ -782,6 +783,27 @@ function throwIfAborted(signal, fallbackMessage = 'Request canceled.') {
   throw new Error(String(reason || fallbackMessage));
 }
 
+function resolveChatTimeoutMs(input = {}, ref = null) {
+  const payload = (input && typeof input === 'object') ? input : {};
+  const requested = Number(payload.timeout_ms || payload.timeoutMs || 0);
+  if (Number.isFinite(requested) && requested > 0) {
+    return Math.max(30_000, Math.min(CHAT_REQUEST_TIMEOUT_MAX_MS, Math.round(requested)));
+  }
+  const message = String(payload.message || '').trim().toLowerCase();
+  const contextFiles = Array.isArray(ref && ref.context_files) ? ref.context_files : [];
+  const imageCount = contextFiles.filter((file) => isImageContextFile(file)).length;
+  const fileIntent = (
+    message.includes('what are these files')
+    || message.includes('analyze these files')
+    || message.includes('analyse these files')
+    || message.includes('describe these files')
+    || message.includes('context files')
+    || message.includes('images')
+  );
+  if (imageCount >= 3 || (imageCount > 0 && fileIntent)) return 180_000;
+  return CHAT_REQUEST_TIMEOUT_MS;
+}
+
 function makeTimeoutSignalWithUpstream(timeoutMs = 12000, upstream = null) {
   const { controller, timer } = makeTimeoutSignal(timeoutMs);
   const onAbort = () => {
@@ -856,6 +878,20 @@ function isLocalContextFileForAbstraction(file = {}) {
   if (source === 'youtube_transcript' || source === 'abstraction_copy') return false;
   const storedPath = String((file && file.stored_path) || '').trim();
   return !!storedPath;
+}
+
+function isImageContextFile(file = {}) {
+  const safe = (file && typeof file === 'object') ? file : {};
+  const mime = String((safe && safe.mime_type) || '').trim().toLowerCase();
+  if (mime.startsWith('image/') && mime !== 'image/svg+xml') return true;
+  const relativePath = String((safe && safe.relative_path) || '').trim();
+  const storedPath = String((safe && safe.stored_path) || '').trim();
+  const ext = String(path.extname(relativePath || storedPath || '') || '').trim().toLowerCase();
+  return isImageExtension(ext);
+}
+
+function isDocContextFileForAbstraction(file = {}) {
+  return isLocalContextFileForAbstraction(file) && !isImageContextFile(file);
 }
 
 function normalizeAbstractionCache(cache = {}, srId = '') {
@@ -951,6 +987,35 @@ function readBinaryTextForAbstraction(filePath = '', maxChars = ABSTRACTION_BINA
   }
 }
 
+function extractDocumentLikeTextForAbstraction(file = {}, maxChars = ABSTRACTION_MAX_FILE_CHARS) {
+  const safe = (file && typeof file === 'object') ? file : {};
+  const storedPath = String((safe && safe.stored_path) || '').trim();
+  if (!storedPath || !fs.existsSync(storedPath)) return { text: '', strategy: '' };
+  const filename = String((safe && safe.original_name) || (safe && safe.relative_path) || path.basename(storedPath) || 'file').trim();
+  const ext = String(path.extname(storedPath) || '').trim().toLowerCase();
+  const mimeType = String((safe && safe.mime_type) || '').trim();
+  const extracted = extractContextTextFromFile(storedPath, {
+    filePath: storedPath,
+    filename,
+    ext,
+    mimeType,
+    maxChars: Math.max(400, Math.round(Number(maxChars) || ABSTRACTION_MAX_FILE_CHARS)),
+  });
+  const strategy = String((extracted && extracted.strategy) || '').trim();
+  const text = String((extracted && extracted.text) || '').trim();
+  const usefulStrategies = new Set([
+    'pdf-text',
+    'docx-xml',
+    'pptx-xml',
+    'xlsx-xml',
+    'opendocument-xml',
+    'rtf-strip',
+    'utf8-text',
+  ]);
+  if (!text || !usefulStrategies.has(strategy)) return { text: '', strategy };
+  return { text, strategy };
+}
+
 async function summarizeNonTextFileWithLmStudioForAbstraction(file = {}, settings = readSettings(), options = {}) {
   const signal = (options && options.signal && typeof options.signal === 'object') ? options.signal : null;
   throwIfAborted(signal, 'Abstraction refresh canceled.');
@@ -965,7 +1030,8 @@ async function summarizeNonTextFileWithLmStudioForAbstraction(file = {}, setting
   const fileName = String((file && file.original_name) || (file && file.relative_path) || path.basename(storedPath) || 'file').trim();
   const mime = String((file && file.mime_type) || '').trim().toLowerCase();
   const fileSummary = String((file && file.summary) || '').replace(/\s+/g, ' ').trim().slice(0, 420);
-  const rawText = readBinaryTextForAbstraction(storedPath, ABSTRACTION_BINARY_TEXT_MAX_CHARS);
+  const extractedDoc = extractDocumentLikeTextForAbstraction(file, ABSTRACTION_BINARY_TEXT_MAX_CHARS);
+  const rawText = String(extractedDoc.text || '').trim() || readBinaryTextForAbstraction(storedPath, ABSTRACTION_BINARY_TEXT_MAX_CHARS);
   const sizeBytes = Number((file && file.size_bytes) || 0);
 
   const systemPrompt = [
@@ -979,6 +1045,7 @@ async function summarizeNonTextFileWithLmStudioForAbstraction(file = {}, setting
     `MIME: ${mime || 'unknown'}`,
     `Size bytes: ${sizeBytes}`,
     fileSummary ? `Indexer summary: ${fileSummary}` : 'Indexer summary: (none)',
+    extractedDoc.strategy ? `Preferred extraction strategy: ${extractedDoc.strategy}` : 'Preferred extraction strategy: (none)',
     '',
     'Extracted text-like fragments from file bytes:',
     rawText || '(none)',
@@ -1081,7 +1148,10 @@ async function buildAbstractionPromptBundle(ref = {}, files = [], settings = rea
     if (!excerpt) {
       analysisStats.non_text_files += 1;
       if (isImage) analysisStats.image_files += 1;
-      if (modelAnalyses >= ABSTRACTION_MAX_MODEL_FILE_ANALYSES || !abstractionModel) {
+      const extractedDoc = isImage ? { text: '' } : extractDocumentLikeTextForAbstraction(file, ABSTRACTION_MAX_FILE_CHARS);
+      if (extractedDoc && String(extractedDoc.text || '').trim()) {
+        excerpt = String(extractedDoc.text || '').trim();
+      } else if (modelAnalyses >= ABSTRACTION_MAX_MODEL_FILE_ANALYSES || !abstractionModel) {
         analysisStats.lmstudio_skipped_budget += 1;
         excerpt = summary || `Binary file (${mimeType || 'unknown mime'})`;
       } else if (isImage) {
@@ -1217,11 +1287,11 @@ function buildScopedRefsForToolExecution(scopedRefs = [], provider = '', setting
   return (Array.isArray(scopedRefs) ? scopedRefs : []).map((ref) => {
     const next = deepClone(ref);
     const contextFiles = Array.isArray(next.context_files) ? next.context_files : [];
-    const nonLocal = contextFiles.filter((file) => !isLocalContextFileForAbstraction(file));
-    const localCount = contextFiles.length - nonLocal.length;
+    const retained = contextFiles.filter((file) => !isDocContextFileForAbstraction(file));
+    const localDocCount = contextFiles.length - retained.length;
     const abstractionFile = buildAbstractionContextFileFromRef(ref);
-    next.context_files = nonLocal;
-    if (localCount > 0 && abstractionFile) {
+    next.context_files = retained;
+    if (localDocCount > 0 && abstractionFile) {
       next.context_files.push(abstractionFile);
     }
     return next;
@@ -1247,7 +1317,7 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
   if (!refId) return { ok: false, changed: false, message: 'Reference ID is missing.' };
 
   const localFiles = (Array.isArray(target.context_files) ? target.context_files : [])
-    .filter((file) => isLocalContextFileForAbstraction(file));
+    .filter((file) => isDocContextFileForAbstraction(file));
   const imageAnalysisModel = String((settings && settings.image_analysis_model) || '').trim();
   const sourceHash = buildAbstractionSourceHash(target, localFiles, `${model}::image=${imageAnalysisModel}`);
   const prevCache = normalizeAbstractionCache(target.abstraction_cache || {}, refId);
@@ -10278,6 +10348,7 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
       '- For short answers and follow-ups, reply directly in chat without opening any artifact.',
       'Research and citation policy:',
       '- For local research, call search_local_evidence before final synthesis.',
+      '- For specific questions about uploaded docs/PDFs, call analyze_context_file on the relevant context_file_id before concluding.',
       '- For research outputs, use footnote citation format in content: [1], [2], ... and include a "## Sources" section.',
       '- In chat responses, format source URLs as markdown links.',
       '- In artifact content, keep source URLs as plain text (non-markdown links).',
@@ -10318,6 +10389,17 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
   ].filter(Boolean).join('\n');
 
   return { systemPrompt, userPrompt };
+}
+
+function repairContextAvailabilityClaim(message, ref) {
+  const text = String(message || '').trim();
+  const safeRef = (ref && typeof ref === 'object') ? ref : {};
+  const contextFiles = Array.isArray(safeRef.context_files) ? safeRef.context_files : [];
+  const count = contextFiles.length;
+  if (!text || count <= 0) return text;
+  const falseNegativePattern = /\b(no\s+(?:context|imported)\s+files|there\s+are\s+no\s+context\s+files|upload\s+(?:the\s+)?files|no\s+actual\s+file\s+content|(?:do\s+not|don't)\s+have\s+visibility|not\s+(?:visible|accessible)\s+to\s+me|cannot\s+access\s+(?:the\s+)?files?)\b/i;
+  if (!falseNegativePattern.test(text)) return text;
+  return `Indexed context files are already attached in this workspace (${count} file${count === 1 ? '' : 's'}). ${text}`;
 }
 
 function sanitizeCrawlerSettings(input = {}) {
@@ -10721,16 +10803,25 @@ async function dispatchProgrammaticTool(req, { srId, refs }) {
       if (mode === 'image') {
         vision.attempted = true;
         try {
+          const runtimeSettings = readSettings();
+          const preferredProvider = String((runtimeSettings && runtimeSettings.lumino_last_provider) || 'openai').trim().toLowerCase();
+          const preferredModel = String((runtimeSettings && runtimeSettings.lumino_last_model) || '').trim();
+          const preferredCreds = resolveProviderRuntimeCredentials(preferredProvider, runtimeSettings);
           const imagePrompt = String(args.prompt || '').trim()
             || `Describe this image (${fileName}) in detail, including visible text, entities, layout, and relevant context.`;
-          const imageRes = await analyzeImageWithLmStudio({
+          const imageRes = await analyzeImageWithProviderFallback({
             local_path: storedPath,
             prompt: imagePrompt,
-          }, readSettings());
+          }, runtimeSettings, {
+            provider: preferredProvider,
+            model: preferredModel,
+            apiKey: String((preferredCreds && preferredCreds.apiKey) || ''),
+            base_url: String((preferredCreds && preferredCreds.base_url) || ''),
+          });
           if (imageRes && imageRes.ok) {
             const description = String(imageRes.description || '').trim();
             vision.ok = !!description;
-            vision.provider = String(imageRes.provider || 'lmstudio');
+            vision.provider = String(imageRes.provider || preferredProvider || 'lmstudio');
             vision.model = String(imageRes.model || '');
             vision.prompt = String(imageRes.prompt || imagePrompt);
             vision.description = description;
@@ -11955,19 +12046,180 @@ async function executeLuminoChat(input, options = {}) {
           }
         }
 
+        if (name === 'analyze_context_file') {
+          const contextFileId = String(args.context_file_id || args.file_id || '').trim();
+          const question = String(args.question || '').trim();
+          const maxChars = Math.max(1200, Math.min(60000, Math.round(Number(args.max_chars || 20000))));
+          if (!contextFileId) {
+            return { ok: false, message: 'context_file_id is required.', tool_output: { ok: false, message: 'context_file_id is required.' } };
+          }
+          if (!question) {
+            return { ok: false, message: 'question is required.', tool_output: { ok: false, message: 'question is required.' } };
+          }
+          const refs = getReferences();
+          const refIdx = findReferenceIndex(refs, srId);
+          if (refIdx < 0) {
+            return { ok: false, message: 'Active reference not found.', tool_output: { ok: false, message: 'Active reference not found.' } };
+          }
+          const contextFiles = Array.isArray(refs[refIdx].context_files) ? refs[refIdx].context_files : [];
+          const contextFile = contextFiles.find((file) => String((file && file.id) || '').trim() === contextFileId);
+          if (!contextFile) {
+            return { ok: false, message: 'Context file not found.', tool_output: { ok: false, message: 'Context file not found.' } };
+          }
+          const storedPath = String((contextFile && contextFile.stored_path) || '').trim();
+          if (!storedPath || !fs.existsSync(storedPath)) {
+            return { ok: false, message: 'Context file path is unavailable.', tool_output: { ok: false, message: 'Context file path is unavailable.' } };
+          }
+          const runtimeSettings = readSettings();
+          const model = normalizeProviderModelId(
+            String(args.model || runtimeSettings.abstraction_model || runtimeSettings.lmstudio_default_model || runtimeSettings.image_analysis_model || '').trim(),
+          );
+          if (!model) {
+            return {
+              ok: false,
+              message: 'LM Studio model is not configured for context-file analysis.',
+              tool_output: { ok: false, message: 'LM Studio model is not configured for context-file analysis.' },
+            };
+          }
+          const lmCreds = resolveProviderRuntimeCredentials('lmstudio', runtimeSettings);
+          if (!lmCreds || !lmCreds.ok) {
+            return {
+              ok: false,
+              message: String((lmCreds && lmCreds.message) || 'LM Studio credentials are unavailable.'),
+              tool_output: { ok: false, message: String((lmCreds && lmCreds.message) || 'LM Studio credentials are unavailable.') },
+            };
+          }
+          const fileName = String((contextFile && contextFile.original_name) || (contextFile && contextFile.relative_path) || path.basename(storedPath) || 'context file').trim() || 'context file';
+          const ext = String(path.extname(storedPath) || '').trim().toLowerCase();
+          const mimeType = String((contextFile && contextFile.mime_type) || detectMimeType(ext, isTextExtension(ext))).trim();
+          const extracted = extractContextTextFromFile(storedPath, {
+            filePath: storedPath,
+            filename: fileName,
+            ext,
+            mimeType,
+            maxChars,
+          });
+          const mode = String((extracted && extracted.mode) || 'binary').trim().toLowerCase();
+          const strategy = String((extracted && extracted.strategy) || '').trim();
+          let evidence = String((extracted && extracted.text) || '').trim();
+          if (mode === 'image') {
+            const imageRes = await analyzeImageWithLmStudio({
+              local_path: storedPath,
+              prompt: `Answer this question about the image: ${question}`,
+              model_override: model,
+            }, runtimeSettings);
+            if (imageRes && imageRes.ok && String(imageRes.description || '').trim()) {
+              evidence = String(imageRes.description || '').trim();
+            }
+          }
+          if (!evidence) {
+            return {
+              ok: false,
+              message: 'No readable context could be extracted from this file.',
+              tool_output: { ok: false, message: 'No readable context could be extracted from this file.' },
+            };
+          }
+          const qaRes = await chatWithProvider({
+            provider: 'lmstudio',
+            model,
+            apiKey: String((lmCreds && lmCreds.apiKey) || ''),
+            baseUrl: String((lmCreds && lmCreds.base_url) || ''),
+            systemPrompt: [
+              'You answer questions about one local file using only provided evidence.',
+              'If evidence is insufficient, say so explicitly.',
+              'Do not invent facts beyond evidence.',
+            ].join('\n'),
+            userPrompt: [
+              `File: ${fileName}`,
+              `MIME: ${mimeType || 'unknown'}`,
+              strategy ? `Extraction strategy: ${strategy}` : 'Extraction strategy: unknown',
+              `Question: ${question}`,
+              '',
+              'Evidence excerpt:',
+              evidence.slice(0, maxChars),
+            ].join('\n'),
+          }, {
+            timeoutMs: Math.min(90_000, CHAT_REQUEST_TIMEOUT_MAX_MS),
+          });
+          const answer = String((qaRes && qaRes.text) || '').trim();
+          if (!answer) {
+            return {
+              ok: false,
+              message: 'LM Studio returned no answer for context-file analysis.',
+              tool_output: { ok: false, message: 'LM Studio returned no answer for context-file analysis.' },
+            };
+          }
+          return {
+            ok: true,
+            message: 'Context file analysis completed.',
+            tool_output: {
+              ok: true,
+              context_file_id: contextFileId,
+              file_name: fileName,
+              answer,
+              mode,
+              extraction_strategy: strategy,
+              model,
+            },
+          };
+        }
+
         if (name === 'analyze_image') {
           const imageUrl = String(args.image_url || '').trim();
           let localPath = String(args.local_path || '').trim();
-          const contextFileId = String(args.context_file_id || '').trim();
-          if (!imageUrl && !localPath && contextFileId) {
+          let contextFileId = String(args.context_file_id || '').trim();
+          const contextHint = String(
+            args.context_file
+            || args.file_id
+            || args.file
+            || args.image
+            || args.filename
+            || args.target
+            || '',
+          ).trim();
+          const resolveContextFile = () => {
             const refs = getReferences();
             const refIdx = findReferenceIndex(refs, srId);
-            if (refIdx >= 0) {
-              const contextFiles = Array.isArray(refs[refIdx].context_files) ? refs[refIdx].context_files : [];
-              const contextFile = contextFiles.find((file) => String((file && file.id) || '').trim() === contextFileId);
-              if (contextFile) {
-                localPath = String((contextFile && contextFile.stored_path) || '').trim();
-              }
+            if (refIdx < 0) return null;
+            const contextFiles = Array.isArray(refs[refIdx].context_files) ? refs[refIdx].context_files : [];
+            if (!contextFiles.length) return null;
+            const token = String(contextFileId || contextHint || localPath).trim();
+            if (!token) return null;
+            const tokenLower = token.toLowerCase();
+            const exact = contextFiles.find((file) => {
+              const id = String((file && file.id) || '').trim();
+              const originalName = String((file && file.original_name) || '').trim();
+              const relativePath = String((file && file.relative_path) || '').trim();
+              const storedPath = String((file && file.stored_path) || '').trim();
+              const baseName = String(path.basename(storedPath || relativePath || originalName) || '').trim();
+              return (
+                id === token
+                || originalName === token
+                || relativePath === token
+                || baseName === token
+              );
+            });
+            if (exact) return exact;
+            return contextFiles.find((file) => {
+              const originalName = String((file && file.original_name) || '').trim().toLowerCase();
+              const relativePath = String((file && file.relative_path) || '').trim().toLowerCase();
+              const storedPath = String((file && file.stored_path) || '').trim().toLowerCase();
+              const baseName = String(path.basename(storedPath || relativePath || originalName) || '').trim().toLowerCase();
+              return (
+                !!tokenLower
+                && (
+                  originalName.includes(tokenLower)
+                  || relativePath.includes(tokenLower)
+                  || baseName.includes(tokenLower)
+                )
+              );
+            }) || null;
+          };
+          if (!imageUrl && (contextFileId || contextHint || localPath)) {
+            const contextFile = resolveContextFile();
+            if (contextFile) {
+              contextFileId = String((contextFile && contextFile.id) || '').trim();
+              localPath = String((contextFile && contextFile.stored_path) || '').trim();
             }
           }
           if (!imageUrl && !localPath) {
@@ -12121,6 +12373,8 @@ async function executeLuminoChat(input, options = {}) {
       sr_id: srId,
     };
   }
+
+  finalResult.message = repairContextAvailabilityClaim(finalResult.message, activeRef);
 
   // Rolling memory update pipeline.
   const finalAssistantText = String(finalResult.message || '').trim();
@@ -14546,14 +14800,42 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
   if (!targetFolder || !fs.existsSync(targetFolder)) {
     return { ok: false, message: 'Folder path does not exist.' };
   }
+  let resolvedTarget = '';
+  try {
+    resolvedTarget = fs.realpathSync(targetFolder);
+  } catch (_) {
+    resolvedTarget = path.resolve(targetFolder);
+  }
+
+  refs[idx].folder_mounts = Array.isArray(refs[idx].folder_mounts) ? refs[idx].folder_mounts : [];
+  const existingMount = refs[idx].folder_mounts.find((mount) => {
+    const raw = String((mount && mount.absolute_path) || '').trim();
+    if (!raw) return false;
+    let normalized = '';
+    try {
+      normalized = fs.realpathSync(raw);
+    } catch (_) {
+      normalized = path.resolve(raw);
+    }
+    return normalized === resolvedTarget;
+  });
+  if (existingMount) {
+    return {
+      ok: true,
+      deduped: true,
+      message: 'Folder is already mounted in this reference.',
+      mount: existingMount,
+      references: refs,
+      reference: refs[idx],
+    };
+  }
 
   const mountId = makeId('mount');
-  const ingest = indexFolderAsContext(targetFolder, {
+  const ingest = indexFolderAsContext(resolvedTarget, {
     maxFiles: FOLDER_MOUNT_MAX_FILES,
     maxFileBytes: FOLDER_MOUNT_MAX_FILE_BYTES,
   });
 
-  refs[idx].folder_mounts = Array.isArray(refs[idx].folder_mounts) ? refs[idx].folder_mounts : [];
   refs[idx].context_files = Array.isArray(refs[idx].context_files) ? refs[idx].context_files : [];
 
   const mount = {
@@ -14765,7 +15047,8 @@ ipcMain.handle('browser:srGetContextFilePreview', (_event, payload) => {
     });
     const mode = String((extracted && extracted.mode) || '').trim().toLowerCase();
     const strategy = String((extracted && extracted.strategy) || '').trim();
-    if (mode === 'text') {
+    const textStrategies = new Set(['pdf-text', 'docx-xml', 'pptx-xml', 'xlsx-xml', 'opendocument-xml', 'rtf-strip']);
+    if (mode === 'text' || (mode === 'binary' && textStrategies.has(strategy))) {
       return {
         ok: true,
         preview_mode: 'text',
@@ -15003,6 +15286,10 @@ ipcMain.handle('browser:chatStart', async (_event, payload) => {
   if (activeChatRequests.has(requestId)) {
     return { ok: false, message: 'request_id is already active.' };
   }
+  const refs = getReferences();
+  const refIdx = findReferenceIndex(refs, srId);
+  const activeRef = refIdx >= 0 ? refs[refIdx] : null;
+  const timeoutMs = resolveChatTimeoutMs(input, activeRef);
 
   const timeout = setTimeout(() => {
     const active = activeChatRequests.get(requestId);
@@ -15012,7 +15299,7 @@ ipcMain.handle('browser:chatStart', async (_event, payload) => {
     } catch (_) {
       // noop
     }
-  }, CHAT_REQUEST_TIMEOUT_MS);
+  }, timeoutMs);
   const abortController = new AbortController();
   activeChatRequests.set(requestId, { abortController, timeout, srId });
 
@@ -15025,7 +15312,7 @@ ipcMain.handle('browser:chatStart', async (_event, payload) => {
         request_id: requestId,
       }, {
         signal: abortController.signal,
-        timeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+        timeoutMs,
         onDelta: (deltaText) => {
           const text = String(deltaText || '');
           if (!text) return;
@@ -15095,6 +15382,10 @@ ipcMain.handle('browser:chat', async (_event, payload) => {
   const input = (payload && typeof payload === 'object') ? payload : {};
   const srId = String(input.sr_id || input.srId || '').trim();
   const requestId = String(input.request_id || makeId('req')).trim();
+  const refs = getReferences();
+  const refIdx = findReferenceIndex(refs, srId);
+  const activeRef = refIdx >= 0 ? refs[refIdx] : null;
+  const timeoutMs = resolveChatTimeoutMs(input, activeRef);
 
   try {
     const response = await executePathAChat({
@@ -15102,7 +15393,7 @@ ipcMain.handle('browser:chat', async (_event, payload) => {
       sr_id: srId,
       request_id: requestId,
     }, {
-      timeoutMs: CHAT_REQUEST_TIMEOUT_MS,
+      timeoutMs,
     });
     return response;
   } catch (err) {

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { spawnSync } = require('child_process');
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg',
@@ -307,7 +308,37 @@ function unescapePdfLiteral(value = '') {
     });
 }
 
-function extractPdfText(buffer, maxChars = 12_000) {
+function extractPdfTextWithPdftotext(filePath = '', maxChars = 12_000) {
+  const target = String(filePath || '').trim();
+  if (!target) return '';
+  try {
+    const probe = spawnSync('pdftotext', ['-v'], { encoding: 'utf8', timeout: 2000 });
+    const probeStatus = Number(probe && probe.status);
+    const probeOk = probeStatus === 0 || probeStatus === 1; // pdftotext -v commonly returns 0/1 by build
+    if (!probeOk) return '';
+  } catch (_) {
+    return '';
+  }
+  try {
+    const run = spawnSync(
+      'pdftotext',
+      ['-q', '-enc', 'UTF-8', '-layout', target, '-'],
+      { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 10_000 },
+    );
+    if (!run || Number(run.status) !== 0) return '';
+    const raw = String(run.stdout || '').replace(/\u0000/g, '');
+    const normalized = raw.replace(/\r/g, '').trim();
+    if (!normalized) return '';
+    return normalized.slice(0, Math.max(200, Math.round(Number(maxChars) || 12_000)));
+  } catch (_) {
+    return '';
+  }
+}
+
+function extractPdfText(buffer, maxChars = 12_000, options = {}) {
+  const filePath = String((options && options.filePath) || '').trim();
+  const external = extractPdfTextWithPdftotext(filePath, maxChars);
+  if (external) return external;
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) return '';
   const text = buffer.toString('latin1');
   const matches = text.match(/\((?:\\.|[^\\()]){4,}\)/g) || [];
@@ -487,8 +518,8 @@ function extractContextTextFromBuffer(buffer, options = {}) {
     extracted = extractRtfText(buffer, maxChars);
     strategy = 'rtf-strip';
   } else if (ext === '.pdf' || mimeType === 'application/pdf') {
-    extracted = extractPdfText(buffer, maxChars);
-    strategy = 'pdf-literal-text';
+    extracted = extractPdfText(buffer, maxChars, options);
+    strategy = extracted ? 'pdf-text' : 'pdf-literal-text';
   }
 
   if (!extracted) {

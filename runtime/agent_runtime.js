@@ -703,6 +703,21 @@ const AGENT_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'analyze_context_file',
+    allowed_callers: ['direct'],
+    description: 'Ask LM Studio a specific question about one context file using extracted file content (or image analysis for images).',
+    parameters: {
+      type: 'object',
+      properties: {
+        context_file_id: { type: 'string', description: 'Context file ID from list_context_files.' },
+        question: { type: 'string', description: 'Specific question to answer from this file.' },
+        max_chars: { type: 'number', description: 'Optional max extracted chars to use (default 20000, max 60000).' },
+      },
+      required: ['context_file_id', 'question'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function parseToolArguments(raw) {
@@ -761,6 +776,7 @@ const LOCAL_EVIDENCE_TOOL_NAMES = new Set([
   'list_highlights',
   'list_context_files',
   'read_context_file',
+  'analyze_context_file',
   'search_reference_graph',
   'search_local_evidence',
 ]);
@@ -1093,7 +1109,7 @@ function buildRecoveryPrompt(missingPhase) {
     return [
       'Continue the task.',
       'Required phase missing: workspace local evidence read.',
-      'Call exactly one local evidence tool now (list_artifacts, read_artifact, list_highlights, list_context_files, read_context_file, or search_reference_graph).',
+      'Call exactly one local evidence tool now (list_artifacts, read_artifact, list_highlights, list_context_files, read_context_file, analyze_context_file, or search_reference_graph).',
       'Do not call finish yet.',
     ].join(' ');
   }
