@@ -376,8 +376,8 @@ const AGENT_TOOLS = [
       '  read_artifact(artifact_id) -> {id, title, content, kind}',
       '  list_highlights() -> list[{id, source, text, ...}]',
       '  search_reference_graph(query) -> {nodes, edges}',
-      '  list_context_files() -> list[{id, name, size_bytes, summary}]',
-      '  read_context_file(file_id) -> {name, content}',
+      '  list_context_files() -> list[{id, name, size_bytes, summary, mime_type, relative_path, source_type, extract_strategy, is_image}]',
+      '  read_context_file(file_id) -> {name, content, mode, mime_type, summary, extract_strategy, vision}',
       'Use these stubs to access reference data inside Python. Process and filter results before printing — only stdout reaches your context.',
     ].join(' '),
     parameters: {
@@ -683,7 +683,7 @@ const AGENT_TOOLS = [
   {
     name: 'list_context_files',
     allowed_callers: ['direct', 'run_python'],
-    description: 'List all imported context files in the active reference.',
+    description: 'List all imported context files in the active reference with type metadata for better file selection.',
     parameters: {
       type: 'object',
       properties: {},
@@ -693,7 +693,7 @@ const AGENT_TOOLS = [
   {
     name: 'read_context_file',
     allowed_callers: ['direct', 'run_python'],
-    description: 'Read the full content of a context file by ID.',
+    description: 'Read context content by file ID. Returns extracted text for docs/binary files and can auto-attach vision summaries for images.',
     parameters: {
       type: 'object',
       properties: {

@@ -26,6 +26,21 @@ function indexFolderAsContext(rootPath, options = {}) {
   const queue = [absoluteRoot];
   const files = [];
   const skipped = [];
+  const skipReasonCounts = {
+    too_large: 0,
+    unsupported_extension: 0,
+    read_failed: 0,
+    stat_failed: 0,
+  };
+
+  const pushSkip = (skipPath, reason) => {
+    skipped.push({ path: skipPath, reason });
+    if (Object.prototype.hasOwnProperty.call(skipReasonCounts, reason)) {
+      skipReasonCounts[reason] += 1;
+    } else {
+      skipReasonCounts[reason] = Number(skipReasonCounts[reason] || 0) + 1;
+    }
+  };
 
   while (queue.length > 0 && files.length < maxFiles) {
     const current = queue.pop();
@@ -51,7 +66,7 @@ function indexFolderAsContext(rootPath, options = {}) {
 
       const ext = path.extname(entry.name).toLowerCase();
       if (!allowedExtensions.has(ext)) {
-        skipped.push({ path: fullPath, reason: 'unsupported_extension' });
+        pushSkip(fullPath, 'unsupported_extension');
         continue;
       }
 
@@ -59,13 +74,13 @@ function indexFolderAsContext(rootPath, options = {}) {
       try {
         stat = fs.statSync(fullPath);
       } catch (_) {
-        skipped.push({ path: fullPath, reason: 'stat_failed' });
+        pushSkip(fullPath, 'stat_failed');
         continue;
       }
 
       if (!stat || !stat.isFile()) continue;
       if (stat.size > maxFileBytes) {
-        skipped.push({ path: fullPath, reason: 'too_large' });
+        pushSkip(fullPath, 'too_large');
         continue;
       }
 
@@ -73,11 +88,11 @@ function indexFolderAsContext(rootPath, options = {}) {
       try {
         rawBuffer = fs.readFileSync(fullPath);
       } catch (_) {
-        skipped.push({ path: fullPath, reason: 'read_failed' });
+        pushSkip(fullPath, 'read_failed');
         continue;
       }
       if (!rawBuffer || !Buffer.isBuffer(rawBuffer)) {
-        skipped.push({ path: fullPath, reason: 'read_failed' });
+        pushSkip(fullPath, 'read_failed');
         continue;
       }
 
@@ -112,6 +127,7 @@ function indexFolderAsContext(rootPath, options = {}) {
     root_path: absoluteRoot,
     files,
     skipped_count: skipped.length,
+    skip_reason_counts: skipReasonCounts,
     skipped,
     truncated: files.length >= maxFiles,
   };

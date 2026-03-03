@@ -41,8 +41,9 @@ This implementation delivers:
 - Context ingestion:
   - mount folders as read-only indexed context (recursive with limits)
   - indexed extensions include text/code, common docs (`.pdf`, Office/OpenDocument, `.msg`, `.eml`), and common images (`.png`, `.jpg/.jpeg`, `.gif`, `.webp`, `.bmp`, `.tif/.tiff`, `.heic/.heif`)
-  - default folder mount limits: up to 500 files, up to 4MB per file
+  - default folder mount limits: up to 500 files, up to 32MB per file
   - import local context files across the same supported extension set (text/code/docs/images)
+  - Files preview renders mounted images directly; docs/binary files show extracted fragments + summaries
   - web crawler commands: `/crawl <url>`, `/crawl status`, `/crawl stop`
 - Web research reliability:
   - shared web search path is used across Path A, Path B, and Telegram orchestration
@@ -72,6 +73,7 @@ This implementation delivers:
 - Local-file abstraction routing:
   - when abstraction is enabled and a non-LM Studio provider is selected, local mounted files are abstracted before remote use
   - image/doc/pdf/binary context files can be analyzed through LM Studio during abstraction copy generation
+  - `read_context_file` auto-attempts LM Studio vision summaries for image files with metadata fallback on failure
 - Local evidence RAG:
   - hybrid local evidence search uses BM25 + semantic vectors
   - persistent SQLite index per reference (`semantic_references/<ref>/rag/index.sqlite`)

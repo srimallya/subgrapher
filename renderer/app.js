@@ -2713,12 +2713,19 @@ function closeContextPreviewModal(options = {}) {
   const overlay = e('context-preview-overlay');
   const title = e('context-preview-title');
   const meta = e('context-preview-meta');
+  const imageWrap = e('context-preview-image-wrap');
+  const image = e('context-preview-image');
   const body = e('context-preview-body');
   const status = e('context-preview-status');
   const openPathBtn = e('context-preview-open-path-btn');
   if (overlay) overlay.classList.add('hidden');
   if (title) title.textContent = 'Context Preview';
   if (meta) meta.textContent = '';
+  if (imageWrap) imageWrap.classList.add('hidden');
+  if (image) {
+    image.src = '';
+    image.alt = 'Context preview image';
+  }
   if (body) body.textContent = '';
   if (status) status.textContent = '';
   if (openPathBtn) {
@@ -2774,6 +2781,8 @@ function openContextPreviewModal(preview = {}) {
   const overlay = e('context-preview-overlay');
   const title = e('context-preview-title');
   const meta = e('context-preview-meta');
+  const imageWrap = e('context-preview-image-wrap');
+  const image = e('context-preview-image');
   const body = e('context-preview-body');
   const status = e('context-preview-status');
   const openPathBtn = e('context-preview-open-path-btn');
@@ -2790,13 +2799,28 @@ function openContextPreviewModal(preview = {}) {
   const mode = String(preview.preview_mode || 'text').trim().toLowerCase();
   const message = String(preview.message || '').trim();
   const pathValue = String(file.stored_path || '').trim();
+  const imageUrl = String(preview.image_url || '').trim();
+  const hasRenderableImage = mode === 'image' && !!imageUrl;
 
   title.textContent = titleText;
   meta.textContent = buildContextPreviewMeta(preview);
+  if (imageWrap && image) {
+    if (hasRenderableImage) {
+      image.src = imageUrl;
+      image.alt = titleText || 'Context preview image';
+      imageWrap.classList.remove('hidden');
+    } else {
+      image.src = '';
+      image.alt = 'Context preview image';
+      imageWrap.classList.add('hidden');
+    }
+  }
   body.textContent = bodyText;
   status.textContent = message || (mode === 'binary'
     ? 'Binary preview mode.'
-    : `Showing ${bodyText.length.toLocaleString()} character(s).`);
+    : (hasRenderableImage
+      ? `Image preview loaded · ${bodyText.length.toLocaleString()} character(s) of extracted context.`
+      : `Showing ${bodyText.length.toLocaleString()} character(s).`));
   openPathBtn.dataset.filePath = pathValue;
   openPathBtn.disabled = !pathValue;
 
@@ -3551,10 +3575,27 @@ function renderFilesPanel() {
       const pathText = escapeHtml(String((mount && mount.absolute_path) || ''));
       const count = Number((mount && mount.file_count) || 0);
       const skipped = Number((mount && mount.skipped_count) || 0);
+      const reasonCounts = (mount && mount.skip_reason_counts && typeof mount.skip_reason_counts === 'object')
+        ? mount.skip_reason_counts
+        : {};
+      const reasonLabelMap = {
+        too_large: 'too large',
+        unsupported_extension: 'unsupported type',
+        read_failed: 'read failed',
+        stat_failed: 'stat failed',
+      };
+      const reasonParts = Object.entries(reasonCounts)
+        .map(([reason, rawCount]) => ({ reason: String(reason || '').trim(), count: Number(rawCount || 0) }))
+        .filter((entry) => entry.reason && Number.isFinite(entry.count) && entry.count > 0)
+        .map((entry) => `${reasonLabelMap[entry.reason] || entry.reason}: ${entry.count}`);
+      const skipReasonMarkup = reasonParts.length > 0
+        ? `<div class="files-item-sub muted small">Skip reasons: ${escapeHtml(reasonParts.join(', '))}</div>`
+        : '';
       return `
         <div class="files-item" data-mount-id="${escapeHtml(String((mount && mount.id) || ''))}">
           <div class="files-item-title">${pathText || '(missing path)'}</div>
           <div class="files-item-sub">${count} indexed · ${skipped} skipped</div>
+          ${skipReasonMarkup}
           <div class="files-item-actions">
             <button data-files-reindex="${escapeHtml(String((mount && mount.id) || ''))}" ${replayMode ? 'disabled' : ''}>Reindex</button>
             <button data-files-unmount="${escapeHtml(String((mount && mount.id) || ''))}" ${replayMode ? 'disabled' : ''}>Unmount</button>

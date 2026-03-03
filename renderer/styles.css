@@ -2813,6 +2813,27 @@ textarea {
   line-height: 1;
 }
 
+.context-preview-image-wrap {
+  margin: 10px 0 0 0;
+  border: 1px solid rgba(120, 146, 182, 0.35);
+  border-radius: 10px;
+  background: rgba(7, 14, 23, 0.8);
+  max-height: 48vh;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+}
+
+.context-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 44vh;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
 .context-preview-body {
   margin: 8px 0 0 0;
   padding: 12px;

@@ -21,6 +21,7 @@ const { indexFolderAsContext } = require('./runtime/file_indexer');
 const {
   ALLOWED_CONTEXT_EXTENSIONS,
   isTextExtension,
+  isImageExtension,
   detectMimeType,
   summarizeText,
   extractContextTextFromFile,
@@ -124,7 +125,8 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'rag_top_k',
 ]);
 const FOLDER_MOUNT_MAX_FILES = 500;
-const FOLDER_MOUNT_MAX_FILE_BYTES = 4 * 1024 * 1024;
+const CONTEXT_FILE_MAX_BYTES = 32 * 1024 * 1024;
+const FOLDER_MOUNT_MAX_FILE_BYTES = CONTEXT_FILE_MAX_BYTES;
 const CHAT_REQUEST_TIMEOUT_MS = 60_000;
 const DECISION_TRACE_MAX_STEPS = 240;
 const GRAPH_MAX_NODES = 600;
@@ -170,7 +172,7 @@ const ABSTRACTION_PER_FILE_TIMEOUT_MS = 25_000;
 const ABSTRACTION_BINARY_TEXT_PROBE_BYTES = 220 * 1024;
 const ABSTRACTION_BINARY_TEXT_MAX_CHARS = 6_000;
 const ABSTRACTION_MAX_MODEL_FILE_ANALYSES = 24;
-const IMAGE_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_ANALYSIS_MAX_BYTES = CONTEXT_FILE_MAX_BYTES;
 const IMAGE_ANALYSIS_TIMEOUT_MS = 45_000;
 const RAG_ENABLED_DEFAULT = true;
 const RAG_EMBEDDING_MODEL_DEFAULT = 'text-embedding-nomic-embed-text-v1.5';
@@ -222,7 +224,7 @@ let markerModeEnabled = false;
 let markerContext = { srId: '', artifactId: '' };
 let memorySemanticTimer = null;
 const activeChatRequests = new Map();
-const abstractionRefreshInFlight = new Map();
+const abstractionRefreshInFlight = new Map(); // refId -> { promise, controller }
 const pythonSandboxManagers = new Map();
 let pythonRuntimeResolver = null;
 let secureSecretStore = null;
@@ -762,6 +764,52 @@ function makeTimeoutSignal(timeoutMs = 12000) {
   return { controller, timer };
 }
 
+function isAbortLikeError(err) {
+  const name = String((err && err.name) || '').trim().toLowerCase();
+  const message = String((err && err.message) || '').trim().toLowerCase();
+  if (name === 'aborterror') return true;
+  return (
+    message.includes('abort')
+    || message.includes('canceled')
+    || message.includes('cancelled')
+  );
+}
+
+function throwIfAborted(signal, fallbackMessage = 'Request canceled.') {
+  if (!signal || !signal.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  throw new Error(String(reason || fallbackMessage));
+}
+
+function makeTimeoutSignalWithUpstream(timeoutMs = 12000, upstream = null) {
+  const { controller, timer } = makeTimeoutSignal(timeoutMs);
+  const onAbort = () => {
+    const reason = upstream && Object.prototype.hasOwnProperty.call(upstream, 'reason')
+      ? upstream.reason
+      : null;
+    if (reason instanceof Error) {
+      controller.abort(reason);
+      return;
+    }
+    controller.abort(new Error(String(reason || 'Request canceled.')));
+  };
+  if (upstream && typeof upstream.addEventListener === 'function') {
+    if (upstream.aborted) onAbort();
+    else upstream.addEventListener('abort', onAbort, { once: true });
+  }
+  return {
+    controller,
+    timer,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (upstream && typeof upstream.removeEventListener === 'function') {
+        upstream.removeEventListener('abort', onAbort);
+      }
+    },
+  };
+}
+
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
   const { controller, timer } = makeTimeoutSignal(timeoutMs);
   try {
@@ -904,6 +952,8 @@ function readBinaryTextForAbstraction(filePath = '', maxChars = ABSTRACTION_BINA
 }
 
 async function summarizeNonTextFileWithLmStudioForAbstraction(file = {}, settings = readSettings(), options = {}) {
+  const signal = (options && options.signal && typeof options.signal === 'object') ? options.signal : null;
+  throwIfAborted(signal, 'Abstraction refresh canceled.');
   const model = resolveAbstractionPrimaryModel(settings, options);
   if (!model) return { ok: false, message: 'Abstraction model is not configured.' };
   const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
@@ -937,6 +987,7 @@ async function summarizeNonTextFileWithLmStudioForAbstraction(file = {}, setting
   ].join('\n');
 
   try {
+    throwIfAborted(signal, 'Abstraction refresh canceled.');
     const modelRes = await chatWithProvider({
       provider: 'lmstudio',
       model,
@@ -946,11 +997,13 @@ async function summarizeNonTextFileWithLmStudioForAbstraction(file = {}, setting
       userPrompt,
     }, {
       timeoutMs: Math.min(ABSTRACTION_PER_FILE_TIMEOUT_MS, ABSTRACTION_SUMMARY_TIMEOUT_MS),
+      signal,
     });
     const text = String((modelRes && modelRes.text) || '').trim();
     if (!text) return { ok: false, message: 'LM Studio returned empty non-text abstraction.' };
     return { ok: true, text };
   } catch (err) {
+    if ((signal && signal.aborted) || isAbortLikeError(err)) throw err;
     return { ok: false, message: String((err && err.message) || 'LM Studio non-text abstraction failed.') };
   }
 }
@@ -992,6 +1045,8 @@ function buildAbstractionSourceHash(ref = {}, files = [], model = '') {
 }
 
 async function buildAbstractionPromptBundle(ref = {}, files = [], settings = readSettings(), options = {}) {
+  const signal = (options && options.signal && typeof options.signal === 'object') ? options.signal : null;
+  throwIfAborted(signal, 'Abstraction refresh canceled.');
   const list = Array.isArray(files) ? files : [];
   const snippets = [];
   const abstractionModel = resolveAbstractionPrimaryModel(settings, options);
@@ -1008,6 +1063,7 @@ async function buildAbstractionPromptBundle(ref = {}, files = [], settings = rea
     lmstudio_skipped_budget: 0,
   };
   for (let i = 0; i < list.length; i += 1) {
+    throwIfAborted(signal, 'Abstraction refresh canceled.');
     if (snippets.length >= ABSTRACTION_MAX_FILES || totalChars >= ABSTRACTION_MAX_TOTAL_CHARS) break;
     const file = list[i] || {};
     const storedPath = String(file.stored_path || '').trim();
@@ -1035,7 +1091,7 @@ async function buildAbstractionPromptBundle(ref = {}, files = [], settings = rea
           local_path: storedPath,
           prompt: imagePrompt,
           model_override: imageModel || abstractionModel,
-        }, settings);
+        }, settings, { signal });
         if (analysisRes && analysisRes.ok && String(analysisRes.description || '').trim()) {
           analysisStats.lmstudio_analyses += 1;
           excerpt = String(analysisRes.description || '').trim();
@@ -1047,6 +1103,7 @@ async function buildAbstractionPromptBundle(ref = {}, files = [], settings = rea
         modelAnalyses += 1;
         const binaryRes = await summarizeNonTextFileWithLmStudioForAbstraction(file, settings, {
           model: abstractionModel,
+          signal,
         });
         if (binaryRes && binaryRes.ok && String(binaryRes.text || '').trim()) {
           analysisStats.lmstudio_analyses += 1;
@@ -1172,6 +1229,8 @@ function buildScopedRefsForToolExecution(scopedRefs = [], provider = '', setting
 }
 
 async function rebuildReferenceAbstraction(ref, settings = readSettings(), options = {}) {
+  const signal = (options && options.signal && typeof options.signal === 'object') ? options.signal : null;
+  throwIfAborted(signal, 'Abstraction refresh canceled.');
   const target = (ref && typeof ref === 'object') ? ref : null;
   if (!target) return { ok: false, changed: false, message: 'Reference not found.' };
   const abstractionEnabled = !!(settings && settings.abstraction_enabled);
@@ -1243,7 +1302,9 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
     promptBundle = await buildAbstractionPromptBundle(target, localFiles, settings, {
       model,
       imageModel: imageAnalysisModel,
+      signal,
     });
+    throwIfAborted(signal, 'Abstraction refresh canceled.');
     const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
     if (lmCreds && lmCreds.ok) {
       try {
@@ -1256,9 +1317,11 @@ async function rebuildReferenceAbstraction(ref, settings = readSettings(), optio
           userPrompt: promptBundle.userPrompt,
         }, {
           timeoutMs: ABSTRACTION_SUMMARY_TIMEOUT_MS,
+          signal,
         });
         modelText = String((modelRes && modelRes.text) || '').trim();
-      } catch (_) {
+      } catch (err) {
+        if ((signal && signal.aborted) || isAbortLikeError(err)) throw err;
         modelText = '';
       }
     }
@@ -1332,28 +1395,49 @@ async function queueReferenceAbstractionRefresh(srId = '', options = {}) {
   const refId = String(srId || '').trim();
   if (!refId) return { ok: false, message: 'srId is required.' };
   const force = !!(options && options.force);
-  if (abstractionRefreshInFlight.has(refId)) {
-    return abstractionRefreshInFlight.get(refId);
+  const restart = !!(options && options.restart);
+  const inFlight = abstractionRefreshInFlight.get(refId);
+  if (inFlight && !restart) {
+    return inFlight.promise;
   }
+  if (inFlight && restart && inFlight.controller && !inFlight.controller.signal.aborted) {
+    inFlight.controller.abort(new Error('Abstraction refresh restarted.'));
+  }
+  const controller = new AbortController();
   const task = (async () => {
-    const settings = readSettings();
-    if (!settings.abstraction_enabled) {
-      return { ok: true, skipped: true, message: 'Abstraction disabled.' };
+    try {
+      throwIfAborted(controller.signal, 'Abstraction refresh canceled.');
+      const settings = readSettings();
+      if (!settings.abstraction_enabled) {
+        return { ok: true, skipped: true, message: 'Abstraction disabled.' };
+      }
+      const refs = getReferences();
+      const idx = findReferenceIndex(refs, refId);
+      if (idx < 0) return { ok: false, message: 'Reference not found.' };
+      const rebuildRes = await rebuildReferenceAbstraction(refs[idx], settings, { force, signal: controller.signal });
+      if (rebuildRes && rebuildRes.changed) {
+        refs[idx].updated_at = nowTs();
+        setReferences(refs, { skipMemoryCapture: true });
+      }
+      return rebuildRes;
+    } catch (err) {
+      if (controller.signal.aborted || isAbortLikeError(err)) {
+        return { ok: false, canceled: true, message: 'Abstraction refresh canceled.' };
+      }
+      throw err;
     }
-    const refs = getReferences();
-    const idx = findReferenceIndex(refs, refId);
-    if (idx < 0) return { ok: false, message: 'Reference not found.' };
-    const rebuildRes = await rebuildReferenceAbstraction(refs[idx], settings, { force });
-    if (rebuildRes && rebuildRes.changed) {
-      refs[idx].updated_at = nowTs();
-      setReferences(refs, { skipMemoryCapture: true });
-    }
-    return rebuildRes;
   })();
-  abstractionRefreshInFlight.set(refId, task);
-  return task.finally(() => {
-    abstractionRefreshInFlight.delete(refId);
+  const wrapped = task.finally(() => {
+    const current = abstractionRefreshInFlight.get(refId);
+    if (current && current.promise === wrapped) {
+      abstractionRefreshInFlight.delete(refId);
+    }
   });
+  abstractionRefreshInFlight.set(refId, {
+    promise: wrapped,
+    controller,
+  });
+  return wrapped;
 }
 
 async function queueAbstractionBackfillForAllReferences(options = {}) {
@@ -2649,6 +2733,8 @@ async function analyzeImageWithProviderFallback(args = {}, settings = readSettin
 
 async function analyzeImageWithLmStudio(args = {}, settings = readSettings(), options = {}) {
   const opts = (options && typeof options === 'object') ? options : {};
+  const upstreamSignal = (opts.signal && typeof opts.signal === 'object') ? opts.signal : null;
+  throwIfAborted(upstreamSignal, 'Image analysis canceled.');
   const modelOverride = String(
     opts.model
     || opts.model_override
@@ -2699,8 +2785,9 @@ async function analyzeImageWithLmStudio(args = {}, settings = readSettings(), op
     ],
   };
 
-  const { controller, timer } = makeTimeoutSignal(IMAGE_ANALYSIS_TIMEOUT_MS);
+  const { controller, cleanup } = makeTimeoutSignalWithUpstream(IMAGE_ANALYSIS_TIMEOUT_MS, upstreamSignal);
   try {
+    throwIfAborted(upstreamSignal, 'Image analysis canceled.');
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
@@ -2733,9 +2820,10 @@ async function analyzeImageWithLmStudio(args = {}, settings = readSettings(), op
       prompt,
     };
   } catch (err) {
+    if ((upstreamSignal && upstreamSignal.aborted) || isAbortLikeError(err)) throw err;
     return { ok: false, message: String((err && err.message) || 'Image analysis failed.') };
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 }
 
@@ -10500,7 +10588,7 @@ async function runPythonForReference(srId, code, timeoutMs = PYTHON_EXEC_TIMEOUT
   return runRes;
 }
 
-function dispatchProgrammaticTool(req, { srId, refs }) {
+async function dispatchProgrammaticTool(req, { srId, refs }) {
   const name = String((req && req.name) || '').trim();
   const args = (req && typeof req.args === 'object' && req.args !== null) ? req.args : {};
   const ref = Array.isArray(refs) ? refs.find((r) => String((r && r.id) || '') === String(srId || '')) : null;
@@ -10574,10 +10662,26 @@ function dispatchProgrammaticTool(req, { srId, refs }) {
   if (name === 'list_context_files') {
     const contextFiles = Array.isArray(ref.context_files) ? ref.context_files : [];
     return contextFiles.map((f) => ({
-      id: String((f && f.id) || ''),
-      name: String((f && f.original_name) || (f && f.relative_path) || ''),
-      size_bytes: Number((f && f.size_bytes) || 0),
-      summary: String((f && f.summary) || ''),
+      ...(function mapContextFileMeta(file) {
+        const safe = (file && typeof file === 'object') ? file : {};
+        const relativePath = String((safe && safe.relative_path) || '').trim();
+        const storedPath = String((safe && safe.stored_path) || '').trim();
+        const ext = String(path.extname(relativePath || storedPath || '') || '').trim().toLowerCase();
+        const mimeType = String((safe && safe.mime_type) || detectMimeType(ext, isTextExtension(ext))).trim();
+        const imageByMime = mimeType.startsWith('image/') && mimeType !== 'image/svg+xml';
+        const imageByExt = isImageExtension(ext);
+        return {
+          id: String((safe && safe.id) || ''),
+          name: String((safe && safe.original_name) || relativePath || path.basename(storedPath) || ''),
+          size_bytes: Number((safe && safe.size_bytes) || 0),
+          summary: String((safe && safe.summary) || ''),
+          mime_type: mimeType,
+          relative_path: relativePath || path.basename(storedPath) || '',
+          source_type: String((safe && safe.source_type) || '').trim(),
+          extract_strategy: String((safe && safe.extract_strategy) || '').trim(),
+          is_image: !!(imageByMime || imageByExt),
+        };
+      })(f),
     }));
   }
 
@@ -10589,10 +10693,68 @@ function dispatchProgrammaticTool(req, { srId, refs }) {
     const storedPath = String((ctxFile && ctxFile.stored_path) || '').trim();
     if (!storedPath || !fs.existsSync(storedPath)) return null;
     try {
-      const content = fs.readFileSync(storedPath, 'utf8');
+      const fileName = String(ctxFile.original_name || ctxFile.relative_path || path.basename(storedPath) || '').trim() || 'context file';
+      const ext = String(path.extname(storedPath) || '').trim().toLowerCase();
+      const mimeType = String((ctxFile && ctxFile.mime_type) || detectMimeType(ext, isTextExtension(ext))).trim();
+      const summary = String((ctxFile && ctxFile.summary) || '').trim();
+      const extracted = extractContextTextFromFile(storedPath, {
+        filePath: storedPath,
+        filename: fileName,
+        ext,
+        mimeType,
+        maxChars: 200_000,
+      });
+      const mode = String((extracted && extracted.mode) || 'binary').trim().toLowerCase() || 'binary';
+      const extractStrategy = String((extracted && extracted.strategy) || '').trim();
+      const fallbackContent = String((extracted && extracted.text) || '').slice(0, 200_000);
+      const vision = {
+        attempted: false,
+        ok: false,
+        provider: '',
+        model: '',
+        prompt: '',
+        description: '',
+        error: '',
+      };
+      let content = fallbackContent;
+
+      if (mode === 'image') {
+        vision.attempted = true;
+        try {
+          const imagePrompt = String(args.prompt || '').trim()
+            || `Describe this image (${fileName}) in detail, including visible text, entities, layout, and relevant context.`;
+          const imageRes = await analyzeImageWithLmStudio({
+            local_path: storedPath,
+            prompt: imagePrompt,
+          }, readSettings());
+          if (imageRes && imageRes.ok) {
+            const description = String(imageRes.description || '').trim();
+            vision.ok = !!description;
+            vision.provider = String(imageRes.provider || 'lmstudio');
+            vision.model = String(imageRes.model || '');
+            vision.prompt = String(imageRes.prompt || imagePrompt);
+            vision.description = description;
+            if (description) {
+              content = description.slice(0, 200_000);
+            } else {
+              vision.error = 'Image analysis returned no text.';
+            }
+          } else {
+            vision.error = String((imageRes && imageRes.message) || 'Image analysis failed.');
+          }
+        } catch (err) {
+          vision.error = String((err && err.message) || 'Image analysis failed.');
+        }
+      }
+
       return {
-        name: String(ctxFile.original_name || ctxFile.relative_path || ''),
-        content: content.slice(0, 200_000),
+        name: fileName,
+        content: content || fallbackContent,
+        mode,
+        mime_type: mimeType,
+        summary,
+        extract_strategy: extractStrategy,
+        vision,
       };
     } catch (_) {
       return null;
@@ -11191,7 +11353,7 @@ async function executeLuminoChat(input, options = {}) {
               tool_name: bridgeName,
             });
             try {
-              const bridgeResult = dispatchProgrammaticTool(bridgeReq, { srId, refs: getToolScopedRefs() });
+              const bridgeResult = await dispatchProgrammaticTool(bridgeReq, { srId, refs: getToolScopedRefs() });
               const hasError = !!(bridgeResult && typeof bridgeResult === 'object' && String(bridgeResult.error || '').trim());
               if (hasError) {
                 emitStatus('error', 'python_bridge', `Python bridge ${bridgeName || 'tool'} failed: ${String(bridgeResult.error || '').trim()}`, {
@@ -11621,7 +11783,7 @@ async function executeLuminoChat(input, options = {}) {
           || name === 'read_context_file'
         ) {
           try {
-            const directResult = dispatchProgrammaticTool({ name, args }, { srId, refs: getToolScopedRefs() });
+            const directResult = await dispatchProgrammaticTool({ name, args }, { srId, refs: getToolScopedRefs() });
             const hasError = !!(directResult && typeof directResult === 'object' && String(directResult.error || '').trim());
             if (hasError) {
               return {
@@ -14180,7 +14342,7 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
       return { ok: false, message: 'Selected path is not a file.' };
     }
     if (stat.size > FOLDER_MOUNT_MAX_FILE_BYTES) {
-      return { ok: false, message: 'Context file exceeds 4MB limit.' };
+      return { ok: false, message: `Context file exceeds ${Math.round(CONTEXT_FILE_MAX_BYTES / (1024 * 1024))}MB limit.` };
     }
 
     const refs = getReferences();
@@ -14232,7 +14394,7 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
     markReferenceAbstractionStale(refs[idx], 'Local file added.');
     refs[idx].updated_at = nowTs();
     setReferences(refs);
-    queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
+    queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
     return {
       ok: true,
       file: item,
@@ -14401,6 +14563,9 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
     indexed_at: nowTs(),
     file_count: ingest.files.length,
     skipped_count: ingest.skipped_count,
+    skip_reason_counts: (ingest.skip_reason_counts && typeof ingest.skip_reason_counts === 'object')
+      ? { ...ingest.skip_reason_counts }
+      : {},
     truncated: ingest.truncated,
   };
   refs[idx].folder_mounts.push(mount);
@@ -14438,7 +14603,7 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
   markReferenceAbstractionStale(refs[idx], 'Folder mount indexed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
-  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
+  queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
 
   return {
     ok: true,
@@ -14507,13 +14672,16 @@ ipcMain.handle('browser:srReindexFolderMount', async (_event, payload) => {
   mount.indexed_at = nowTs();
   mount.file_count = ingest.files.length;
   mount.skipped_count = ingest.skipped_count;
+  mount.skip_reason_counts = (ingest.skip_reason_counts && typeof ingest.skip_reason_counts === 'object')
+    ? { ...ingest.skip_reason_counts }
+    : {};
   mount.truncated = ingest.truncated;
 
   const filesTabRes = ensureSingleFilesTab(refs[idx]);
   markReferenceAbstractionStale(refs[idx], 'Folder mount reindexed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
-  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
+  queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
 
   return {
     ok: true,
@@ -14549,7 +14717,7 @@ ipcMain.handle('browser:srUnmountFolder', async (_event, payload) => {
   markReferenceAbstractionStale(refs[idx], 'Folder mount removed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
-  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
+  queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
 
   return {
     ok: true,
@@ -14613,10 +14781,14 @@ ipcMain.handle('browser:srGetContextFilePreview', (_event, payload) => {
     const message = mode === 'image'
       ? 'Image file detected. Showing metadata summary; use image analysis tools for detailed vision output.'
       : 'Document/binary file detected. Showing extracted text fragments and index summary instead of raw bytes.';
+    const imageUrl = (previewMode === 'image')
+      ? pathToFileURL(targetPath).toString()
+      : '';
     return {
       ok: true,
       preview_mode: previewMode,
       preview: String((extracted && extracted.text) || '').trim(),
+      image_url: imageUrl,
       file: item,
       title,
       mime_type: mimeType,
@@ -14644,7 +14816,7 @@ ipcMain.handle('browser:srRemoveContextFile', async (_event, payload) => {
   markReferenceAbstractionStale(refs[idx], 'Context file removed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
-  queueReferenceAbstractionRefresh(srId, { force: true }).catch(() => {});
+  queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
 
   return { ok: true, reference: refs[idx], references: refs };
 });
