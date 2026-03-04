@@ -6696,7 +6696,12 @@ async function refreshOrchestratorWebKeyStatus() {
 
 async function refreshSettingsLmstudioModelOptions() {
   if (!api.providerListModels) return;
-  const res = await api.providerListModels('lmstudio', '');
+  let res = null;
+  try {
+    res = await api.providerListModels('lmstudio', '');
+  } catch (_) {
+    res = null;
+  }
   if (!res || !res.ok) {
     state.settingsLmstudioModels = [];
     return;
@@ -6720,11 +6725,21 @@ async function refreshRagStatus() {
 }
 
 async function loadSettingsData() {
-  const prefRes = await api.getPreferences();
-  const diagnostics = await api.settingsDiagnostics();
-  await refreshTrustCommonsStatus();
-  await refreshSettingsLmstudioModelOptions();
-  await refreshProviderKeysState({ renderSettings: true });
+  let prefRes = null;
+  let diagnostics = null;
+  try {
+    prefRes = await api.getPreferences();
+  } catch (_) {
+    prefRes = null;
+  }
+  try {
+    diagnostics = await api.settingsDiagnostics();
+  } catch (_) {
+    diagnostics = null;
+  }
+  try { await refreshTrustCommonsStatus(); } catch (_) {}
+  try { await refreshSettingsLmstudioModelOptions(); } catch (_) {}
+  try { await refreshProviderKeysState({ renderSettings: true }); } catch (_) {}
   if (prefRes && prefRes.ok) {
     state.settingsPersisted = normalizeSettingsDraft(prefRes);
     state.settingsDraft = normalizeSettingsDraft(prefRes);
@@ -6733,13 +6748,13 @@ async function loadSettingsData() {
     state.settingsSaveState = '';
     renderSettingsForm();
   }
-  await refreshTelegramSettingsStatus();
-  await refreshOrchestratorUsersList();
-  await refreshLmstudioTokenStatus();
-  await refreshOrchestratorWebKeyStatus();
-  await refreshAbstractionStatus();
-  await refreshRagStatus();
-  await refreshAppDataProtectionStatus();
+  try { await refreshTelegramSettingsStatus(); } catch (_) {}
+  try { await refreshOrchestratorUsersList(); } catch (_) {}
+  try { await refreshLmstudioTokenStatus(); } catch (_) {}
+  try { await refreshOrchestratorWebKeyStatus(); } catch (_) {}
+  try { await refreshAbstractionStatus(); } catch (_) {}
+  try { await refreshRagStatus(); } catch (_) {}
+  try { await refreshAppDataProtectionStatus(); } catch (_) {}
   if (diagnostics && diagnostics.ok) {
     state.settingsDiagnostics = diagnostics;
     renderSettingsDiagnostics();

@@ -16460,7 +16460,15 @@ ipcMain.handle('browser:providerListModels', async (_event, payload) => {
     apiKey = String(keyRes.apiKey || '');
     resolvedKeyId = String(keyRes.key_id || '');
   }
-  const modelRes = await fetchProviderModels(provider, apiKey);
+  let modelRes = null;
+  try {
+    modelRes = await fetchProviderModels(provider, apiKey);
+  } catch (err) {
+    return {
+      ok: false,
+      message: String((err && err.message) || 'Unable to fetch provider models.'),
+    };
+  }
   if (!modelRes || !modelRes.ok) return modelRes;
   return {
     ...modelRes,
