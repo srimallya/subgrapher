@@ -470,6 +470,10 @@ function normalizeVector(input = []) {
   return Float32Array.from(input.map((item) => Number(item) || 0));
 }
 
+function normalizeEmbeddingRuntime(value) {
+  return String(value || '').trim().toLowerCase() === 'lmstudio' ? 'lmstudio' : 'local-hash';
+}
+
 async function searchLocalEvidence(query, scopedRefs = [], options = {}) {
   const q = String(query || '').trim();
   const refs = Array.isArray(scopedRefs) ? scopedRefs : [];
@@ -496,12 +500,23 @@ async function searchLocalEvidence(query, scopedRefs = [], options = {}) {
   const embeddingConfig = (options.embeddingConfig && typeof options.embeddingConfig === 'object')
     ? options.embeddingConfig
     : {};
-  const requestedModel = String(options.embeddingModel || embeddingConfig.model || DEFAULT_EMBEDDING_MODEL).trim() || DEFAULT_EMBEDDING_MODEL;
+  const requestedRuntime = normalizeEmbeddingRuntime(options.embeddingRuntime || embeddingConfig.runtime);
+  const requestedModel = requestedRuntime === 'lmstudio'
+    ? (String(options.embeddingModel || embeddingConfig.model || DEFAULT_EMBEDDING_MODEL).trim() || DEFAULT_EMBEDDING_MODEL)
+    : HASH_FALLBACK_MODEL;
 
-  const queryEmbeddingRes = await embedTexts([q], {
-    ...embeddingConfig,
-    model: requestedModel,
-  });
+  const queryEmbeddingRes = requestedRuntime === 'lmstudio'
+    ? await embedTexts([q], {
+      ...embeddingConfig,
+      model: requestedModel,
+    })
+    : {
+      ok: true,
+      embeddings: [hashEmbedText(q)],
+      runtime: 'local-hash',
+      model: HASH_FALLBACK_MODEL,
+      fallback_used: true,
+    };
 
   const queryEmbedding = normalizeVector((queryEmbeddingRes && queryEmbeddingRes.embeddings && queryEmbeddingRes.embeddings[0]) || []);
   const embeddingRuntime = String((queryEmbeddingRes && queryEmbeddingRes.runtime) || 'local-hash').trim() || 'local-hash';
@@ -688,11 +703,22 @@ async function reindexLocalEvidenceReference(referenceId = '', scopedRefs = [], 
   const embeddingConfig = (cfg.embeddingConfig && typeof cfg.embeddingConfig === 'object')
     ? cfg.embeddingConfig
     : {};
-  const requestedModel = String(cfg.embeddingModel || embeddingConfig.model || DEFAULT_EMBEDDING_MODEL).trim() || DEFAULT_EMBEDDING_MODEL;
-  const probeRes = await embedTexts(['subgrapher rag health check'], {
-    ...embeddingConfig,
-    model: requestedModel,
-  });
+  const requestedRuntime = normalizeEmbeddingRuntime(cfg.embeddingRuntime || embeddingConfig.runtime);
+  const requestedModel = requestedRuntime === 'lmstudio'
+    ? (String(cfg.embeddingModel || embeddingConfig.model || DEFAULT_EMBEDDING_MODEL).trim() || DEFAULT_EMBEDDING_MODEL)
+    : HASH_FALLBACK_MODEL;
+  const probeRes = requestedRuntime === 'lmstudio'
+    ? await embedTexts(['subgrapher rag health check'], {
+      ...embeddingConfig,
+      model: requestedModel,
+    })
+    : {
+      ok: true,
+      embeddings: [hashEmbedText('subgrapher rag health check')],
+      runtime: 'local-hash',
+      model: HASH_FALLBACK_MODEL,
+      fallback_used: true,
+    };
   const modelId = String((probeRes && probeRes.model) || HASH_FALLBACK_MODEL).trim() || HASH_FALLBACK_MODEL;
   const embeddingRuntime = String((probeRes && probeRes.runtime) || 'local-hash').trim() || 'local-hash';
 

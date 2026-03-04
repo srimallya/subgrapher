@@ -127,6 +127,7 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'image_analysis_model',
   'image_analysis_prompt',
   'rag_enabled',
+  'rag_embedding_source',
   'rag_embedding_model',
   'rag_top_k',
 ]);
@@ -182,7 +183,9 @@ const ABSTRACTION_MAX_MODEL_FILE_ANALYSES = 24;
 const IMAGE_ANALYSIS_MAX_BYTES = CONTEXT_FILE_MAX_BYTES;
 const IMAGE_ANALYSIS_TIMEOUT_MS = 45_000;
 const RAG_ENABLED_DEFAULT = true;
+const RAG_EMBEDDING_SOURCE_DEFAULT = 'lmstudio';
 const RAG_EMBEDDING_MODEL_DEFAULT = 'text-embedding-nomic-embed-text-v1.5';
+const RAG_INBUILT_EMBEDDING_MODEL = 'hybrid:local-hash-embedding-v1';
 const RAG_TOP_K_DEFAULT = 8;
 const PATH_B_GLOBAL_TOP_K = 12;
 const PATH_B_LINK_VERIFY_THRESHOLD = 0.42;
@@ -280,6 +283,37 @@ const appDataProtectionState = {
   last_error: '',
   unlocked_at: 0,
 };
+
+function normalizeRagEmbeddingSource(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'inbuilt' ? 'inbuilt' : 'lmstudio';
+}
+
+function resolveRagEmbeddingSettings(settings = {}) {
+  const source = normalizeRagEmbeddingSource(settings.rag_embedding_source);
+  if (source === 'inbuilt') {
+    return {
+      source,
+      runtime: 'local-hash',
+      model: RAG_INBUILT_EMBEDDING_MODEL,
+      config: {
+        model: RAG_INBUILT_EMBEDDING_MODEL,
+      },
+    };
+  }
+  const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
+  const model = String(settings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT;
+  return {
+    source,
+    runtime: 'lmstudio',
+    model,
+    config: {
+      baseUrl: String((lmCreds && lmCreds.base_url) || settings.lmstudio_base_url || LMSTUDIO_DEFAULT_BASE_URL).trim(),
+      apiKey: String((lmCreds && lmCreds.apiKey) || ''),
+      model,
+    },
+  };
+}
 const hyperwebManager = new HyperwebManager({
   relayUrl: DEFAULT_HYPERWEB_RELAY_URL,
   enabled: true,
@@ -1667,12 +1701,14 @@ async function buildRagStatusSnapshot(payload = {}) {
   const input = (payload && typeof payload === 'object') ? payload : {};
   const srId = String(input.sr_id || input.srId || '').trim();
   const settings = readSettings();
+  const ragEmbedding = resolveRagEmbeddingSettings(settings);
   if (!settings.rag_enabled) {
     return {
       ok: true,
       enabled: false,
       message: 'RAG is disabled.',
-      model: String(settings.rag_embedding_model || RAG_EMBEDDING_MODEL_DEFAULT),
+      source: ragEmbedding.source,
+      model: ragEmbedding.model,
       top_k: Number(settings.rag_top_k || RAG_TOP_K_DEFAULT),
       count: 0,
       counts: { ready: 0, missing: 0, empty: 0, error: 0 },
@@ -1712,7 +1748,8 @@ async function buildRagStatusSnapshot(payload = {}) {
   return {
     ok: true,
     enabled: true,
-    model: String(settings.rag_embedding_model || RAG_EMBEDDING_MODEL_DEFAULT),
+    source: ragEmbedding.source,
+    model: ragEmbedding.model,
     top_k: Number(settings.rag_top_k || RAG_TOP_K_DEFAULT),
     count: items.length,
     counts,
@@ -1729,16 +1766,13 @@ async function queueReferenceRagReindex(srId = '') {
   }
   const refs = getReferences();
   const scopedRefs = getPathCScopedReferences(refId, refs);
-  const lmCreds = resolveProviderRuntimeCredentials('lmstudio', settings);
+  const ragEmbedding = resolveRagEmbeddingSettings(settings);
   return reindexLocalEvidenceReference(refId, scopedRefs, {
     userDataPath: app.getPath('userData'),
     ragEnabled: !!settings.rag_enabled,
-    embeddingModel: String(settings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
-    embeddingConfig: {
-      baseUrl: String((lmCreds && lmCreds.base_url) || settings.lmstudio_base_url || LMSTUDIO_DEFAULT_BASE_URL).trim(),
-      apiKey: String((lmCreds && lmCreds.apiKey) || ''),
-      model: String(settings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
-    },
+    embeddingRuntime: ragEmbedding.runtime,
+    embeddingModel: ragEmbedding.model,
+    embeddingConfig: ragEmbedding.config,
   });
 }
 
@@ -3866,6 +3900,7 @@ function getDefaultSettings() {
     image_analysis_model: '',
     image_analysis_prompt: IMAGE_ANALYSIS_PROMPT_DEFAULT,
     rag_enabled: RAG_ENABLED_DEFAULT,
+    rag_embedding_source: RAG_EMBEDDING_SOURCE_DEFAULT,
     rag_embedding_model: RAG_EMBEDDING_MODEL_DEFAULT,
     rag_top_k: RAG_TOP_K_DEFAULT,
   };
@@ -3903,6 +3938,7 @@ function readSettings() {
     const abstractionModel = String((parsed && parsed.abstraction_model) || defaults.abstraction_model).trim();
     const imageAnalysisModel = String((parsed && parsed.image_analysis_model) || defaults.image_analysis_model).trim();
     const imageAnalysisPrompt = String((parsed && parsed.image_analysis_prompt) || defaults.image_analysis_prompt).trim();
+    const ragEmbeddingSource = normalizeRagEmbeddingSource((parsed && parsed.rag_embedding_source) || defaults.rag_embedding_source);
     const ragEmbeddingModel = String((parsed && parsed.rag_embedding_model) || defaults.rag_embedding_model).trim();
     const ragTopK = Number((parsed && parsed.rag_top_k) || defaults.rag_top_k);
     const identityId = String((parsed && parsed.trustcommons_identity_id) || '').trim();
@@ -3980,6 +4016,7 @@ function readSettings() {
       rag_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'rag_enabled')
         ? !!parsed.rag_enabled
         : defaults.rag_enabled,
+      rag_embedding_source: ragEmbeddingSource,
       rag_embedding_model: ragEmbeddingModel || defaults.rag_embedding_model,
       rag_top_k: Number.isFinite(ragTopK)
         ? Math.max(1, Math.min(24, Math.round(ragTopK)))
@@ -4111,6 +4148,11 @@ function writeSettings(next) {
       ? input.rag_embedding_model
       : current.rag_embedding_model
   ).trim();
+  const requestedRagEmbeddingSource = normalizeRagEmbeddingSource(
+    Object.prototype.hasOwnProperty.call(input, 'rag_embedding_source')
+      ? input.rag_embedding_source
+      : current.rag_embedding_source
+  );
   const requestedRagTopK = Number(
     Object.prototype.hasOwnProperty.call(input, 'rag_top_k')
       ? input.rag_top_k
@@ -4227,6 +4269,7 @@ function writeSettings(next) {
     rag_enabled: Object.prototype.hasOwnProperty.call(input, 'rag_enabled')
       ? !!input.rag_enabled
       : !!current.rag_enabled,
+    rag_embedding_source: requestedRagEmbeddingSource,
     rag_embedding_model: requestedRagEmbeddingModel || RAG_EMBEDDING_MODEL_DEFAULT,
     rag_top_k: Number.isFinite(requestedRagTopK)
       ? Math.max(1, Math.min(24, Math.round(requestedRagTopK)))
@@ -12505,18 +12548,15 @@ async function executeLuminoChat(input, options = {}) {
             ? args.include_kinds.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
             : [];
           const activeSettings = readSettings();
-          const lmCreds = resolveProviderRuntimeCredentials('lmstudio', activeSettings);
+          const ragEmbedding = resolveRagEmbeddingSettings(activeSettings);
           const searchRes = await searchLocalEvidence(query, getToolScopedRefs(), {
             topK,
             includeKinds,
             userDataPath: app.getPath('userData'),
             ragEnabled: !!activeSettings.rag_enabled,
-            embeddingModel: String(activeSettings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
-            embeddingConfig: {
-              baseUrl: String((lmCreds && lmCreds.base_url) || activeSettings.lmstudio_base_url || LMSTUDIO_DEFAULT_BASE_URL).trim(),
-              apiKey: String((lmCreds && lmCreds.apiKey) || ''),
-              model: String(activeSettings.rag_embedding_model || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
-            },
+            embeddingRuntime: ragEmbedding.runtime,
+            embeddingModel: ragEmbedding.model,
+            embeddingConfig: ragEmbedding.config,
           });
           const results = Array.isArray(searchRes && searchRes.results) ? searchRes.results : [];
           const citations = Array.isArray(searchRes && searchRes.citations) ? searchRes.citations : [];

@@ -165,6 +165,7 @@ const UI_ZOOM_STEP = 0.1;
 const UI_MIN_ZOOM = 0.5;
 const UI_MAX_ZOOM = 3.0;
 const IMAGE_ANALYSIS_PROMPT_DEFAULT = 'Describe the image in details and write the context.';
+const RAG_EMBEDDING_SOURCE_DEFAULT = 'lmstudio';
 const RAG_EMBEDDING_MODEL_DEFAULT = 'text-embedding-nomic-embed-text-v1.5';
 const RAG_TOP_K_DEFAULT = 8;
 const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
@@ -6354,13 +6355,14 @@ function renderSettingsRagStatus() {
   const counts = status.counts && typeof status.counts === 'object' ? status.counts : {};
   const refs = Array.isArray(status.references) ? status.references : [];
   const active = refs[0] && typeof refs[0] === 'object' ? refs[0] : null;
+  const source = String(status.source || draft.rag_embedding_source || RAG_EMBEDDING_SOURCE_DEFAULT).trim() || RAG_EMBEDDING_SOURCE_DEFAULT;
   const updated = refs.map((item) => Number((item && item.updated_at) || 0)).filter((v) => Number.isFinite(v) && v > 0);
   const latest = updated.length ? Math.max(...updated) : 0;
   const latestText = latest > 0 ? ` · updated ${formatAgo(latest)}` : '';
   const runtimeText = active
     ? ` · runtime=${String(active.embedding_runtime || 'none') || 'none'} · model=${String(active.model_id || '-').trim() || '-'}`
     : '';
-  node.textContent = `ready=${Number(counts.ready || 0)}, missing=${Number(counts.missing || 0)}, empty=${Number(counts.empty || 0)}, error=${Number(counts.error || 0)}${runtimeText}${latestText}`;
+  node.textContent = `source=${source} · ready=${Number(counts.ready || 0)}, missing=${Number(counts.missing || 0)}, empty=${Number(counts.empty || 0)}, error=${Number(counts.error || 0)}${runtimeText}${latestText}`;
 }
 
 function normalizeSettingsDraft(raw = {}) {
@@ -6380,6 +6382,9 @@ function normalizeSettingsDraft(raw = {}) {
   const historyMaxEntries = Number.isFinite(historyMaxRaw)
     ? Math.max(500, Math.min(10000, Math.round(historyMaxRaw)))
     : HISTORY_DEFAULT_MAX_ENTRIES;
+  const ragEmbeddingSource = String(src.rag_embedding_source || RAG_EMBEDDING_SOURCE_DEFAULT).trim().toLowerCase() === 'inbuilt'
+    ? 'inbuilt'
+    : 'lmstudio';
   return {
     default_search_engine: String(src.default_search_engine || 'ddg').trim().toLowerCase(),
     lumino_last_provider: String(src.lumino_last_provider || 'openai').trim().toLowerCase(),
@@ -6395,6 +6400,7 @@ function normalizeSettingsDraft(raw = {}) {
     image_analysis_model: String(src.image_analysis_model || '').trim(),
     image_analysis_prompt: String(src.image_analysis_prompt || IMAGE_ANALYSIS_PROMPT_DEFAULT).trim() || IMAGE_ANALYSIS_PROMPT_DEFAULT,
     rag_enabled: Object.prototype.hasOwnProperty.call(src, 'rag_enabled') ? !!src.rag_enabled : true,
+    rag_embedding_source: ragEmbeddingSource,
     rag_embedding_model: String(src.rag_embedding_model || RAG_EMBEDDING_MODEL_DEFAULT).trim() || RAG_EMBEDDING_MODEL_DEFAULT,
     rag_top_k: Number.isFinite(Number(src.rag_top_k))
       ? Math.max(1, Math.min(24, Math.round(Number(src.rag_top_k))))
@@ -6455,6 +6461,9 @@ function validateSettingsDraft(draft = {}) {
   }
   if (!Number.isFinite(d.history_max_entries) || d.history_max_entries < 500 || d.history_max_entries > 10000) {
     errors.history_max_entries = 'History max entries must be 500..10000.';
+  }
+  if (!['lmstudio', 'inbuilt'].includes(String(d.rag_embedding_source || '').trim().toLowerCase())) {
+    errors.rag_embedding_source = 'RAG embedding source must be lmstudio or inbuilt.';
   }
   if (!Number.isFinite(d.rag_top_k) || d.rag_top_k < 1 || d.rag_top_k > 24) {
     errors.rag_top_k = 'RAG Top-K must be 1..24.';
@@ -6568,6 +6577,11 @@ function renderSettingsForm() {
     node.classList.toggle('invalid', !!(state.settingsValidationErrors && state.settingsValidationErrors[key]));
     node.title = (state.settingsValidationErrors && state.settingsValidationErrors[key]) || '';
   });
+  const ragUsesLmstudio = draft.rag_embedding_source !== 'inbuilt';
+  const ragModelNode = e('settings-rag-embedding-model');
+  const ragFetchBtn = e('settings-rag-fetch-models-btn');
+  if (ragModelNode) ragModelNode.disabled = !ragUsesLmstudio;
+  if (ragFetchBtn) ragFetchBtn.disabled = !ragUsesLmstudio;
   renderSyncEligibility();
   renderAppDataProtectionStatus();
   renderSettingsAbstractionStatus();
@@ -8062,9 +8076,13 @@ function bindControls() {
       renderSettingsStatusLine();
     });
     node.addEventListener('change', () => {
+      const key = String(node.getAttribute('data-setting') || '').trim();
       readSettingsDraftFromForm();
       state.settingsSaveState = '';
       renderSettingsStatusLine();
+      if (key === 'rag_embedding_source') {
+        renderSettingsForm();
+      }
     });
   });
 
