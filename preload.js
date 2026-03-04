@@ -214,6 +214,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       author_fingerprint: authorFingerprint,
     }),
     hyperwebMembersList: () => ipcRenderer.invoke('browser:hyperwebMembersList'),
+    hyperwebChatSend: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatSend', payload || {}),
+    hyperwebChatHistory: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatHistory', payload || {}),
+    hyperwebChatMarkRead: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatMarkRead', payload || {}),
+    hyperwebChatRoomCreate: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatRoomCreate', payload || {}),
+    hyperwebChatRoomsList: () => ipcRenderer.invoke('browser:hyperwebChatRoomsList'),
     hyperwebShareReference: (srId, recipientIds = []) => ipcRenderer.invoke('browser:hyperwebShareReference', {
       sr_id: srId,
       recipient_ids: recipientIds,
@@ -256,6 +261,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onCrawlerStream: (callback) => {
       ipcRenderer.removeAllListeners('browser:crawlerStream');
       ipcRenderer.on('browser:crawlerStream', (_event, data) => callback(data));
+    },
+    onHyperwebChat: (callback) => {
+      ipcRenderer.removeAllListeners('browser:hyperwebChat');
+      ipcRenderer.on('browser:hyperwebChat', (_event, data) => callback(data));
     },
     onShortcutCommand: (callback) => {
       ipcRenderer.removeAllListeners('browser:shortcut-command');

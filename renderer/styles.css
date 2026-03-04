@@ -789,7 +789,8 @@ body.zen-mode .settings-body {
 }
 
 .hyperweb-grid.view-feed #hyperweb-public-references-panel,
-.hyperweb-grid.view-feed #hyperweb-splitter {
+.hyperweb-grid.view-feed #hyperweb-splitter,
+.hyperweb-grid.view-feed #hyperweb-chat-panel {
   display: none;
 }
 
@@ -798,11 +799,22 @@ body.zen-mode .settings-body {
 }
 
 .hyperweb-grid.view-refs #hyperweb-nullspace-panel,
-.hyperweb-grid.view-refs #hyperweb-splitter {
+.hyperweb-grid.view-refs #hyperweb-splitter,
+.hyperweb-grid.view-refs #hyperweb-chat-panel {
   display: none;
 }
 
 .hyperweb-grid.view-refs {
+  grid-template-columns: minmax(320px, 1fr);
+}
+
+.hyperweb-grid.view-chat #hyperweb-nullspace-panel,
+.hyperweb-grid.view-chat #hyperweb-public-references-panel,
+.hyperweb-grid.view-chat #hyperweb-splitter {
+  display: none;
+}
+
+.hyperweb-grid.view-chat {
   grid-template-columns: minmax(320px, 1fr);
 }
 
@@ -868,6 +880,71 @@ body.zen-mode .settings-body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.hyperweb-chat-toolbar {
+  padding: 10px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.hyperweb-chat-toolbar input[type="file"] {
+  font-size: 11px;
+}
+
+.hyperweb-chat-thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hyperweb-chat-item {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  max-width: 78%;
+}
+
+.hyperweb-chat-item.out {
+  align-self: flex-end;
+  border-color: rgba(51, 210, 255, 0.45);
+  background: rgba(51, 210, 255, 0.1);
+}
+
+.hyperweb-chat-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hyperweb-chat-text {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  line-height: 1.35;
+}
+
+.hyperweb-chat-file {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+@media (max-width: 1080px) {
+  .hyperweb-chat-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hyperweb-chat-item {
+    max-width: 100%;
+  }
 }
 
 .hyperweb-post-search {

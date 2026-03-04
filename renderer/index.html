@@ -218,6 +218,7 @@
         <div class="hyperweb-surface-tabs">
           <button id="hyperweb-tab-feed-btn" class="active">Public Feed</button>
           <button id="hyperweb-tab-refs-btn">Public References</button>
+          <button id="hyperweb-tab-chat-btn">Chat</button>
         </div>
         <button id="hyperweb-reset-filter-btn">Reset View</button>
         <button id="hyperweb-close-btn">Back to Workspace</button>
@@ -251,6 +252,27 @@
         </div>
         <div id="hyperweb-ref-status" class="muted small"></div>
         <div id="hyperweb-ref-results" class="hyperweb-ref-results"></div>
+      </section>
+      <section class="hyperweb-panel" id="hyperweb-chat-panel">
+        <div class="hyperweb-panel-header">
+          <h3>E2E Chat</h3>
+          <div id="hyperweb-chat-status" class="muted small">Choose a peer or room.</div>
+        </div>
+        <div class="hyperweb-chat-toolbar">
+          <select id="hyperweb-chat-mode-select">
+            <option value="dm">Direct Message</option>
+            <option value="room">Room</option>
+          </select>
+          <select id="hyperweb-chat-peer-select"></select>
+          <select id="hyperweb-chat-room-select" class="hidden"></select>
+          <button id="hyperweb-chat-room-create-btn">New Room</button>
+          <input id="hyperweb-chat-file-input" type="file" />
+        </div>
+        <div id="hyperweb-chat-thread" class="hyperweb-chat-thread"></div>
+        <div class="hyperweb-compose">
+          <textarea id="hyperweb-chat-input" placeholder="Encrypted message..."></textarea>
+          <button id="hyperweb-chat-send-btn">Send</button>
+        </div>
       </section>
     </div>
   </section>
