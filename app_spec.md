@@ -43,6 +43,16 @@ Intentionally not allowed:
 - top-level navigation takeover
 - Electron/Node access
 
+## Data-at-Rest Security
+- Core reference and metadata stores are encrypted at rest with versioned AES-256-GCM envelopes.
+- Existing plaintext JSON stores are migrated in-place to encrypted format during normal reads.
+- App data lock UX:
+  - `Lock Now` clears in-memory app data key material.
+  - `Unlock` requires system auth:
+    - Touch ID on supported macOS devices.
+    - system account password fallback.
+- App settings and keychain-backed secret references remain separately managed for bootstrap/runtime availability.
+
 ## Legacy Migration
 On reference load, legacy `tab_kind="viz"` entries are migration-converted:
 - viz tab content is preserved into a markdown artifact

@@ -106,6 +106,7 @@ const state = {
   settingsDirty: false,
   settingsValidationErrors: {},
   settingsDiagnostics: null,
+  appDataProtectionStatus: null,
   settingsSaveState: '',
   telegramRuntimeStatus: null,
   orchestratorUsers: [],
@@ -6523,6 +6524,29 @@ function renderSyncEligibility() {
   node.textContent = `Available for ${identityId}`;
 }
 
+function renderAppDataProtectionStatus() {
+  const node = e('settings-appdata-lock-status');
+  const touchBtn = e('settings-appdata-unlock-touchid-btn');
+  const pwdBtn = e('settings-appdata-unlock-password-btn');
+  const lockBtn = e('settings-appdata-lock-btn');
+  const status = state.appDataProtectionStatus || null;
+  if (!node) return;
+  if (!status || status.ok === false) {
+    node.textContent = 'Unavailable';
+    if (touchBtn) touchBtn.disabled = true;
+    if (pwdBtn) pwdBtn.disabled = true;
+    if (lockBtn) lockBtn.disabled = true;
+    return;
+  }
+  const locked = !!status.locked;
+  node.textContent = locked
+    ? 'Locked'
+    : `Unlocked${status.unlocked_at ? ` · ${formatAgo(status.unlocked_at)}` : ''}`;
+  if (touchBtn) touchBtn.disabled = !status.touchid_available || !locked;
+  if (pwdBtn) pwdBtn.disabled = !locked;
+  if (lockBtn) lockBtn.disabled = locked;
+}
+
 function renderSettingsForm() {
   const draft = normalizeSettingsDraft(state.settingsDraft || {});
   renderSettingsLmstudioModelSelect('settings-abstraction-model', draft.abstraction_model);
@@ -6545,6 +6569,7 @@ function renderSettingsForm() {
     node.title = (state.settingsValidationErrors && state.settingsValidationErrors[key]) || '';
   });
   renderSyncEligibility();
+  renderAppDataProtectionStatus();
   renderSettingsAbstractionStatus();
   renderSettingsRagStatus();
   renderSettingsStatusLine();
@@ -6637,6 +6662,13 @@ async function refreshTelegramSettingsStatus() {
   renderTelegramSettingsStatus();
 }
 
+async function refreshAppDataProtectionStatus() {
+  if (!api.appDataProtectionStatus) return;
+  const res = await api.appDataProtectionStatus();
+  state.appDataProtectionStatus = res || null;
+  renderAppDataProtectionStatus();
+}
+
 async function refreshOrchestratorUsersList() {
   const node = e('settings-telegram-users-list');
   if (!node || !api.orchestratorUsersList) return;
@@ -6707,6 +6739,7 @@ async function loadSettingsData() {
   await refreshOrchestratorWebKeyStatus();
   await refreshAbstractionStatus();
   await refreshRagStatus();
+  await refreshAppDataProtectionStatus();
   if (diagnostics && diagnostics.ok) {
     state.settingsDiagnostics = diagnostics;
     renderSettingsDiagnostics();
@@ -8100,6 +8133,48 @@ function bindControls() {
     }
     await refreshTrustCommonsStatus();
     await refreshHyperwebStatus();
+  });
+
+  e('settings-appdata-unlock-touchid-btn')?.addEventListener('click', async () => {
+    if (!api.appDataProtectionUnlock) return;
+    const res = await api.appDataProtectionUnlock({ method: 'touchid' });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to unlock app data.';
+      renderSettingsStatusLine();
+    } else {
+      state.settingsSaveState = 'App data unlocked.';
+      renderSettingsStatusLine();
+    }
+    await refreshAppDataProtectionStatus();
+  });
+
+  e('settings-appdata-unlock-password-btn')?.addEventListener('click', async () => {
+    if (!api.appDataProtectionUnlock) return;
+    const input = e('settings-appdata-password');
+    const password = String((input && input.value) || '');
+    if (!password) {
+      state.settingsSaveState = 'Enter system password.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const res = await api.appDataProtectionUnlock({ method: 'password', password });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to unlock app data.';
+      renderSettingsStatusLine();
+    } else {
+      state.settingsSaveState = 'App data unlocked.';
+      renderSettingsStatusLine();
+      if (input) input.value = '';
+    }
+    await refreshAppDataProtectionStatus();
+  });
+
+  e('settings-appdata-lock-btn')?.addEventListener('click', async () => {
+    if (!api.appDataProtectionLock) return;
+    const res = await api.appDataProtectionLock();
+    state.settingsSaveState = (res && res.ok) ? 'App data locked.' : ((res && res.message) ? res.message : 'Unable to lock app data.');
+    renderSettingsStatusLine();
+    await refreshAppDataProtectionStatus();
   });
 
   e('publish-snapshot-cancel-btn')?.addEventListener('click', () => {

@@ -356,6 +356,23 @@
       </section>
 
       <section class="settings-section">
+        <h3>Data Protection</h3>
+        <p class="muted small">Reference and metadata stores are encrypted at rest. Locking requires system authentication to unlock.</p>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <span>Status</span>
+            <div id="settings-appdata-lock-status" class="muted small">Checking...</div>
+            <input id="settings-appdata-password" type="password" placeholder="System password (fallback)" />
+            <div class="settings-inline-actions">
+              <button id="settings-appdata-unlock-touchid-btn">Unlock (Touch ID)</button>
+              <button id="settings-appdata-unlock-password-btn">Unlock (Password)</button>
+              <button id="settings-appdata-lock-btn">Lock Now</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
         <h3>Browser Import</h3>
         <p class="muted small">Import tabs from your existing browser into a new reference workspace.</p>
         <div class="settings-inline-actions">

@@ -81,6 +81,12 @@ This implementation delivers:
   - Settings controls: `rag_enabled`, `rag_embedding_model`, `rag_top_k`, index status, and manual reindex for active workspace
 - Key/secret storage:
   - provider keys and secure refs are implemented via OS keychain on macOS
+- Data-at-rest protection:
+  - core reference/metadata stores are encrypted at rest (AES-256-GCM envelope)
+  - plaintext legacy stores are migrated on read to encrypted format
+  - Settings includes app-data `Lock/Unlock` controls with system auth:
+    - Touch ID when available
+    - macOS account password fallback
 - Telegram + orchestrator controls:
   - bot token management and test ping
   - user registration tracking

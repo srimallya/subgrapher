@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, Menu, ipcMain, dialog, shell, nativeImage, safeStorage } = require('electron');
+const { app, BrowserWindow, BrowserView, Menu, ipcMain, dialog, shell, nativeImage, safeStorage, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -76,6 +76,8 @@ const HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT = 'hyperweb_chat_private_key';
 const HYPERWEB_CHAT_KEY_SERVICE = 'com.subgrapher.hyperweb.chat';
 const HYPERWEB_CHAT_KEY_DER_PREFIX = 'x25519-pkcs8-der:';
 const HYPERWEB_CHAT_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const APP_DATA_KEY_ACCOUNT = 'app_data_key_v1';
+const APP_DATA_KEY_SERVICE = 'com.subgrapher.appdata';
 const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
 const TRUSTCOMMONS_SYNC_DEFAULT_PEER_URL = 'http://127.0.0.1:42641';
 const TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC = 8;
@@ -272,6 +274,12 @@ let trustCommonsRuntime = {
 };
 let pendingInviteToken = '';
 let hyperwebSocialState = null;
+const appDataProtectionState = {
+  locked: false,
+  key: null,
+  last_error: '',
+  unlocked_at: 0,
+};
 const hyperwebManager = new HyperwebManager({
   relayUrl: DEFAULT_HYPERWEB_RELAY_URL,
   enabled: true,
@@ -2173,6 +2181,254 @@ async function fetchProviderModels(provider, apiKey) {
 
 function getStorePath() {
   return path.join(app.getPath('userData'), STORE_FILENAME);
+}
+
+function isEncryptedDataFilePath(filePath = '') {
+  const base = path.basename(String(filePath || '').trim());
+  return new Set([
+    STORE_FILENAME,
+    PUBLIC_FEED_FILENAME,
+    HYPERWEB_PUBLIC_SNAPSHOTS_FILENAME,
+    HYPERWEB_PRIVATE_SHARES_FILENAME,
+    PRIVATE_HISTORY_FILENAME,
+    HYPERWEB_SOCIAL_FILENAME,
+  ]).has(base);
+}
+
+function createEncryptedEnvelopeForJson(rawJsonText = '', keyBuffer = null) {
+  const key = Buffer.isBuffer(keyBuffer) ? keyBuffer : null;
+  if (!key || key.length !== 32) throw new Error('App data key is unavailable.');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(Buffer.from(String(rawJsonText || ''), 'utf8')), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return JSON.stringify({
+    _enc_v: 1,
+    alg: 'aes-256-gcm',
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  }, null, 2);
+}
+
+function decryptEncryptedEnvelopeToJson(rawText = '', keyBuffer = null) {
+  const key = Buffer.isBuffer(keyBuffer) ? keyBuffer : null;
+  if (!key || key.length !== 32) throw new Error('App data key is unavailable.');
+  const parsed = JSON.parse(String(rawText || '{}'));
+  if (!parsed || typeof parsed !== 'object' || !parsed._enc_v || !parsed.data) {
+    return { ok: false, plaintext: String(rawText || ''), encrypted: false };
+  }
+  if (Number(parsed._enc_v) !== 1 || String(parsed.alg || '') !== 'aes-256-gcm') {
+    throw new Error('Unsupported encrypted payload format.');
+  }
+  const iv = Buffer.from(String(parsed.iv || ''), 'base64');
+  const tag = Buffer.from(String(parsed.tag || ''), 'base64');
+  const data = Buffer.from(String(parsed.data || ''), 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
+  return { ok: true, plaintext: decrypted.toString('utf8'), encrypted: true };
+}
+
+function getPersistedAppDataKeyBase64() {
+  const got = keychain.getSecret(APP_DATA_KEY_ACCOUNT, { service: APP_DATA_KEY_SERVICE });
+  if (got && got.ok && got.secret) return String(got.secret || '').trim();
+  return '';
+}
+
+function getAppDataKeyBuffer(options = {}) {
+  if (Buffer.isBuffer(appDataProtectionState.key) && appDataProtectionState.key.length === 32) {
+    return appDataProtectionState.key;
+  }
+  if (appDataProtectionState.locked && !options.ignoreLock) return null;
+  const fromKeychain = getPersistedAppDataKeyBase64();
+  if (fromKeychain) {
+    try {
+      const buf = Buffer.from(fromKeychain, 'base64');
+      if (buf.length === 32) {
+        appDataProtectionState.key = buf;
+        return appDataProtectionState.key;
+      }
+    } catch (_) {
+      // continue
+    }
+  }
+  if (options.allowGenerate === false) return null;
+  const next = crypto.randomBytes(32);
+  const saved = keychain.setSecret(APP_DATA_KEY_ACCOUNT, next.toString('base64'), { service: APP_DATA_KEY_SERVICE });
+  if (!saved || !saved.ok) return null;
+  appDataProtectionState.key = next;
+  return appDataProtectionState.key;
+}
+
+function readJsonStore(filePath, defaultValueFactory) {
+  const loaded = readJsonStoreDetailed(filePath, defaultValueFactory);
+  return loaded.value;
+}
+
+function readJsonStoreDetailed(filePath, defaultValueFactory) {
+  const fallback = typeof defaultValueFactory === 'function' ? defaultValueFactory() : defaultValueFactory;
+  if (!fs.existsSync(filePath)) {
+    return {
+      ok: true,
+      value: fallback,
+      missing: true,
+      encrypted: false,
+      locked: false,
+      error: '',
+    };
+  }
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (!isEncryptedDataFilePath(filePath)) {
+      const parsed = JSON.parse(raw);
+      return {
+        ok: true,
+        value: (parsed && typeof parsed === 'object') ? parsed : fallback,
+        missing: false,
+        encrypted: false,
+        locked: false,
+        error: '',
+      };
+    }
+    const key = getAppDataKeyBuffer({ allowGenerate: false });
+    if (!key) {
+      const message = appDataProtectionState.locked
+        ? 'App data is locked. Unlock in Settings > Data Protection to access history.'
+        : 'App data key is unavailable. Unlock in Settings > Data Protection.';
+      appDataProtectionState.locked = true;
+      appDataProtectionState.key = null;
+      appDataProtectionState.last_error = message;
+      return {
+        ok: false,
+        value: fallback,
+        missing: false,
+        encrypted: true,
+        locked: !!appDataProtectionState.locked,
+        error: message,
+      };
+    }
+    const opened = decryptEncryptedEnvelopeToJson(raw, key);
+    const plaintext = opened && opened.encrypted ? String(opened.plaintext || '') : String(raw || '');
+    const parsed = JSON.parse(plaintext);
+    if (opened && !opened.encrypted) {
+      // Migrate old plaintext to encrypted at first successful read.
+      writeJsonStore(filePath, parsed);
+    }
+    return {
+      ok: true,
+      value: (parsed && typeof parsed === 'object') ? parsed : fallback,
+      missing: false,
+      encrypted: !!(opened && opened.encrypted),
+      locked: false,
+      error: '',
+    };
+  } catch (err) {
+    const message = String((err && err.message) || 'Unable to read local app data.');
+    if (isEncryptedDataFilePath(filePath)) {
+      appDataProtectionState.locked = true;
+      appDataProtectionState.key = null;
+    }
+    appDataProtectionState.last_error = message;
+    return {
+      ok: false,
+      value: fallback,
+      missing: false,
+      encrypted: isEncryptedDataFilePath(filePath),
+      locked: false,
+      error: message,
+    };
+  }
+}
+
+function writeJsonStore(filePath, payload) {
+  const safePayload = (payload && typeof payload === 'object') ? payload : {};
+  if (!isEncryptedDataFilePath(filePath)) {
+    fs.writeFileSync(filePath, JSON.stringify(safePayload, null, 2), 'utf8');
+    return true;
+  }
+  const key = getAppDataKeyBuffer({ allowGenerate: true });
+  if (!key) return false;
+  const rawJson = JSON.stringify(safePayload, null, 2);
+  const encryptedText = createEncryptedEnvelopeForJson(rawJson, key);
+  fs.writeFileSync(filePath, encryptedText, 'utf8');
+  return true;
+}
+
+function verifyCurrentUserPassword(password = '') {
+  const pwd = String(password || '');
+  if (!pwd) return false;
+  try {
+    const username = os.userInfo().username;
+    execFileSync('dscl', ['/Search', '-authonly', username, pwd], { stdio: 'ignore' });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function unlockAppDataProtection(payload = {}) {
+  const method = String((payload && payload.method) || '').trim().toLowerCase();
+  const password = String((payload && payload.password) || '');
+  appDataProtectionState.last_error = '';
+
+  if (method === 'touchid') {
+    try {
+      if (
+        process.platform !== 'darwin'
+        || !systemPreferences
+        || typeof systemPreferences.canPromptTouchID !== 'function'
+        || !systemPreferences.canPromptTouchID()
+        || typeof systemPreferences.promptTouchID !== 'function'
+      ) {
+        return { ok: false, message: 'Touch ID is unavailable on this device.' };
+      }
+      await systemPreferences.promptTouchID('Unlock Subgrapher app data');
+    } catch (err) {
+      const msg = String((err && err.message) || 'Touch ID verification failed.');
+      appDataProtectionState.last_error = msg;
+      return { ok: false, message: msg };
+    }
+  } else if (method === 'password') {
+    const verified = verifyCurrentUserPassword(password);
+    if (!verified) {
+      appDataProtectionState.last_error = 'System password verification failed.';
+      return { ok: false, message: appDataProtectionState.last_error };
+    }
+  } else {
+    return { ok: false, message: 'Unlock method is required.' };
+  }
+
+  const key = getAppDataKeyBuffer({ allowGenerate: false, ignoreLock: true });
+  if (!key) {
+    appDataProtectionState.last_error = 'Unable to load app data key.';
+    return { ok: false, message: appDataProtectionState.last_error };
+  }
+  appDataProtectionState.locked = false;
+  appDataProtectionState.unlocked_at = nowTs();
+  return getAppDataProtectionStatus();
+}
+
+function lockAppDataProtection() {
+  appDataProtectionState.key = null;
+  appDataProtectionState.locked = true;
+  return getAppDataProtectionStatus();
+}
+
+function getAppDataProtectionStatus() {
+  return {
+    ok: true,
+    locked: !!appDataProtectionState.locked,
+    has_key_material: !!getPersistedAppDataKeyBase64(),
+    touchid_available: (
+      process.platform === 'darwin'
+      && !!systemPreferences
+      && typeof systemPreferences.canPromptTouchID === 'function'
+      && !!systemPreferences.canPromptTouchID()
+    ),
+    unlocked_at: Number(appDataProtectionState.unlocked_at || 0),
+    last_error: String(appDataProtectionState.last_error || ''),
+  };
 }
 
 function getSettingsPath() {
@@ -5626,20 +5882,13 @@ function maybeAutoRetitleReferenceFromActiveTab(ref) {
 
 function readReferencesRaw() {
   const storePath = getStorePath();
-  if (!fs.existsSync(storePath)) return [];
-  try {
-    const raw = fs.readFileSync(storePath, 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_) {
-    return [];
-  }
+  const parsed = readJsonStore(storePath, () => []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function writeReferencesRaw(refs) {
   const storePath = getStorePath();
-  const payload = JSON.stringify(Array.isArray(refs) ? refs : [], null, 2);
-  fs.writeFileSync(storePath, payload, 'utf8');
+  writeJsonStore(storePath, Array.isArray(refs) ? refs : []);
 }
 
 function getPublicFeedPath() {
@@ -5648,20 +5897,13 @@ function getPublicFeedPath() {
 
 function readPublicFeed() {
   const feedPath = getPublicFeedPath();
-  if (!fs.existsSync(feedPath)) return [];
-  try {
-    const raw = fs.readFileSync(feedPath, 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (_) {
-    return [];
-  }
+  const parsed = readJsonStore(feedPath, () => []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function writePublicFeed(feed) {
   const feedPath = getPublicFeedPath();
-  const payload = JSON.stringify(Array.isArray(feed) ? feed : [], null, 2);
-  fs.writeFileSync(feedPath, payload, 'utf8');
+  writeJsonStore(feedPath, Array.isArray(feed) ? feed : []);
 }
 
 function isTtcHyperwebAuthenticated() {
@@ -5692,16 +5934,11 @@ function createDefaultHyperwebPublicSnapshotsState() {
 
 function readHyperwebPublicSnapshotsState() {
   const filePath = getHyperwebPublicSnapshotsPath();
-  if (!fs.existsSync(filePath)) return createDefaultHyperwebPublicSnapshotsState();
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return {
-      ...createDefaultHyperwebPublicSnapshotsState(),
-      ...(parsed && typeof parsed === 'object' ? parsed : {}),
-    };
-  } catch (_) {
-    return createDefaultHyperwebPublicSnapshotsState();
-  }
+  const parsed = readJsonStore(filePath, createDefaultHyperwebPublicSnapshotsState);
+  return {
+    ...createDefaultHyperwebPublicSnapshotsState(),
+    ...(parsed && typeof parsed === 'object' ? parsed : {}),
+  };
 }
 
 function writeHyperwebPublicSnapshotsState(state) {
@@ -5709,7 +5946,7 @@ function writeHyperwebPublicSnapshotsState(state) {
     ...createDefaultHyperwebPublicSnapshotsState(),
     ...((state && typeof state === 'object') ? state : {}),
   };
-  fs.writeFileSync(getHyperwebPublicSnapshotsPath(), JSON.stringify(next, null, 2), 'utf8');
+  writeJsonStore(getHyperwebPublicSnapshotsPath(), next);
 }
 
 function pruneHyperwebPublicSnapshotsState(state) {
@@ -5762,16 +5999,11 @@ function createDefaultHyperwebPrivateSharesState() {
 
 function readHyperwebPrivateSharesState() {
   const filePath = getHyperwebPrivateSharesPath();
-  if (!fs.existsSync(filePath)) return createDefaultHyperwebPrivateSharesState();
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return {
-      ...createDefaultHyperwebPrivateSharesState(),
-      ...(parsed && typeof parsed === 'object' ? parsed : {}),
-    };
-  } catch (_) {
-    return createDefaultHyperwebPrivateSharesState();
-  }
+  const parsed = readJsonStore(filePath, createDefaultHyperwebPrivateSharesState);
+  return {
+    ...createDefaultHyperwebPrivateSharesState(),
+    ...(parsed && typeof parsed === 'object' ? parsed : {}),
+  };
 }
 
 function writeHyperwebPrivateSharesState(state) {
@@ -5779,7 +6011,7 @@ function writeHyperwebPrivateSharesState(state) {
     ...createDefaultHyperwebPrivateSharesState(),
     ...((state && typeof state === 'object') ? state : {}),
   };
-  fs.writeFileSync(getHyperwebPrivateSharesPath(), JSON.stringify(next, null, 2), 'utf8');
+  writeJsonStore(getHyperwebPrivateSharesPath(), next);
 }
 
 function getPrivateHistoryPath() {
@@ -5795,25 +6027,23 @@ function createDefaultPrivateHistoryState() {
 
 function readPrivateHistoryState() {
   const filePath = getPrivateHistoryPath();
-  if (!fs.existsSync(filePath)) return createDefaultPrivateHistoryState();
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    const entries = Array.isArray(parsed && parsed.entries) ? parsed.entries : [];
-    return {
-      version: Number((parsed && parsed.version) || 1),
-      entries,
-    };
-  } catch (_) {
-    return createDefaultPrivateHistoryState();
-  }
+  const loaded = readJsonStoreDetailed(filePath, createDefaultPrivateHistoryState);
+  const parsed = loaded.value;
+  const entries = Array.isArray(parsed && parsed.entries) ? parsed.entries : [];
+  return {
+    version: Number((parsed && parsed.version) || 1),
+    entries,
+    _store_ok: !!loaded.ok,
+    _store_error: String(loaded.error || ''),
+    _store_locked: !!loaded.locked,
+  };
 }
 
 function writePrivateHistoryState(state) {
   const next = (state && typeof state === 'object') ? state : createDefaultPrivateHistoryState();
   const entries = Array.isArray(next.entries) ? next.entries : [];
-  const payload = JSON.stringify({ version: 1, entries }, null, 2);
-  fs.writeFileSync(getPrivateHistoryPath(), payload, 'utf8');
-  return { version: 1, entries };
+  const wrote = writeJsonStore(getPrivateHistoryPath(), { version: 1, entries });
+  return { version: 1, entries, ok: !!wrote };
 }
 
 function normalizeHistoryText(value) {
@@ -5999,6 +6229,13 @@ function upsertHistoryEntry(payload = {}) {
   if (!nextEntry) return { ok: false, message: 'Invalid history entry.' };
 
   const state = readPrivateHistoryState();
+  if (!state._store_ok) {
+    return {
+      ok: false,
+      message: state._store_error || 'History store is unavailable.',
+      locked: !!state._store_locked,
+    };
+  }
   const list = Array.isArray(state.entries) ? state.entries.map((item) => sanitizeHistoryEntry(item)).filter(Boolean) : [];
   const existingIdx = list.findIndex((item) => (
     String(item.url || '') === nextEntry.url
@@ -6017,6 +6254,9 @@ function upsertHistoryEntry(payload = {}) {
   const clusterIds = computeHistoryClusterIds(retained);
   const withClusters = retained.map((entry, idx) => ({ ...entry, cluster_id: Number(clusterIds[idx] || 0) }));
   const saved = writePrivateHistoryState({ version: 1, entries: withClusters });
+  if (!saved.ok) {
+    return { ok: false, message: 'Unable to write history store.', locked: !!appDataProtectionState.locked };
+  }
   return { ok: true, entry: nextEntry, total: saved.entries.length };
 }
 
@@ -6090,6 +6330,15 @@ function queryHistoryEntries(payload = {}) {
   const limit = Math.max(1, Math.min(500, Number((payload && payload.limit) || 80)));
   const offset = Math.max(0, Number((payload && payload.offset) || 0));
   const state = readPrivateHistoryState();
+  if (!state._store_ok) {
+    return {
+      ok: false,
+      entries: [],
+      total: 0,
+      locked: !!state._store_locked,
+      message: state._store_error || 'History store is unavailable.',
+    };
+  }
   let list = Array.isArray(state.entries) ? state.entries.map((item) => sanitizeHistoryEntry(item)).filter(Boolean) : [];
   list.sort((a, b) => Number((b && b.committed_at) || 0) - Number((a && a.committed_at) || 0));
   if (query) {
@@ -6105,6 +6354,13 @@ function getHistoryEntryById(historyId) {
   const target = String(historyId || '').trim();
   if (!target) return { ok: false, message: 'history_id is required.' };
   const state = readPrivateHistoryState();
+  if (!state._store_ok) {
+    return {
+      ok: false,
+      locked: !!state._store_locked,
+      message: state._store_error || 'History store is unavailable.',
+    };
+  }
   const found = (Array.isArray(state.entries) ? state.entries : [])
     .map((item) => sanitizeHistoryEntry(item))
     .find((item) => item && String(item.id || '') === target);
@@ -6116,10 +6372,18 @@ function deleteHistoryEntryById(historyId) {
   const target = String(historyId || '').trim();
   if (!target) return { ok: false, message: 'history_id is required.' };
   const state = readPrivateHistoryState();
+  if (!state._store_ok) {
+    return {
+      ok: false,
+      locked: !!state._store_locked,
+      message: state._store_error || 'History store is unavailable.',
+    };
+  }
   const entries = Array.isArray(state.entries) ? state.entries.map((item) => sanitizeHistoryEntry(item)).filter(Boolean) : [];
   const next = entries.filter((item) => String(item.id || '') !== target);
   if (next.length === entries.length) return { ok: true, deleted: false };
-  writePrivateHistoryState({ version: 1, entries: next });
+  const wrote = writePrivateHistoryState({ version: 1, entries: next });
+  if (!wrote.ok) return { ok: false, message: 'Unable to update history store.', locked: !!appDataProtectionState.locked };
   return { ok: true, deleted: true };
 }
 
@@ -6128,8 +6392,16 @@ function clearHistoryEntries(phrase = '') {
     return { ok: false, message: 'Type DELETE to confirm.' };
   }
   const state = readPrivateHistoryState();
+  if (!state._store_ok) {
+    return {
+      ok: false,
+      locked: !!state._store_locked,
+      message: state._store_error || 'History store is unavailable.',
+    };
+  }
   const clearedCount = Array.isArray(state.entries) ? state.entries.length : 0;
-  writePrivateHistoryState(createDefaultPrivateHistoryState());
+  const wrote = writePrivateHistoryState(createDefaultPrivateHistoryState());
+  if (!wrote.ok) return { ok: false, message: 'Unable to clear history store.', locked: !!appDataProtectionState.locked };
   return { ok: true, cleared_count: clearedCount };
 }
 
@@ -6150,6 +6422,16 @@ function buildHistorySemanticMap(payload = {}) {
   const query = String((payload && payload.query) || '').trim().toLowerCase();
   const maxPoints = Math.max(100, Math.min(4000, Number((payload && payload.max_points) || 2000)));
   const state = readPrivateHistoryState();
+  if (!state._store_ok) {
+    return {
+      ok: false,
+      points: [],
+      bounds: null,
+      total: 0,
+      locked: !!state._store_locked,
+      message: state._store_error || 'History store is unavailable.',
+    };
+  }
   let list = Array.isArray(state.entries) ? state.entries.map((item) => sanitizeHistoryEntry(item)).filter(Boolean) : [];
   list.sort((a, b) => Number((b && b.committed_at) || 0) - Number((a && a.committed_at) || 0));
   if (query) {
@@ -6198,6 +6480,7 @@ function buildHistorySemanticMap(payload = {}) {
 
 function seedHistoryFromExistingReferencesIfEmpty() {
   const state = readPrivateHistoryState();
+  if (!state._store_ok) return;
   const existing = Array.isArray(state.entries) ? state.entries.map((item) => sanitizeHistoryEntry(item)).filter(Boolean) : [];
   if (existing.length > 0) return;
 
@@ -6383,7 +6666,7 @@ function createDefaultHyperwebSocialState() {
 
 function writeHyperwebSocialState(state) {
   const payload = (state && typeof state === 'object') ? state : createDefaultHyperwebSocialState();
-  fs.writeFileSync(getHyperwebSocialPath(), JSON.stringify(payload, null, 2), 'utf8');
+  writeJsonStore(getHyperwebSocialPath(), payload);
 }
 
 function readHyperwebSocialState() {
@@ -6393,17 +6676,12 @@ function readHyperwebSocialState() {
     writeHyperwebSocialState(initial);
     return initial;
   }
-  try {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return createDefaultHyperwebSocialState();
-    return {
-      ...createDefaultHyperwebSocialState(),
-      ...parsed,
-    };
-  } catch (_) {
-    return createDefaultHyperwebSocialState();
-  }
+  const parsed = readJsonStore(filePath, createDefaultHyperwebSocialState);
+  if (!parsed || typeof parsed !== 'object') return createDefaultHyperwebSocialState();
+  return {
+    ...createDefaultHyperwebSocialState(),
+    ...parsed,
+  };
 }
 
 function getHyperwebIdentityPrivateKeyRaw() {
@@ -16504,6 +16782,18 @@ ipcMain.handle('browser:updatePreferences', async (_event, payload) => {
   };
 });
 
+ipcMain.handle('browser:appDataProtectionStatus', async () => {
+  return getAppDataProtectionStatus();
+});
+
+ipcMain.handle('browser:appDataProtectionLock', async () => {
+  return lockAppDataProtection();
+});
+
+ipcMain.handle('browser:appDataProtectionUnlock', async (_event, payload) => {
+  return unlockAppDataProtection(payload || {});
+});
+
 ipcMain.handle('browser:abstractionStatus', (_event, payload) => {
   return buildAbstractionStatusSnapshot(payload || {});
 });
@@ -17156,6 +17446,7 @@ if (gotSingleInstanceLock) app.whenReady().then(() => {
   app.setAsDefaultProtocolClient(HYPERWEB_INVITE_PROTO);
   setDockIconIfAvailable();
   createApplicationMenu();
+  getAppDataKeyBuffer({ allowGenerate: true, ignoreLock: true });
   ensureReferences();
   ensureHyperwebSocialState();
   syncPublicFeedWithSnapshots();
