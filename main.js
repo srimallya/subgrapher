@@ -190,6 +190,11 @@ const RAG_TOP_K_DEFAULT = 8;
 const PATH_B_GLOBAL_TOP_K = 12;
 const PATH_B_LINK_VERIFY_THRESHOLD = 0.42;
 const TELEGRAM_SECRET_REF_PREFIX = 'telegram_bot_token';
+const TELEGRAM_RENDER_DEFAULT_WIDTH = 1600;
+const TELEGRAM_RENDER_DEFAULT_HEIGHT = 900;
+const TELEGRAM_RENDER_DEFAULT_WAIT_MS = 400;
+const TELEGRAM_RENDER_DEFAULT_TIMEOUT_MS = 12_000;
+const TELEGRAM_MEDIA_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const LMSTUDIO_SECRET_REF_PREFIX = 'lmstudio_token';
 const ORCHESTRATOR_WEB_SECRET_REF_PREFIX = 'orchestrator_web_key';
 const APP_SECRET_SERVICE = 'com.subgrapher.secure-secrets';
@@ -3326,6 +3331,212 @@ async function saveArtifactImageForReference(srId, sourceUrl, suggestedName) {
   }
 }
 
+function getTelegramRendersDir() {
+  const dir = path.join(app.getPath('userData'), 'telegram_renders');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getTelegramInboundDir(chatId = '') {
+  const safeChat = String(chatId || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'unknown';
+  const dir = path.join(app.getPath('userData'), 'telegram_inbound', safeChat);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function pruneDirByAge(targetDir = '', maxAgeMs = TELEGRAM_MEDIA_RETENTION_MS) {
+  const dir = String(targetDir || '').trim();
+  if (!dir || !fs.existsSync(dir)) return;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (_) {
+    entries = [];
+  }
+  const now = Date.now();
+  entries.forEach((entry) => {
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      pruneDirByAge(abs, maxAgeMs);
+      return;
+    }
+    if (!entry.isFile()) return;
+    try {
+      const st = fs.statSync(abs);
+      if ((now - Number(st.mtimeMs || 0)) > maxAgeMs) fs.unlinkSync(abs);
+    } catch (_) {
+      // noop
+    }
+  });
+}
+
+function resolveHtmlArtifactForCapture(params = {}) {
+  const input = (params && typeof params === 'object') ? params : {};
+  const srId = String(input.sr_id || input.srId || '').trim();
+  const artifactId = String(input.artifact_id || input.artifactId || '').trim();
+  const refs = getReferences();
+  let candidates = Array.isArray(refs) ? refs : [];
+  if (srId) {
+    candidates = candidates.filter((ref) => String((ref && ref.id) || '').trim() === srId);
+  }
+  if (candidates.length === 0) return { ok: false, message: 'Reference not found.' };
+
+  if (artifactId) {
+    for (let i = 0; i < candidates.length; i += 1) {
+      const ref = candidates[i];
+      const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
+      const found = artifacts.find((item) => String((item && item.id) || '').trim() === artifactId) || null;
+      if (!found) continue;
+      if (normalizeArtifactType(String((found && found.type) || 'markdown')) !== 'html') {
+        return { ok: false, message: 'Artifact is not HTML.' };
+      }
+      return {
+        ok: true,
+        sr_id: String((ref && ref.id) || '').trim(),
+        artifact_id: artifactId,
+        title: String((found && found.title) || 'Visualization').trim(),
+        html: String((found && found.content) || ''),
+      };
+    }
+    return { ok: false, message: 'HTML artifact not found.' };
+  }
+
+  let best = null;
+  candidates.forEach((ref) => {
+    const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
+    artifacts.forEach((artifact) => {
+      if (normalizeArtifactType(String((artifact && artifact.type) || 'markdown')) !== 'html') return;
+      const updatedAt = Number((artifact && artifact.updated_at) || 0);
+      if (!best || updatedAt > best.updated_at) {
+        best = {
+          sr_id: String((ref && ref.id) || '').trim(),
+          artifact_id: String((artifact && artifact.id) || '').trim(),
+          title: String((artifact && artifact.title) || 'Visualization').trim(),
+          html: String((artifact && artifact.content) || ''),
+          updated_at: updatedAt,
+        };
+      }
+    });
+  });
+  if (!best) return { ok: false, message: 'No HTML artifact available for capture.' };
+  return {
+    ok: true,
+    sr_id: best.sr_id,
+    artifact_id: best.artifact_id,
+    title: best.title,
+    html: best.html,
+  };
+}
+
+async function captureHtmlToPng(options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const html = String(opts.html || '').trim();
+  if (!html) return { ok: false, message: 'HTML content is required.' };
+  const width = Math.max(640, Math.min(3840, Math.round(Number(opts.width || TELEGRAM_RENDER_DEFAULT_WIDTH) || TELEGRAM_RENDER_DEFAULT_WIDTH)));
+  const height = Math.max(360, Math.min(2160, Math.round(Number(opts.height || TELEGRAM_RENDER_DEFAULT_HEIGHT) || TELEGRAM_RENDER_DEFAULT_HEIGHT)));
+  const waitMs = Math.max(0, Math.min(5_000, Math.round(Number(opts.wait_ms || TELEGRAM_RENDER_DEFAULT_WAIT_MS) || TELEGRAM_RENDER_DEFAULT_WAIT_MS)));
+  const timeoutMs = Math.max(2_000, Math.min(60_000, Math.round(Number(opts.timeout_ms || TELEGRAM_RENDER_DEFAULT_TIMEOUT_MS) || TELEGRAM_RENDER_DEFAULT_TIMEOUT_MS)));
+  const outputPath = String(opts.output_path || '').trim() || path.join(getTelegramRendersDir(), `${makeId('render')}.png`);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+  const attemptCapture = async () => {
+    let win = null;
+    try {
+      win = new BrowserWindow({
+        show: false,
+        width,
+        height,
+        frame: false,
+        webPreferences: {
+          sandbox: true,
+          contextIsolation: true,
+          nodeIntegration: false,
+          javascript: true,
+          webSecurity: true,
+        },
+      });
+      const dataUrl = `data:text/html;base64,${Buffer.from(html, 'utf8').toString('base64')}`;
+      await Promise.race([
+        win.loadURL(dataUrl),
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error('HTML render load timeout.')), timeoutMs)),
+      ]);
+      if (waitMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+      const image = await win.webContents.capturePage();
+      const png = image.toPNG();
+      fs.writeFileSync(outputPath, png);
+      const bytes = Buffer.byteLength(png);
+      return { ok: true, png_path: outputPath, local_path: outputPath, width, height, bytes };
+    } finally {
+      if (win && !win.isDestroyed()) {
+        try {
+          win.destroy();
+        } catch (_) {
+          // noop
+        }
+      }
+    }
+  };
+
+  try {
+    return await attemptCapture();
+  } catch (firstErr) {
+    try {
+      return await attemptCapture();
+    } catch (secondErr) {
+      return { ok: false, message: String((secondErr && secondErr.message) || (firstErr && firstErr.message) || 'HTML capture failed.') };
+    }
+  }
+}
+
+async function captureHtmlArtifactPngForTelegram(params = {}) {
+  const resolved = resolveHtmlArtifactForCapture(params);
+  if (!resolved.ok) return resolved;
+  const width = Number(params.width || params.viewport_width || 0);
+  const height = Number(params.height || params.viewport_height || 0);
+  const waitMs = Number(params.wait_ms || 0);
+  const cap = await captureHtmlToPng({
+    html: resolved.html,
+    width: Number.isFinite(width) && width > 0 ? width : TELEGRAM_RENDER_DEFAULT_WIDTH,
+    height: Number.isFinite(height) && height > 0 ? height : TELEGRAM_RENDER_DEFAULT_HEIGHT,
+    wait_ms: Number.isFinite(waitMs) && waitMs >= 0 ? waitMs : TELEGRAM_RENDER_DEFAULT_WAIT_MS,
+  });
+  if (!cap || !cap.ok) {
+    console.warn('[telegram-media] capture_html_artifact_png failed', {
+      sr_id: String(resolved.sr_id || ''),
+      artifact_id: String(resolved.artifact_id || ''),
+      message: String((cap && cap.message) || 'capture failed'),
+    });
+    return {
+      ok: false,
+      message: String((cap && cap.message) || 'HTML screenshot capture failed.'),
+      sr_id: resolved.sr_id,
+      artifact_id: resolved.artifact_id,
+    };
+  }
+  const output = {
+    ok: true,
+    sr_id: resolved.sr_id,
+    artifact_id: resolved.artifact_id,
+    title: resolved.title,
+    png_path: String(cap.png_path || cap.local_path || '').trim(),
+    local_path: String(cap.local_path || cap.png_path || '').trim(),
+    width: Number(cap.width || 0),
+    height: Number(cap.height || 0),
+    bytes: Number(cap.bytes || 0),
+    markdown: `![${String(resolved.title || 'Visualization').replace(/[\[\]]/g, '')}](${pathToFileURL(String(cap.local_path || cap.png_path || '')).toString()})`,
+    message: 'Captured HTML artifact screenshot.',
+  };
+  console.info('[telegram-media] capture_html_artifact_png ok', {
+    sr_id: String(output.sr_id || ''),
+    artifact_id: String(output.artifact_id || ''),
+    local_path: String(output.local_path || ''),
+    bytes: Number(output.bytes || 0),
+  });
+  return output;
+}
+
 function removeSkillDescriptorFromReference(ref, skillId, scope = 'local') {
   if (!ref || typeof ref !== 'object') return false;
   const targetId = String(skillId || '').trim();
@@ -4734,6 +4945,11 @@ function isPathBToolLoopEnabled() {
   return !['0', 'false', 'off', 'no'].includes(raw);
 }
 
+function isTelegramMediaV1Enabled() {
+  const raw = String(process.env.SUBGRAPHER_TELEGRAM_MEDIA_V1 || '1').trim().toLowerCase();
+  return !['0', 'false', 'off', 'no'].includes(raw);
+}
+
 function logPathBToolEvent(toolName = '', payload = {}) {
   try {
     console.info('[path_b_tool]', JSON.stringify({
@@ -5158,6 +5374,79 @@ async function pathBAddTab(params = {}) {
   };
 }
 
+function resolvePathBAnalyzeImageContextFile(srId = '', token = '') {
+  const refId = String(srId || '').trim();
+  const hint = String(token || '').trim();
+  if (!refId || !hint) return null;
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, refId);
+  if (idx < 0) return null;
+  const contextFiles = Array.isArray(refs[idx].context_files) ? refs[idx].context_files : [];
+  const hintLower = hint.toLowerCase();
+  const exact = contextFiles.find((file) => {
+    const id = String((file && file.id) || '').trim();
+    const originalName = String((file && file.original_name) || '').trim();
+    const relativePath = String((file && file.relative_path) || '').trim();
+    const storedPath = String((file && file.stored_path) || '').trim();
+    const baseName = String(path.basename(storedPath || relativePath || originalName) || '').trim();
+    return id === hint || originalName === hint || relativePath === hint || baseName === hint;
+  });
+  if (exact) return exact;
+  return contextFiles.find((file) => {
+    const originalName = String((file && file.original_name) || '').trim().toLowerCase();
+    const relativePath = String((file && file.relative_path) || '').trim().toLowerCase();
+    const storedPath = String((file && file.stored_path) || '').trim().toLowerCase();
+    const baseName = String(path.basename(storedPath || relativePath || originalName) || '').trim().toLowerCase();
+    return originalName.includes(hintLower) || relativePath.includes(hintLower) || baseName.includes(hintLower);
+  }) || null;
+}
+
+async function pathBAnalyzeImage(params = {}, runtime = {}) {
+  const args = (params && typeof params === 'object') ? params : {};
+  const rt = (runtime && typeof runtime === 'object') ? runtime : {};
+  const srId = String(args.sr_id || rt.selected_sr_id || '').trim();
+  const imageUrl = String(args.image_url || '').trim();
+  let localPath = String(args.local_path || '').trim();
+  const contextFileId = String(args.context_file_id || '').trim();
+  if (!imageUrl && !localPath && contextFileId) {
+    const ctx = resolvePathBAnalyzeImageContextFile(srId, contextFileId);
+    localPath = String((ctx && ctx.stored_path) || '').trim();
+  }
+  if (!imageUrl && !localPath) {
+    return { ok: false, message: 'Either image_url, local_path, or context_file_id is required.' };
+  }
+  const settings = readSettings();
+  const res = await analyzeImageWithProviderFallback({
+    image_url: imageUrl,
+    local_path: localPath,
+    context_file_id: contextFileId,
+    prompt: String(args.prompt || '').trim(),
+  }, settings, {
+    provider: String(rt.provider || '').trim().toLowerCase(),
+    model: String(rt.model || '').trim(),
+    apiKey: String((rt.credentials && rt.credentials.apiKey) || ''),
+    base_url: String((rt.credentials && rt.credentials.base_url) || ''),
+  });
+  if (!res || !res.ok) {
+    return { ok: false, message: String((res && res.message) || 'Image analysis failed.') };
+  }
+  return {
+    ok: true,
+    description: String(res.description || ''),
+    source: String(res.source || ''),
+    provider: String(res.provider || ''),
+    attempted_provider: String(res.attempted_provider || ''),
+    fallback_used: !!res.fallback_used,
+    native_error: String(res.native_error || ''),
+    model: String(res.model || ''),
+    prompt: String(res.prompt || ''),
+    context_file_id: contextFileId,
+    mime_type: String(res.mime_type || ''),
+    bytes: Number(res.bytes || 0),
+    local_path: localPath,
+  };
+}
+
 function isPathBSystemIntakeArtifact(artifact) {
   const title = String((artifact && artifact.title) || '').trim().toLowerCase();
   if (!title) return false;
@@ -5338,6 +5627,8 @@ function getPathBExecutor() {
       webSearch: runOrchestratorWebSearch,
       verifyLink: pathBVerifyLink,
       addTab: pathBAddTab,
+      analyzeImage: pathBAnalyzeImage,
+      captureHtmlArtifactPng: captureHtmlArtifactPngForTelegram,
       delegatePathA: pathBDelegatePathA,
       readResearchArtifact: pathBReadResearchArtifact,
       upsertUserPreferences: upsertPathBUserPreferences,
@@ -5533,7 +5824,136 @@ function buildTelegramHelpText() {
 }
 
 function extractTelegramTextMessage(message = {}) {
-  return String((message && message.text) || '').trim();
+  const text = String((message && message.text) || '').trim();
+  if (text) return text;
+  return String((message && message.caption) || '').trim();
+}
+
+function pickBestTelegramPhoto(message = {}) {
+  const photos = Array.isArray(message && message.photo) ? message.photo : [];
+  if (!photos.length) return null;
+  const sorted = photos
+    .filter((item) => item && typeof item === 'object')
+    .slice()
+    .sort((a, b) => {
+      const aSize = Number(a.file_size || 0);
+      const bSize = Number(b.file_size || 0);
+      if (bSize !== aSize) return bSize - aSize;
+      const aArea = Number(a.width || 0) * Number(a.height || 0);
+      const bArea = Number(b.width || 0) * Number(b.height || 0);
+      return bArea - aArea;
+    });
+  return sorted[0] || null;
+}
+
+function extractTelegramImageCandidate(message = {}) {
+  const bestPhoto = pickBestTelegramPhoto(message);
+  if (bestPhoto && bestPhoto.file_id) {
+    return {
+      type: 'photo',
+      file_id: String(bestPhoto.file_id || '').trim(),
+      file_unique_id: String(bestPhoto.file_unique_id || '').trim(),
+      width: Number(bestPhoto.width || 0),
+      height: Number(bestPhoto.height || 0),
+      mime_type: 'image/jpeg',
+    };
+  }
+  const doc = (message && message.document && typeof message.document === 'object') ? message.document : null;
+  if (doc && String(doc.file_id || '').trim()) {
+    const mime = String(doc.mime_type || '').trim().toLowerCase();
+    if (mime.startsWith('image/')) {
+      return {
+        type: 'document_image',
+        file_id: String(doc.file_id || '').trim(),
+        file_unique_id: String(doc.file_unique_id || '').trim(),
+        width: Number(doc.width || 0),
+        height: Number(doc.height || 0),
+        mime_type: mime || 'image/jpeg',
+        file_name: String(doc.file_name || '').trim(),
+      };
+    }
+  }
+  return null;
+}
+
+function safeTelegramMediaExt(filePath = '', mimeType = '', fallback = '.jpg') {
+  const extByPath = String(path.extname(String(filePath || '').trim()) || '').toLowerCase();
+  if (extByPath && extByPath.length <= 8) return extByPath;
+  const mime = String(mimeType || '').trim().toLowerCase();
+  if (mime === 'image/png') return '.png';
+  if (mime === 'image/webp') return '.webp';
+  if (mime === 'image/gif') return '.gif';
+  if (mime === 'image/bmp') return '.bmp';
+  return fallback;
+}
+
+async function ingestTelegramImageAttachment(message = {}, chatId = '') {
+  if (!telegramService) return [];
+  const mediaCandidate = extractTelegramImageCandidate(message);
+  if (!mediaCandidate || !mediaCandidate.file_id) return [];
+
+  const fileRes = await telegramService.getFile(mediaCandidate.file_id);
+  if (!fileRes || !fileRes.ok || !fileRes.result) return [];
+  const fileObj = (fileRes.result && typeof fileRes.result === 'object') ? fileRes.result : {};
+  const filePath = String(fileObj.file_path || '').trim();
+  if (!filePath) return [];
+  const downloadRes = await telegramService.downloadFile(filePath);
+  if (!downloadRes || !downloadRes.ok || !Buffer.isBuffer(downloadRes.buffer)) return [];
+
+  const msgId = String((message && message.message_id) || Date.now()).trim();
+  const fileId = String(mediaCandidate.file_unique_id || mediaCandidate.file_id).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+  const ext = safeTelegramMediaExt(filePath, mediaCandidate.mime_type, '.jpg');
+  const outDir = getTelegramInboundDir(chatId);
+  pruneDirByAge(outDir, TELEGRAM_MEDIA_RETENTION_MS);
+  const outPath = path.join(outDir, `${msgId}_${fileId}${ext}`);
+  fs.writeFileSync(outPath, downloadRes.buffer);
+  console.info('[telegram-media] inbound image stored', {
+    chat_id: String(chatId || ''),
+    message_id: String((message && message.message_id) || ''),
+    file_id: String(mediaCandidate.file_id || ''),
+    local_path: outPath,
+    bytes: Number(downloadRes.buffer.length || 0),
+  });
+
+  return [{
+    type: 'image',
+    local_path: outPath,
+    mime_type: String(mediaCandidate.mime_type || '').trim().toLowerCase(),
+    file_id: String(mediaCandidate.file_id || '').trim(),
+    width: Number(mediaCandidate.width || 0),
+    height: Number(mediaCandidate.height || 0),
+  }];
+}
+
+async function sendTelegramPhoto(chatId, media = {}, options = {}) {
+  const targetChatId = String(chatId || '').trim();
+  if (!targetChatId || !telegramService) return { ok: false, message: 'Telegram service unavailable.' };
+  const payload = (media && typeof media === 'object') ? media : {};
+  const localPath = String(payload.local_path || '').trim();
+  const fileId = String(payload.file_id || '').trim();
+  if (!localPath && !fileId) return { ok: false, message: 'Photo source is missing.' };
+  return telegramService.sendPhoto(targetChatId, {
+    local_path: localPath,
+    file_id: fileId,
+    filename: String(payload.filename || '').trim(),
+  }, {
+    caption: String(options.caption || '').trim(),
+    parse_mode: String(options.parse_mode || '').trim(),
+  });
+}
+
+async function sendTelegramPhotoWithRetry(chatId, media = {}, options = {}) {
+  let firstErr = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const res = await sendTelegramPhoto(chatId, media, options);
+    if (res && res.ok) return { ok: true, attempt: attempt + 1, result: res };
+    firstErr = firstErr || res || { ok: false, message: 'Unknown Telegram photo send failure.' };
+  }
+  return {
+    ok: false,
+    attempt: 2,
+    message: String((firstErr && firstErr.message) || 'Unable to send Telegram photo.'),
+  };
 }
 
 async function handleTelegramCommand(command, argsRaw, context = {}) {
@@ -5689,9 +6109,14 @@ async function handleTelegramInboundMessage(message = {}) {
   const chatId = String((message && message.chat && message.chat.id) || '').trim();
   const username = normalizeTelegramUsername((message && message.from && message.from.username) || '');
   const text = extractTelegramTextMessage(message);
-  if (!chatId || !text) return;
+  if (!chatId) return;
 
-  const parsed = splitTelegramCommand(text);
+  const mediaV1Enabled = isTelegramMediaV1Enabled();
+  const telegramAttachments = mediaV1Enabled ? await ingestTelegramImageAttachment(message, chatId) : [];
+  const effectiveText = text || (telegramAttachments.length > 0 ? 'Please analyze the attached image.' : '');
+  if (!effectiveText) return;
+
+  const parsed = splitTelegramCommand(effectiveText);
   if (parsed.command) {
     await handleTelegramCommand(parsed.command, parsed.argsRaw, {
       chat_id: chatId,
@@ -5703,7 +6128,7 @@ async function handleTelegramInboundMessage(message = {}) {
 
   const usersStore = getOrchestratorUsersStore();
   if (isTelegramRegistrationPending(chatId)) {
-    const requestedUserId = String(text || '').trim();
+    const requestedUserId = String(effectiveText || '').trim();
     if (requestedUserId.length < 3) {
       await sendTelegramText(chatId, 'User ID must be at least 3 characters. Try again:');
       return;
@@ -5747,7 +6172,7 @@ async function handleTelegramInboundMessage(message = {}) {
   let pathBRes = null;
   try {
     pathBRes = await executePathBTask({
-      message: text,
+      message: effectiveText,
       source: 'telegram',
       chat_id: chatId,
       username,
@@ -5756,6 +6181,7 @@ async function handleTelegramInboundMessage(message = {}) {
       provider: runtime.provider,
       model: runtime.model,
       web_provider: String(settings.orchestrator_web_provider || ORCHESTRATOR_WEB_PROVIDER_DEFAULT),
+      telegram_attachments: telegramAttachments,
     }, {
       timeoutMs: 120_000,
     });
@@ -5769,11 +6195,34 @@ async function handleTelegramInboundMessage(message = {}) {
     return;
   }
 
+  const mediaList = mediaV1Enabled
+    ? (Array.isArray(pathBRes.telegram_media) ? pathBRes.telegram_media : [])
+      .filter((item) => item && item.type === 'photo' && String(item.local_path || item.file_id || '').trim())
+    : [];
+  if (mediaList.length > 0) {
+    const photoRes = await sendTelegramPhotoWithRetry(chatId, mediaList[0], {});
+    if (!photoRes.ok) {
+      console.warn('[telegram-media] sendPhoto failed after retry', {
+        chat_id: chatId,
+        run_id: String(pathBRes.run_id || ''),
+        message_id: String((message && message.message_id) || ''),
+        error: String(photoRes.message || ''),
+      });
+    } else {
+      console.info('[telegram-media] sendPhoto ok', {
+        chat_id: chatId,
+        run_id: String(pathBRes.run_id || ''),
+        message_id: String((message && message.message_id) || ''),
+        attempt: Number(photoRes.attempt || 1),
+      });
+    }
+  }
+
   const summary = String(pathBRes.telegram_summary || pathBRes.message || '').trim();
   const followUp = String(pathBRes.follow_up_question || '').trim();
   await sendTelegramText(chatId, [summary, followUp].filter(Boolean).join('\n\n'));
   usersStore.incrementUsage(chatId, {
-    tokens: String(text || '').length + String(summary || '').length,
+    tokens: String(effectiveText || '').length + String(summary || '').length,
   });
 }
 
@@ -11955,6 +12404,10 @@ function formatToolStatusStart(toolName, args = {}) {
     const target = String(payload.local_path || payload.image_url || payload.context_file_id || '').trim();
     return `Analyzing image: ${trimStatusText(target, 96) || '(selected image)'}`;
   }
+  if (name === 'capture_html_artifact_png') {
+    const target = String(payload.artifact_id || payload.sr_id || '').trim();
+    return `Capturing HTML screenshot: ${trimStatusText(target, 80) || '(latest html artifact)'}`;
+  }
   if (name === 'write_markdown_artifact' || name === 'write_html_artifact') {
     return `Writing artifact "${trimStatusText(payload.title || 'Research Draft', 80)}"...`;
   }
@@ -13214,6 +13667,42 @@ async function executeLuminoChat(input, options = {}) {
               context_file_id: contextFileId || '',
               mime_type: String(analysisRes.mime_type || ''),
               bytes: Number(analysisRes.bytes || 0),
+            },
+          };
+        }
+
+        if (name === 'capture_html_artifact_png') {
+          const srTarget = String(args.sr_id || srId).trim();
+          const capRes = await captureHtmlArtifactPngForTelegram({
+            sr_id: srTarget,
+            artifact_id: String(args.artifact_id || '').trim(),
+            width: Number(args.width || 0),
+            height: Number(args.height || 0),
+            wait_ms: Number(args.wait_ms || 0),
+          });
+          if (!capRes || !capRes.ok) {
+            return {
+              ok: false,
+              message: String((capRes && capRes.message) || 'Unable to capture HTML artifact screenshot.'),
+              tool_output: {
+                ok: false,
+                message: String((capRes && capRes.message) || 'Unable to capture HTML artifact screenshot.'),
+              },
+            };
+          }
+          return {
+            ok: true,
+            message: 'HTML artifact screenshot captured.',
+            tool_output: {
+              ok: true,
+              sr_id: String(capRes.sr_id || srTarget),
+              artifact_id: String(capRes.artifact_id || ''),
+              local_path: String(capRes.local_path || ''),
+              png_path: String(capRes.png_path || ''),
+              width: Number(capRes.width || 0),
+              height: Number(capRes.height || 0),
+              bytes: Number(capRes.bytes || 0),
+              markdown: String(capRes.markdown || ''),
             },
           };
         }

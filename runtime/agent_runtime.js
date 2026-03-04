@@ -495,6 +495,22 @@ const AGENT_TOOLS = [
     },
   },
   {
+    name: 'capture_html_artifact_png',
+    allowed_callers: ['direct'],
+    description: 'Render an HTML artifact offscreen and capture it as a PNG image file.',
+    parameters: {
+      type: 'object',
+      properties: {
+        artifact_id: { type: 'string', description: 'Optional HTML artifact ID. If omitted, uses latest HTML artifact in scope.' },
+        sr_id: { type: 'string', description: 'Optional reference ID override (defaults to active reference).' },
+        width: { type: 'number', description: 'Optional viewport width in pixels (default 1600).' },
+        height: { type: 'number', description: 'Optional viewport height in pixels (default 900).' },
+        wait_ms: { type: 'number', description: 'Optional post-load wait time before capture (default 400).' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'web_search',
     allowed_callers: ['direct'],
     description: 'Search the web for a query using DuckDuckGo. Returns titles, URLs, and snippets from the top results.',

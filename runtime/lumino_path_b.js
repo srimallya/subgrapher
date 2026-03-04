@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 
 const PATH_B_DEFAULT_TOP_K = 12;
+const VIZ_INTENT_RE = /\b(visualize|visualise|chart|graph|timeline|diagram|map|ladder|flow)\b/i;
 
 function nowTs() {
   return Date.now();
@@ -119,7 +120,34 @@ function formatTelegramMessage(summary = '', citationUrls = []) {
   };
 }
 
-function buildPathBSystemPrompt() {
+function normalizeTelegramAttachments(value) {
+  const list = Array.isArray(value) ? value : [];
+  return list
+    .map((item) => (item && typeof item === 'object' ? item : null))
+    .filter(Boolean)
+    .map((item) => ({
+      type: String(item.type || '').trim().toLowerCase(),
+      local_path: String(item.local_path || '').trim(),
+      mime_type: String(item.mime_type || '').trim().toLowerCase(),
+      file_id: String(item.file_id || '').trim(),
+      width: Number(item.width || 0),
+      height: Number(item.height || 0),
+    }))
+    .filter((item) => item.type === 'image' && item.local_path);
+}
+
+function buildPathBSystemPrompt(task = {}) {
+  const message = String((task && task.message) || '').trim();
+  const hasVizIntent = VIZ_INTENT_RE.test(message);
+  const attachments = normalizeTelegramAttachments(task && task.telegram_attachments);
+  const hasImageAttachment = attachments.length > 0;
+  const extra = [];
+  if (hasImageAttachment) {
+    extra.push('When image attachments are provided and relevant, call analyze_image. You may call analyze_image multiple times with different prompts to refine evidence.');
+  }
+  if (hasVizIntent) {
+    extra.push('When user intent is visualization-oriented, ensure a suitable HTML artifact exists via delegate_path_a, then call capture_html_artifact_png before finish.');
+  }
   return [
     'You are Path B, the global orchestrator for Subgrapher.',
     'Path A is scoped to one reference; you orchestrate globally.',
@@ -135,15 +163,28 @@ function buildPathBSystemPrompt() {
     '8) read_research_artifact for summary material',
     '9) finish with summary_for_telegram + citation_urls (prefer 3 verified URLs).',
     'Do not fabricate citations. Use only verified links.',
+    ...extra,
   ].join('\n');
 }
 
 function buildPathBUserPrompt(task = {}, session = null) {
+  const attachments = normalizeTelegramAttachments(task && task.telegram_attachments);
+  const hasVizIntent = VIZ_INTENT_RE.test(String((task && task.message) || '').trim());
   const lines = [
     `User request: ${String(task.message || '').trim() || '(empty request)'}`,
     `Source: ${String(task.source || 'telegram')}`,
     `User scope: ${String(task.user_scope || 'default')}`,
   ];
+  if (attachments.length > 0) {
+    lines.push('', 'Inbound attachments:');
+    attachments.slice(0, 6).forEach((item, idx) => {
+      const size = (Number(item.width) > 0 && Number(item.height) > 0) ? `${Math.round(item.width)}x${Math.round(item.height)}` : 'size unknown';
+      lines.push(`${idx + 1}. image (${item.mime_type || 'image'}) path=${item.local_path} file_id=${item.file_id || '-'} ${size}`);
+    });
+  }
+  if (hasVizIntent) {
+    lines.push('', 'Visualization intent detected: generate a useful visual output and capture PNG via capture_html_artifact_png.');
+  }
   const msgs = toArray(session && session.messages).slice(-4);
   if (msgs.length > 0) {
     lines.push('', 'Recent conversation context:');
@@ -296,6 +337,36 @@ const PATH_B_TOOLS = [
     },
   },
   {
+    name: 'analyze_image',
+    description: 'Analyze an image from local_path, image_url, or context_file_id. Can be called multiple times with different prompts.',
+    parameters: {
+      type: 'object',
+      properties: {
+        local_path: { type: 'string' },
+        image_url: { type: 'string' },
+        context_file_id: { type: 'string' },
+        sr_id: { type: 'string' },
+        prompt: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'capture_html_artifact_png',
+    description: 'Capture an HTML artifact as PNG for Telegram delivery.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sr_id: { type: 'string' },
+        artifact_id: { type: 'string' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        wait_ms: { type: 'number' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'delegate_path_a',
     description: 'Delegate deep scoped research and artifact generation to Path A.',
     parameters: {
@@ -359,6 +430,8 @@ function createPathBExecutor(options = {}) {
   const webSearch = typeof options.webSearch === 'function' ? options.webSearch : null;
   const verifyLink = typeof options.verifyLink === 'function' ? options.verifyLink : null;
   const addTab = typeof options.addTab === 'function' ? options.addTab : null;
+  const analyzeImage = typeof options.analyzeImage === 'function' ? options.analyzeImage : null;
+  const captureHtmlArtifactPng = typeof options.captureHtmlArtifactPng === 'function' ? options.captureHtmlArtifactPng : null;
   const delegatePathA = typeof options.delegatePathA === 'function' ? options.delegatePathA : null;
   const readResearchArtifact = typeof options.readResearchArtifact === 'function' ? options.readResearchArtifact : null;
   const upsertUserPreferences = typeof options.upsertUserPreferences === 'function' ? options.upsertUserPreferences : null;
@@ -376,6 +449,8 @@ function createPathBExecutor(options = {}) {
     webSearch,
     verifyLink,
     addTab,
+    analyzeImage,
+    captureHtmlArtifactPng,
     delegatePathA,
     readResearchArtifact,
     upsertUserPreferences,
@@ -522,6 +597,8 @@ function createPathBExecutor(options = {}) {
       final_payload: null,
       tool_trace: [],
       path_a_prompt: '',
+      visual_outputs: [],
+      telegram_attachments: normalizeTelegramAttachments(payload.telegram_attachments),
     };
 
     const appendToolTrace = (entry) => {
@@ -682,6 +759,60 @@ function createPathBExecutor(options = {}) {
         };
       }
 
+      if (name === 'analyze_image') {
+        const srId = String(args.sr_id || orchestratorState.selected_sr_id || '').trim();
+        const localPath = String(args.local_path || '').trim();
+        const imageUrl = String(args.image_url || '').trim();
+        const contextFileId = String(args.context_file_id || '').trim();
+        const prompt = String(args.prompt || '').trim();
+        let resolvedLocalPath = localPath;
+        if (!resolvedLocalPath && !imageUrl && !contextFileId && orchestratorState.telegram_attachments.length > 0) {
+          resolvedLocalPath = String((orchestratorState.telegram_attachments[0] && orchestratorState.telegram_attachments[0].local_path) || '').trim();
+        }
+        const res = await analyzeImage({
+          sr_id: srId,
+          local_path: resolvedLocalPath,
+          image_url: imageUrl,
+          context_file_id: contextFileId,
+          prompt,
+        }, {
+          provider,
+          model,
+          credentials: creds,
+          selected_sr_id: orchestratorState.selected_sr_id,
+        });
+        return {
+          ok: !!(res && res.ok),
+          message: res && res.ok ? 'Image analysis completed.' : String((res && res.message) || 'Image analysis failed.'),
+          tool_output: res || { ok: false, message: 'Image analysis failed.' },
+        };
+      }
+
+      if (name === 'capture_html_artifact_png') {
+        const srId = String(args.sr_id || orchestratorState.selected_sr_id || '').trim();
+        const artifactId = String(args.artifact_id || '').trim();
+        const res = await captureHtmlArtifactPng({
+          sr_id: srId,
+          artifact_id: artifactId,
+          width: Number(args.width || 0),
+          height: Number(args.height || 0),
+          wait_ms: Number(args.wait_ms || 0),
+        });
+        if (res && res.ok && res.local_path) {
+          orchestratorState.visual_outputs.push({
+            type: 'photo',
+            local_path: String(res.local_path || '').trim(),
+            artifact_id: String(res.artifact_id || artifactId || '').trim(),
+            sr_id: String(res.sr_id || srId || '').trim(),
+          });
+        }
+        return {
+          ok: !!(res && res.ok),
+          message: res && res.ok ? 'HTML artifact screenshot captured.' : String((res && res.message) || 'HTML screenshot capture failed.'),
+          tool_output: res || { ok: false, message: 'HTML screenshot capture failed.' },
+        };
+      }
+
       if (name === 'delegate_path_a') {
         const srId = String(args.sr_id || orchestratorState.selected_sr_id).trim();
         if (!srId) {
@@ -785,7 +916,7 @@ function createPathBExecutor(options = {}) {
     };
 
     const userPrompt = buildPathBUserPrompt(payload, priorSession);
-    const systemPrompt = buildPathBSystemPrompt();
+    const systemPrompt = buildPathBSystemPrompt(payload);
     const agentResult = await executeAgenticLoopFn({
       provider,
       model,
@@ -910,6 +1041,15 @@ function createPathBExecutor(options = {}) {
       });
     }
 
+    if (VIZ_INTENT_RE.test(userMessage) && selectedSrId && orchestratorState.visual_outputs.length === 0) {
+      await toolExec({
+        name: 'capture_html_artifact_png',
+        arguments: {
+          sr_id: selectedSrId,
+        },
+      });
+    }
+
     const inferredTopics = normalizeTopic(userMessage).split(' ').filter((token) => token.length >= 4).slice(0, 8);
     const trackingPreference = /\b(track|monitor|daily|weekly|schedule|cron)\b/i.test(userMessage)
       ? 'tracking_requested'
@@ -1006,6 +1146,7 @@ function createPathBExecutor(options = {}) {
       tool_trace: compactToolTrace,
       delegated_response: orchestratorState.delegated_response || null,
       research_artifact: orchestratorState.research_artifact || null,
+      telegram_media: toArray(orchestratorState.visual_outputs).filter((item) => item && item.local_path),
       telegram_summary: telegram.text,
       follow_up_question: buildFollowUpQuestion({ user_message: userMessage }),
       message: telegram.text,
