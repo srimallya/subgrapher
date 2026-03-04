@@ -6507,6 +6507,22 @@ function renderSettingsStatusLine() {
   if (cancelBtn) cancelBtn.disabled = !dirty;
 }
 
+function renderSyncEligibility() {
+  const node = e('settings-sync-eligibility');
+  const toggle = e('settings-trustcommons-sync-enabled');
+  if (!node || !toggle) return;
+  const trust = state.trustCommonsStatus || null;
+  const identityId = String((trust && trust.identity_id) || '').trim();
+  const eligible = !!identityId;
+  toggle.disabled = !eligible;
+  if (!eligible) {
+    toggle.checked = false;
+    node.textContent = 'Unavailable: connect Trust Commons identity first.';
+    return;
+  }
+  node.textContent = `Available for ${identityId}`;
+}
+
 function renderSettingsForm() {
   const draft = normalizeSettingsDraft(state.settingsDraft || {});
   renderSettingsLmstudioModelSelect('settings-abstraction-model', draft.abstraction_model);
@@ -6528,6 +6544,7 @@ function renderSettingsForm() {
     node.classList.toggle('invalid', !!(state.settingsValidationErrors && state.settingsValidationErrors[key]));
     node.title = (state.settingsValidationErrors && state.settingsValidationErrors[key]) || '';
   });
+  renderSyncEligibility();
   renderSettingsAbstractionStatus();
   renderSettingsRagStatus();
   renderSettingsStatusLine();
@@ -6673,6 +6690,7 @@ async function refreshRagStatus() {
 async function loadSettingsData() {
   const prefRes = await api.getPreferences();
   const diagnostics = await api.settingsDiagnostics();
+  await refreshTrustCommonsStatus();
   await refreshSettingsLmstudioModelOptions();
   await refreshProviderKeysState({ renderSettings: true });
   if (prefRes && prefRes.ok) {
@@ -6754,6 +6772,7 @@ async function refreshTrustCommonsStatus() {
     state.trustCommonsStatus = null;
     const btn = e('trustcommons-connect-btn');
     if (btn) btn.textContent = 'TrustCommons Connect';
+    renderSyncEligibility();
     return;
   }
   state.trustCommonsStatus = res;
@@ -6764,9 +6783,10 @@ async function refreshTrustCommonsStatus() {
     } else if (res.launched || (res.sync && res.sync.running)) {
       btn.textContent = `TrustCommons Ready (${res.identity_name || 'identity'})`;
     } else {
-      btn.textContent = 'TrustCommons Connect';
-    }
+    btn.textContent = 'TrustCommons Connect';
   }
+  renderSyncEligibility();
+}
 }
 
 async function refreshProviderKeysState(options = {}) {
@@ -8250,10 +8270,16 @@ function bindControls() {
     state.hyperwebChatRoomId = String(res.room.room_id || '');
     await refreshHyperwebChatData();
   });
+  e('hyperweb-chat-file-btn')?.addEventListener('click', () => {
+    e('hyperweb-chat-file-input')?.click();
+  });
   e('hyperweb-chat-file-input')?.addEventListener('change', (event) => {
     const node = event && event.target ? event.target : null;
     const file = node && node.files && node.files[0] ? node.files[0] : null;
     state.hyperwebChatPendingFile = file || null;
+    if (file) {
+      setStatusText('hyperweb-chat-status', `Attached: ${String(file.name || 'file')}`);
+    }
   });
   e('hyperweb-chat-send-btn')?.addEventListener('click', async () => {
     if (!api.hyperwebChatSend) return;

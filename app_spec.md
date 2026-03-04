@@ -7,6 +7,7 @@ Subgrapher uses one artifact runtime for authored outputs:
 
 Legacy pygame/viz tabs are removed from active runtime behavior.
 Image analysis is unified: active provider native vision is attempted first, then LM Studio fallback is used when needed.
+Hyperweb now includes E2E chat (`DM` + `room`) over the existing RTC data-channel path.
 
 ## Artifact Data Model
 Artifacts are stored as:
@@ -72,6 +73,23 @@ Migration is idempotent and safe to run repeatedly.
   - `web_search`
   - optional top-result `fetch_webpage`
 - Citation gate validation targets deliverable artifact content when an artifact is written, not just final chat summary text.
+
+## Hyperweb Chat + Multi-Device Sync
+- Transport:
+  - Uses existing Hyperweb RTC data-channel protocol path (no additional transport).
+- Chat protocol:
+  - `hyperweb:chat_message`
+  - `hyperweb:chat_ack` (delivery/read)
+- Security:
+  - sender payloads are signed and verified against known peer signing keys
+  - chat body is end-to-end encrypted (X25519 key agreement + AES-256-GCM envelope)
+- UX:
+  - Hyperweb Chat tab supports direct messages, room messaging, online presence, and basic p2p file transfer.
+- Multi-device sync policy:
+  - controlled by Settings toggle `trustcommons_sync_enabled` (`Multi-Device Auto Sync`)
+  - default `false` (opt-in)
+  - enabling requires `trustcommons_identity_id`; without identity, sync remains disabled
+  - current limitation: Hyperweb peer identity is device-local, so multiple devices for one user may appear as separate peer fingerprints.
 
 ## Local Context Ingestion + Abstraction
 - Folder mounts are read-only indexed context with recursive traversal and extension filtering.

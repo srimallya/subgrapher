@@ -87,7 +87,13 @@ This implementation delivers:
   - job controls (`/jobs`, `/job_create`, `/job_edit`, `/job_pause`, `/job_resume`, `/job_delete`)
 - Hyperweb and sharing:
   - public feed posting, semantic reference search/import, and snapshot publishing
+  - E2E chat over existing Hyperweb RTC data-channel (`DM`, `room`, delivery/read ack, basic p2p file transfer)
   - private reference sharing with TTC members and shared rooms
+- Multi-device sync:
+  - optional `Multi-Device Auto Sync` toggle in Settings (`off` by default)
+  - requires Trust Commons identity (`trustcommons_identity_id`); without identity, sync cannot be enabled
+  - when enabled, local sync bridge is auto-managed by runtime settings
+  - note: Hyperweb peer identity is currently device-local; two devices may appear as two peer fingerprints
 - First-run onboarding:
   - default search engine selection (`google`, `bing`, `ddg`)
   - Chrome/Safari import
@@ -147,6 +153,7 @@ For new users:
 
 - This is a clean standalone project, independent of `ttc_webapp` SaaS runtime.
 - Context files imported from mounted folders are read-only by default.
+- Multi-device sync is opt-in and identity-gated; users without Trust Commons identity remain local-only.
 - Use chat commands for direct workspace mutations:
   - `/artifact title: content`
   - `/viz <title>` (creates an HTML artifact scaffold)

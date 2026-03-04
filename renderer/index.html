@@ -19,8 +19,8 @@
       <button id="workspace-open-btn" class="top-btn active">Workspace</button>
       <button id="hyperweb-open-btn" class="top-btn">Hyperweb</button>
       <button id="private-shares-open-btn" class="top-btn">Private Shares</button>
-      <button id="settings-open-btn" class="top-btn">Settings</button>
       <button id="history-open-btn" class="top-btn">History</button>
+      <button id="settings-open-btn" class="top-btn">Settings</button>
       <button id="trustcommons-connect-btn" class="top-btn">TrustCommons Connect</button>
       <label for="default-search-engine-select">Search</label>
       <select id="default-search-engine-select">
@@ -266,10 +266,11 @@
           <select id="hyperweb-chat-peer-select"></select>
           <select id="hyperweb-chat-room-select" class="hidden"></select>
           <button id="hyperweb-chat-room-create-btn">New Room</button>
-          <input id="hyperweb-chat-file-input" type="file" />
         </div>
         <div id="hyperweb-chat-thread" class="hyperweb-chat-thread"></div>
-        <div class="hyperweb-compose">
+        <div class="hyperweb-compose hyperweb-chat-compose">
+          <button id="hyperweb-chat-file-btn" title="Attach file">+</button>
+          <input id="hyperweb-chat-file-input" type="file" class="hidden" />
           <textarea id="hyperweb-chat-input" placeholder="Encrypted message..."></textarea>
           <button id="hyperweb-chat-send-btn">Send</button>
         </div>
@@ -336,6 +337,21 @@
           <label class="settings-field">History Max Entries
             <input id="settings-history-max" data-setting="history_max_entries" type="number" min="500" max="10000" />
           </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Multi-Device Sync</h3>
+        <p class="muted small">Optional automatic reference sync across your devices. Requires Trust Commons identity.</p>
+        <div class="settings-grid">
+          <label class="settings-field settings-toggle">
+            <input id="settings-trustcommons-sync-enabled" data-setting="trustcommons_sync_enabled" type="checkbox" />
+            <span>Enable Multi-Device Auto Sync</span>
+          </label>
+          <div class="settings-field">
+            <span>Eligibility</span>
+            <div id="settings-sync-eligibility" class="muted small">Checking Trust Commons identity...</div>
+          </div>
         </div>
       </section>
 

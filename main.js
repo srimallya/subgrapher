@@ -3577,7 +3577,7 @@ function getDefaultSettings() {
     trustcommons_bootstrap_at: 0,
     trustcommons_download_url: TRUSTCOMMONS_DOWNLOAD_URL,
     trustcommons_app_bundle_id: TRUSTCOMMONS_BUNDLE_ID,
-    trustcommons_sync_enabled: true,
+    trustcommons_sync_enabled: false,
     trustcommons_sync_port: TRUSTCOMMONS_SYNC_DEFAULT_PORT,
     trustcommons_peer_sync_url: TRUSTCOMMONS_SYNC_DEFAULT_PEER_URL,
     trustcommons_sync_interval_sec: TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC,
@@ -3649,17 +3649,19 @@ function readSettings() {
     const imageAnalysisPrompt = String((parsed && parsed.image_analysis_prompt) || defaults.image_analysis_prompt).trim();
     const ragEmbeddingModel = String((parsed && parsed.rag_embedding_model) || defaults.rag_embedding_model).trim();
     const ragTopK = Number((parsed && parsed.rag_top_k) || defaults.rag_top_k);
+    const identityId = String((parsed && parsed.trustcommons_identity_id) || '').trim();
+    const requestedSyncEnabled = parsed && Object.prototype.hasOwnProperty.call(parsed, 'trustcommons_sync_enabled')
+      ? !!parsed.trustcommons_sync_enabled
+      : defaults.trustcommons_sync_enabled;
     return {
       default_search_engine: ['google', 'bing', 'ddg'].includes(engine) ? engine : 'ddg',
       trustcommons_bootstrap_complete: !!(parsed && parsed.trustcommons_bootstrap_complete),
-      trustcommons_identity_id: String((parsed && parsed.trustcommons_identity_id) || '').trim(),
+      trustcommons_identity_id: identityId,
       trustcommons_display_name: String((parsed && parsed.trustcommons_display_name) || '').trim(),
       trustcommons_bootstrap_at: Number((parsed && parsed.trustcommons_bootstrap_at) || 0),
       trustcommons_download_url: downloadUrl || defaults.trustcommons_download_url,
       trustcommons_app_bundle_id: appBundle || defaults.trustcommons_app_bundle_id,
-      trustcommons_sync_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'trustcommons_sync_enabled')
-        ? !!parsed.trustcommons_sync_enabled
-        : defaults.trustcommons_sync_enabled,
+      trustcommons_sync_enabled: !!identityId && requestedSyncEnabled,
       trustcommons_sync_port: Number.isFinite(syncPort) && syncPort >= 1024 && syncPort <= 65535
         ? Math.round(syncPort)
         : defaults.trustcommons_sync_port,
@@ -3882,9 +3884,7 @@ function writeSettings(next) {
     ) || 0,
     trustcommons_download_url: requestedDownloadUrl || TRUSTCOMMONS_DOWNLOAD_URL,
     trustcommons_app_bundle_id: requestedAppBundle || TRUSTCOMMONS_BUNDLE_ID,
-    trustcommons_sync_enabled: Object.prototype.hasOwnProperty.call(input, 'trustcommons_sync_enabled')
-      ? !!input.trustcommons_sync_enabled
-      : !!current.trustcommons_sync_enabled,
+    trustcommons_sync_enabled: false,
     trustcommons_sync_port: Number.isFinite(requestedSyncPort) && requestedSyncPort >= 1024 && requestedSyncPort <= 65535
       ? Math.round(requestedSyncPort)
       : TRUSTCOMMONS_SYNC_DEFAULT_PORT,
@@ -3976,6 +3976,11 @@ function writeSettings(next) {
       ? Math.max(1, Math.min(24, Math.round(requestedRagTopK)))
       : RAG_TOP_K_DEFAULT,
   };
+  settings.trustcommons_sync_enabled = !!settings.trustcommons_identity_id && (
+    Object.prototype.hasOwnProperty.call(input, 'trustcommons_sync_enabled')
+      ? !!input.trustcommons_sync_enabled
+      : !!current.trustcommons_sync_enabled
+  );
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
   return settings;
 }
@@ -8949,6 +8954,11 @@ async function ensureTrustCommonsSyncBridge() {
   trustCommonsSyncBridge.setEnabled(!!settings.trustcommons_sync_enabled);
   trustCommonsSyncBridge.setPeerBridgeUrl(String(settings.trustcommons_peer_sync_url || '').trim());
   trustCommonsSyncBridge.setSyncIntervalMs(Number(settings.trustcommons_sync_interval_sec || TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC) * 1000);
+
+  if (!String(settings.trustcommons_identity_id || '').trim()) {
+    await trustCommonsSyncBridge.stop();
+    return { ok: true, disabled: true, message: 'Trust Commons identity is required for multi-device sync.', status: trustCommonsSyncBridge.getStatus() };
+  }
 
   if (!settings.trustcommons_sync_enabled) {
     await trustCommonsSyncBridge.stop();
@@ -16474,6 +16484,17 @@ ipcMain.handle('browser:historySemanticMap', (_event, payload) => {
 ipcMain.handle('browser:updatePreferences', async (_event, payload) => {
   const current = readSettings();
   const patch = pickEditableSettingsPatch(payload || {});
+  if (
+    Object.prototype.hasOwnProperty.call(patch, 'trustcommons_sync_enabled')
+    && !!patch.trustcommons_sync_enabled
+    && !String(current.trustcommons_identity_id || '').trim()
+  ) {
+    return {
+      ok: false,
+      message: 'Connect a Trust Commons identity before enabling multi-device sync.',
+      settings: current,
+    };
+  }
   const updated = writeSettings(patch);
   const appliedRuntime = await applySettingsRuntimeEffects(current, updated);
   return {
