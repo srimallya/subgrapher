@@ -43,6 +43,7 @@ const { isPathAToolAllowed, isPathBToolAllowed } = require('./runtime/agent_tool
 const { createOrchestratorSessionStore } = require('./runtime/orchestrator_session_store');
 const { createOrchestratorUsersStore } = require('./runtime/orchestrator_users_store');
 const { createOrchestratorPreferencesStore } = require('./runtime/orchestrator_preferences_store');
+const { LUMINO_HTML_ARTIFACT_STYLE_GUIDE } = require('./runtime/lumino_html_artifact_style_guide');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -11758,6 +11759,7 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
       '- Prefer HTML artifacts for interactive visualizations and games.',
       '- Use write_html_artifact (or create_artifact with artifact_type="html") for dynamic browser-executed outputs.',
       '- Keep HTML artifacts full-document (`<!doctype html>...`) and responsive to container size.',
+      LUMINO_HTML_ARTIFACT_STYLE_GUIDE,
       '- /diff artifact queues an append patch that requires manual Apply. For direct corrections, prefer write_markdown_artifact/write_html_artifact with artifact_id.',
       'When helpful, suggest direct workspace mutation commands exactly in this syntax:',
       '/artifact <title>: <content>',

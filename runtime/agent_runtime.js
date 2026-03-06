@@ -1,4 +1,8 @@
 const crypto = require('crypto');
+const {
+  LUMINO_HTML_ARTIFACT_TOOLING_SUMMARY,
+  buildLuminoHtmlArtifactScaffold,
+} = require('./lumino_html_artifact_style_guide');
 
 function id(prefix) {
   return `${prefix}_${crypto.randomUUID()}`;
@@ -45,24 +49,7 @@ function parseChatCommand(message) {
     const body = raw.slice('/viz '.length).trim();
     const chunks = body.split(/\s+/);
     const title = chunks.join(' ').trim() || 'Interactive Visualization';
-    const html = [
-      '<!doctype html>',
-      '<html lang="en">',
-      '<head>',
-      '  <meta charset="utf-8" />',
-      '  <meta name="viewport" content="width=device-width,initial-scale=1" />',
-      `  <title>${title.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</title>`,
-      '  <style>',
-      '    html, body { margin: 0; height: 100%; background: #0a0f1a; color: #e9f3ff; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }',
-      '    #app { display: grid; place-items: center; height: 100%; }',
-      '    .card { padding: 20px 24px; border: 1px solid #2a3a4f; border-radius: 12px; background: rgba(16, 27, 44, 0.88); }',
-      '  </style>',
-      '</head>',
-      '<body>',
-      '  <div id="app"><div class="card">Edit this HTML artifact and click Start to run.</div></div>',
-      '</body>',
-      '</html>',
-    ].join('\n');
+    const html = buildLuminoHtmlArtifactScaffold(title);
     return { type: 'artifact', artifactType: 'html', title, content: html };
   }
 
@@ -83,7 +70,7 @@ function parseChatCommand(message) {
       type: 'artifact',
       artifactType: 'html',
       title: 'Generated Visualization',
-      content: '<!doctype html><html><body style="margin:0;background:#0b1118;color:#edf3ff;display:grid;place-items:center;height:100vh;font-family:system-ui,sans-serif"><div>Interactive HTML artifact ready. Click Start to run.</div></body></html>',
+      content: buildLuminoHtmlArtifactScaffold('Generated Visualization'),
     };
   }
 
@@ -482,6 +469,7 @@ const AGENT_TOOLS = [
       'Write or update an executable HTML artifact with full content.',
       'Use this for dynamic interactive visualizations and games that run in the workspace.',
       'If artifact_id is omitted, runtime may update the active artifact for iterative fix/improve requests; otherwise a new HTML artifact is created.',
+      LUMINO_HTML_ARTIFACT_TOOLING_SUMMARY,
     ].join(' '),
     parameters: {
       type: 'object',
@@ -497,7 +485,7 @@ const AGENT_TOOLS = [
   {
     name: 'capture_html_artifact_png',
     allowed_callers: ['direct'],
-    description: 'Render an HTML artifact offscreen and capture it as a PNG image file.',
+    description: `Render an HTML artifact offscreen and capture it as a PNG image file. ${LUMINO_HTML_ARTIFACT_TOOLING_SUMMARY}`,
     parameters: {
       type: 'object',
       properties: {
