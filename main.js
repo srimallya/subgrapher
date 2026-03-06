@@ -15082,6 +15082,7 @@ ipcMain.handle('browser:srToggleArtifactHighlight', (_event, payload) => {
       removed: !!toggleRes.removed,
       message: String(toggleRes.message || 'Artifact highlight toggled.'),
       highlight: toggleRes.highlight || null,
+      references: refs,
     };
   } catch (err) {
     return {
@@ -15164,6 +15165,7 @@ ipcMain.handle('browser:markerClearActive', () => {
       removed_count: clearRes.removed_count,
       target: clearRes.target,
       message,
+      references: refs,
     };
   } catch (err) {
     return {
@@ -15189,6 +15191,8 @@ ipcMain.on('browser:marker:web-selection', (_event, payload) => {
       : [];
 
     const action = String((payload && payload.action) || '').trim().toLowerCase();
+    let added = false;
+    let removed = false;
     if (action === 'partial_unmark') {
       const removeIds = new Set(
         (Array.isArray(payload && payload.remove_ids) ? payload.remove_ids : [])
@@ -15197,6 +15201,7 @@ ipcMain.on('browser:marker:web-selection', (_event, payload) => {
       );
       if (removeIds.size > 0) {
         refs[idx].highlights = refs[idx].highlights.filter((item) => !removeIds.has(String((item && item.id) || '').trim()));
+        removed = true;
       }
       const additions = Array.isArray(payload && payload.additions) ? payload.additions : [];
       additions.forEach((item) => {
@@ -15210,6 +15215,7 @@ ipcMain.on('browser:marker:web-selection', (_event, payload) => {
         });
         if (!highlight || highlight.source !== 'web') return;
         refs[idx].highlights.push(highlight);
+        added = true;
       });
     } else {
       const highlight = sanitizeHighlightEntry({
@@ -15223,8 +15229,10 @@ ipcMain.on('browser:marker:web-selection', (_event, payload) => {
       const matchIdx = refs[idx].highlights.findIndex((item) => highlightSignatureWeb(item) === signature);
       if (matchIdx >= 0) {
         refs[idx].highlights.splice(matchIdx, 1);
+        removed = true;
       } else {
         refs[idx].highlights.push(highlight);
+        added = true;
       }
     }
 
@@ -15235,6 +15243,14 @@ ipcMain.on('browser:marker:web-selection', (_event, payload) => {
     refs[idx].updated_at = nowTs();
     setReferences(refs);
     syncMarkerStateToBrowserView();
+    sendBrowserEvent('browser:marker-update', {
+      source: 'web',
+      added,
+      removed,
+      message: added && removed
+        ? 'Web marker updated.'
+        : (added ? 'Web marker added.' : (removed ? 'Web marker removed.' : 'Web marker updated.')),
+    });
   } catch (_) {
     // noop
   }

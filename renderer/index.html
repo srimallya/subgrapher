@@ -4,31 +4,40 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Subgrapher</title>
+  <link rel="icon" type="image/svg+xml" href="../assets/icons/app-icon.svg" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <header id="app-topbar">
-    <div class="brand-wrap">
-      <img id="app-logo" src="../assets/icons/app-icon-1024.png" alt="Subgrapher Logo" />
-      <div>
+    <div class="app-header-main">
+      <div class="brand-wrap">
+        <img id="app-logo" src="../assets/icons/app-icon.svg" alt="Subgrapher Logo" />
         <div class="brand-title">Subgrapher</div>
-        <div class="brand-sub">Lumino Agent Workspace</div>
       </div>
+      <nav class="primary-nav" aria-label="Primary">
+        <button id="workspace-open-btn" class="top-btn active">Workspace</button>
+        <button id="hyperweb-open-btn" class="top-btn">Hyperweb</button>
+        <button id="private-shares-open-btn" class="top-btn">Private Shares</button>
+        <button id="history-open-btn" class="top-btn">History</button>
+        <button id="settings-open-btn" class="top-btn">Settings</button>
+      </nav>
     </div>
     <div class="top-controls">
-      <button id="workspace-open-btn" class="top-btn active">Workspace</button>
-      <button id="hyperweb-open-btn" class="top-btn">Hyperweb</button>
-      <button id="private-shares-open-btn" class="top-btn">Private Shares</button>
-      <button id="history-open-btn" class="top-btn">History</button>
-      <button id="settings-open-btn" class="top-btn">Settings</button>
-      <button id="trustcommons-connect-btn" class="top-btn">TrustCommons Connect</button>
-      <label for="default-search-engine-select">Search</label>
-      <select id="default-search-engine-select">
-        <option value="ddg">DuckDuckGo</option>
-        <option value="google">Google</option>
-        <option value="bing">Bing</option>
-      </select>
-      <button id="about-open-btn" class="top-btn">About</button>
+      <button id="workspace-left-rail-toggle-btn" class="top-btn workspace-chrome-toggle" type="button" aria-controls="references-panel" aria-expanded="false">References</button>
+      <button id="workspace-right-rail-toggle-btn" class="top-btn workspace-chrome-toggle" type="button" aria-controls="chat-panel" aria-expanded="true">Lumino</button>
+      <div class="app-tools">
+        <button id="app-tools-btn" class="top-btn" type="button" aria-haspopup="true" aria-expanded="false">More</button>
+        <div id="app-tools-menu" class="app-tools-menu hidden">
+          <button id="trustcommons-connect-btn" class="menu-btn" type="button">TrustCommons Connect</button>
+          <button id="about-open-btn" class="menu-btn" type="button">About</button>
+          <label class="menu-field hidden" for="default-search-engine-select">Search engine</label>
+          <select id="default-search-engine-select" class="hidden">
+            <option value="ddg">DuckDuckGo</option>
+            <option value="google">Google</option>
+            <option value="bing">Bing</option>
+          </select>
+        </div>
+      </div>
     </div>
   </header>
 
@@ -64,10 +73,15 @@
 
     <main class="panel center" id="workspace-panel">
       <div class="nav-bar">
-        <button id="browser-reload-btn" title="Reload">Reload</button>
-        <button id="browser-memory-btn" title="Reference memory mode">Memory</button>
-        <button id="browser-marker-mode-btn" title="Marker mode">Marker: Off</button>
-        <input id="browser-url-input" type="text" placeholder="type URL or search query" />
+        <div class="nav-bar-main">
+          <button id="browser-reload-btn" title="Reload">Reload</button>
+          <button id="browser-memory-btn" title="Reference memory mode">Memory</button>
+          <button id="browser-marker-mode-btn" title="Marker mode">Marker: Off</button>
+          <div class="browser-url-wrap">
+            <input id="browser-url-input" type="text" placeholder="type URL or search query" />
+            <div id="workspace-status-chip" class="workspace-status-chip hidden" aria-live="polite">Uncommitted page</div>
+          </div>
+        </div>
         <div class="nav-actions">
           <button id="browser-commit-tab-btn" title="Commit current page to active reference">Commit</button>
           <button id="browser-new-root-btn" title="Create new root from current page">New Root</button>
@@ -115,6 +129,7 @@
             </section>
             <div id="artifact-splitter-horizontal" class="artifact-splitter-horizontal hidden" role="separator" tabindex="0" aria-label="Resize artifact image and text panes" aria-orientation="horizontal"></div>
             <section id="artifact-text-pane" class="artifact-text-pane">
+              <pre id="artifact-highlight-layer" class="artifact-highlight-layer" aria-hidden="true"></pre>
               <textarea id="artifact-input" spellcheck="false"></textarea>
             </section>
             <section id="artifact-html-preview-pane" class="artifact-html-preview-pane hidden">
@@ -162,31 +177,35 @@
       </div>
     </main>
 
+    <div id="chat-panel-resizer" class="panel-resizer" role="separator" tabindex="0" aria-label="Resize Lumino panel" aria-orientation="vertical"></div>
+
     <aside class="panel right" id="chat-panel">
       <div class="panel-header">
         <h2>Ask Lumino</h2>
         <div class="panel-controls">
-          <button id="lumino-context-add-btn" title="Import .txt/.md context file">+</button>
-          <button id="lumino-refresh-btn" title="Clear chat and auto-fork">Refresh</button>
+          <button id="lumino-context-add-btn" title="Import .txt/.md context file">Add</button>
+          <button id="lumino-refresh-btn" title="Clear chat and auto-fork">Reset</button>
         </div>
       </div>
       <input id="lumino-context-file-input" type="file" accept=".txt,.md,text/plain,text/markdown" class="hidden" />
 
-      <div class="provider-row">
-        <select id="provider-select">
-          <option value="openai">OpenAI</option>
-          <option value="cerebras">Cerebras</option>
-          <option value="google">Google</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="lmstudio">LM Studio</option>
-        </select>
-        <button id="provider-set-key-btn">Set Key</button>
-        <button id="provider-clear-key-btn">Clear</button>
-      </div>
+      <div class="assistant-config">
+        <div class="provider-row">
+          <select id="provider-select">
+            <option value="openai">OpenAI</option>
+            <option value="cerebras">Cerebras</option>
+            <option value="google">Google</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="lmstudio">LM Studio</option>
+          </select>
+          <button id="provider-set-key-btn">Set Key</button>
+          <button id="provider-clear-key-btn">Clear</button>
+        </div>
 
-      <div class="provider-row">
-        <select id="provider-model-select"></select>
-        <button id="provider-refresh-models-btn">Fetch Models</button>
+        <div class="provider-row">
+          <select id="provider-model-select"></select>
+          <button id="provider-refresh-models-btn">Fetch Models</button>
+        </div>
       </div>
 
       <div id="provider-status" class="muted small"></div>
@@ -201,7 +220,6 @@
       </details>
 
       <div id="chat-body" class="chat-body"></div>
-      <div id="context-files" class="context-files"></div>
       <div id="diff-review" class="diff-review hidden"></div>
 
       <div class="chat-footer">
@@ -280,8 +298,8 @@
 
   <section id="private-shares-page" class="hidden">
     <div class="shares-toolbar">
-      <div>
-        <div class="brand-title">Private Shares</div>
+      <div class="page-heading">
+        <h1>Private Shares</h1>
         <div id="shares-status-line" class="muted small">Share references privately with TTC members.</div>
       </div>
       <div class="shares-toolbar-actions">
@@ -308,8 +326,8 @@
 
   <section id="settings-page" class="hidden">
     <div class="settings-toolbar">
-      <div>
-        <div class="brand-title">Settings</div>
+      <div class="page-heading">
+        <h1>Settings</h1>
         <div id="settings-status-line" class="muted small">Loading settings...</div>
       </div>
       <div class="settings-toolbar-actions">
@@ -647,8 +665,8 @@
 
   <section id="history-page" class="hidden">
     <div class="history-toolbar">
-      <div>
-        <div class="brand-title">History</div>
+      <div class="page-heading">
+        <h1>History</h1>
         <div id="history-status-line" class="muted small">Loading history...</div>
       </div>
       <div class="history-toolbar-actions">
@@ -666,27 +684,35 @@
         </div>
         <div id="history-list" class="history-list"></div>
       </section>
-      <section class="history-panel history-right">
-        <div class="history-preview-wrap">
-          <div class="history-panel-header">
-            <h3>Preview</h3>
-            <div id="history-preview-meta" class="muted small">Select an entry</div>
-          </div>
-          <div id="history-preview-container" class="history-preview-container">
-            <div id="history-preview-placeholder" class="placeholder">
-              <h3>History Preview</h3>
-              <p>Select a URL on the left to view cached snapshot details.</p>
+	      <section class="history-panel history-right">
+	        <div class="history-detail-toolbar">
+	          <div class="history-detail-label">Preview and Map</div>
+	          <div id="history-preview-meta" class="muted small">Select an entry</div>
+	        </div>
+	        <div id="history-detail-preview" class="history-detail-pane">
+          <div class="history-preview-wrap">
+            <div class="history-panel-header">
+              <h3>Preview</h3>
+            </div>
+            <div id="history-preview-container" class="history-preview-container">
+              <div id="history-preview-content" class="history-preview-content hidden"></div>
+              <div id="history-preview-placeholder" class="placeholder">
+                <h3>History Preview</h3>
+                <p>Select a URL on the left to view cached snapshot details.</p>
+              </div>
             </div>
           </div>
         </div>
-        <div class="history-map-wrap">
-          <div class="history-panel-header">
-            <h3>Semantic Map</h3>
-            <div id="history-map-status" class="muted small"></div>
-          </div>
-          <div class="history-map-canvas-wrap">
-            <canvas id="history-map-canvas" width="900" height="420"></canvas>
-            <div id="history-map-tooltip" class="history-map-tooltip hidden"></div>
+	        <div id="history-detail-map" class="history-detail-pane">
+	          <div class="history-map-wrap">
+            <div class="history-panel-header">
+              <h3>Semantic Map</h3>
+              <div id="history-map-status" class="muted small"></div>
+            </div>
+            <div class="history-map-canvas-wrap">
+              <canvas id="history-map-canvas" width="900" height="420"></canvas>
+              <div id="history-map-tooltip" class="history-map-tooltip hidden"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -716,7 +742,7 @@
   <div id="onboarding-overlay" class="modal-overlay hidden">
     <div class="modal-card onboarding-card">
       <div class="onboarding-header">
-        <img class="onboarding-logo" src="../assets/icons/app-icon-1024.png" alt="Subgrapher" />
+        <img class="onboarding-logo" src="../assets/icons/app-icon.svg" alt="Subgrapher" />
         <div>
           <h2>Welcome to Subgrapher</h2>
           <p>Set up Lumino, import browser data, and choose default browser settings.</p>

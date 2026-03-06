@@ -119,6 +119,7 @@ const state = {
   historyEntries: [],
   historySearchQuery: '',
   historySelectedId: '',
+  historyDetailView: 'preview',
   historyMapPoints: [],
   historyMapBounds: null,
   historyHoveredPointId: '',
@@ -134,6 +135,8 @@ const state = {
     timer: null,
   },
   referenceActivationSeq: 0,
+  chatPanelCollapsed: false,
+  chatPanelWidth: 252,
 };
 
 const PROVIDERS = ['openai', 'cerebras', 'google', 'anthropic', 'lmstudio'];
@@ -147,6 +150,8 @@ const BROWSER_MARKER_HOLD_MS = 650;
 const HYPERWEB_SPLIT_RATIO_KEY = 'subgrapher_hyperweb_split_ratio_v1';
 const ZEN_MODE_KEY = 'subgrapher_zen_mode_v1';
 const UI_ZOOM_KEY = 'subgrapher_ui_zoom_v1';
+const CHAT_PANEL_WIDTH_KEY = 'subgrapher_chat_panel_width_v1';
+const CHAT_PANEL_COLLAPSED_KEY = 'subgrapher_chat_panel_collapsed_v1';
 const ARTIFACT_SPLIT_BY_REF_KEY = 'subgrapher_artifact_split_by_ref_v1';
 const ARTIFACT_ZOOM_BY_REF_KEY = 'subgrapher_artifact_zoom_by_ref_v1';
 const ARTIFACT_VIEW_MODE_CODE = 'code';
@@ -254,6 +259,80 @@ function persistZenModePreference(enabled) {
 
 function applyZenModeUi() {
   document.body.classList.toggle('zen-mode', !!state.zenMode);
+}
+
+function loadChatPanelWidthPreference() {
+  try {
+    const raw = Number(localStorage.getItem(CHAT_PANEL_WIDTH_KEY));
+    if (!Number.isFinite(raw)) return 252;
+    return clamp(Math.round(raw), 252, 420);
+  } catch (_) {
+    return 252;
+  }
+}
+
+function persistChatPanelWidthPreference(width) {
+  try {
+    localStorage.setItem(CHAT_PANEL_WIDTH_KEY, String(clamp(Math.round(width), 252, 420)));
+  } catch (_) {
+    // noop
+  }
+}
+
+function loadChatPanelCollapsedPreference() {
+  return false;
+}
+
+function persistChatPanelCollapsedPreference(collapsed) {
+  try {
+    localStorage.setItem(CHAT_PANEL_COLLAPSED_KEY, '0');
+  } catch (_) {
+    // noop
+  }
+}
+
+function applyChatPanelState() {
+  state.chatPanelCollapsed = false;
+  document.body.classList.remove('chat-collapsed');
+  const width = clamp(Number(state.chatPanelWidth || 252), 252, 420);
+  document.body.style.setProperty('--left-panel-width', `${width}px`);
+  document.body.style.setProperty('--right-panel-width', `${width}px`);
+  ['workspace-right-rail-toggle-btn'].forEach((id) => {
+    const node = e(id);
+    if (!node) return;
+    node.setAttribute('aria-expanded', 'true');
+  });
+  const mobileToggle = e('workspace-right-rail-toggle-btn');
+  if (mobileToggle) mobileToggle.textContent = 'Lumino';
+}
+
+function setChatPanelCollapsed(collapsed, options = {}) {
+  state.chatPanelCollapsed = false;
+  applyChatPanelState();
+  if (!options.skipPersist) persistChatPanelCollapsedPreference(false);
+  void syncActiveSurface();
+}
+
+function setHistoryDetailView(viewName) {
+  const next = String(viewName || 'preview').trim().toLowerCase() === 'map' ? 'map' : 'preview';
+  state.historyDetailView = next;
+  e('history-view-preview-btn')?.classList.toggle('active', next === 'preview');
+  e('history-view-map-btn')?.classList.toggle('active', next === 'map');
+  drawHistorySemanticMap();
+}
+
+function closeTopbarMenu() {
+  e('app-tools-menu')?.classList.add('hidden');
+  e('app-tools-btn')?.setAttribute('aria-expanded', 'false');
+}
+
+function toggleTopbarMenu() {
+  const menu = e('app-tools-menu');
+  const button = e('app-tools-btn');
+  if (!menu || !button) return;
+  const willOpen = menu.classList.contains('hidden');
+  menu.classList.toggle('hidden', !willOpen);
+  button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
 }
 
 function loadUiZoomPreference() {
@@ -866,6 +945,11 @@ async function toggleActiveArtifactMarkerSelection() {
       marker_mode_snapshot: true,
     });
     if (res && res.ok) {
+      state.references = res.references || state.references;
+      if (typeof input.setSelectionRange === 'function') {
+        input.setSelectionRange(selection.end, selection.end);
+      }
+      renderArtifactHighlightLayer();
       if (res.added) showPassiveNotification('Artifact marker added.');
       else if (res.removed) showPassiveNotification('Artifact marker removed.');
     }
@@ -884,6 +968,66 @@ function scheduleToggleActiveArtifactMarkerSelection(delayMs = 0) {
     state.artifactMarkerSelectionTimer = null;
     void toggleActiveArtifactMarkerSelection();
   }, Math.max(0, Math.round(Number(delayMs) || 0)));
+}
+
+function getActiveArtifactHighlights() {
+  if (state.activeSurface.kind !== 'artifact') return [];
+  const ref = getActiveReference();
+  const artifactId = String(state.activeSurface.artifactId || '').trim();
+  if (!ref || !artifactId) return [];
+  return (Array.isArray(ref.highlights) ? ref.highlights : [])
+    .filter((item) => item && String(item.source || '').trim().toLowerCase() === 'artifact'
+      && String(item.artifact_id || '').trim() === artifactId)
+    .map((item) => ({
+      start: Number(item.artifact_start),
+      end: Number(item.artifact_end),
+    }))
+    .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
+    .sort((a, b) => a.start - b.start);
+}
+
+function renderArtifactHighlightLayer() {
+  const pane = e('artifact-text-pane');
+  const input = e('artifact-input');
+  const layer = e('artifact-highlight-layer');
+  if (!pane || !input || !layer) return;
+  if (state.activeSurface.kind !== 'artifact') {
+    pane.classList.remove('marker-visualized');
+    pane.classList.remove('marker-selecting');
+    layer.innerHTML = '';
+    return;
+  }
+  const content = String(input.value || '');
+  const highlights = getActiveArtifactHighlights();
+  const useLayer = !!(state.markerMode || highlights.length);
+  const rawStart = Number(input.selectionStart);
+  const rawEnd = Number(input.selectionEnd);
+  const hasActiveSelection = (
+    document.activeElement === input
+    && Number.isFinite(rawStart)
+    && Number.isFinite(rawEnd)
+    && Math.abs(rawEnd - rawStart) > 0
+  );
+  pane.classList.toggle('marker-visualized', useLayer);
+  pane.classList.toggle('marker-selecting', hasActiveSelection);
+  if (!useLayer) {
+    layer.innerHTML = '';
+    return;
+  }
+  let cursor = 0;
+  let html = '';
+  highlights.forEach((entry) => {
+    const start = clamp(Math.round(entry.start), 0, content.length);
+    const end = clamp(Math.round(entry.end), start, content.length);
+    if (end <= start || start < cursor) return;
+    html += escapeHtml(content.slice(cursor, start));
+    html += `<mark>${escapeHtml(content.slice(start, end))}</mark>`;
+    cursor = end;
+  });
+  html += escapeHtml(content.slice(cursor));
+  layer.innerHTML = html || '&#8203;';
+  layer.scrollTop = input.scrollTop;
+  layer.scrollLeft = input.scrollLeft;
 }
 
 function normalizeReferenceSearchQuery(raw) {
@@ -1045,7 +1189,11 @@ async function fetchModelsForProvider(provider, options = {}) {
   }
   const suffix = res.fallback ? ' (fallback list)' : '';
   const keySuffix = keyLabel ? ` via ${keyLabel}` : '';
-  setStatusText(statusId, `Loaded ${models.length} model(s) for ${targetProvider}${keySuffix}${suffix}.`);
+  if (statusId === 'provider-status') {
+    await refreshProviderStatus({ reload: false });
+  } else {
+    setStatusText(statusId, `Loaded ${models.length} model(s) for ${targetProvider}${keySuffix}${suffix}.`);
+  }
   return models;
 }
 
@@ -1273,8 +1421,10 @@ function isUncommittedCurrentUrl(ref, url) {
 
 function setUncommittedActionCue(active) {
   const panel = e('workspace-panel');
+  const chip = e('workspace-status-chip');
   if (!panel) return;
   panel.classList.toggle('browser-has-uncommitted', !!active);
+  if (chip) chip.classList.toggle('hidden', !active);
 }
 
 async function refreshUncommittedActionCue() {
@@ -1908,7 +2058,7 @@ function renderReferences() {
     const collapsed = query ? false : !!state.referenceCollapsed[srId];
     const tabCount = Array.isArray(ref.tabs) ? ref.tabs.length : 0;
     const isCandidate = !!(ref && ref.is_public_candidate);
-    const subtitle = `${ref.relation_type || 'root'} · ${tabCount} tab(s)`;
+    const subtitleParts = [ref.relation_type || 'root', `${tabCount} tab(s)`];
     const isActive = srId === String(state.activeSrId || '');
     // A reference is a root node if it has no parent OR its parent is not in the visible map
     // (handles orphaned roots whose parent was deleted)
@@ -1924,14 +2074,33 @@ function renderReferences() {
     const isAuto = String(agentMeta.created_by || '').trim().toLowerCase() === 'lumino_b';
     const autoStatusRaw = String(agentMeta.status || '').trim().toLowerCase();
     const autoStatus = ['pending', 'active', 'failed'].includes(autoStatusRaw) ? autoStatusRaw : 'active';
+    if (isCandidate) subtitleParts.push('public candidate');
+    const subtitle = subtitleParts.join(' · ');
+    const actionButtons = `
+      ${isPinnable ? `<button data-pin="${escapeHtml(srId)}">${ref.pinned_root ? 'Unpin' : 'Pin'}</button>` : ''}
+      ${isCandidate
+        ? `
+          <button data-commit-root="${escapeHtml(srId)}">Commit Root</button>
+          <button data-commit-fork="${escapeHtml(srId)}">Commit Fork</button>
+        `
+        : `
+          <button data-fork="${escapeHtml(srId)}">Fork</button>
+          <button data-rename="${escapeHtml(srId)}">Rename</button>
+          <button data-publish-snapshot="${escapeHtml(srId)}">Publish Snapshot</button>
+          <button data-share-privately="${escapeHtml(srId)}">Share Privately</button>
+        `
+      }
+      <button class="danger" data-remove="${escapeHtml(srId)}">Remove</button>
+    `;
+    const titleText = String(ref.title || ref.intent || '').trim() || (isRoot ? 'Untitled root' : 'Untitled branch');
     const titleMarkup = isInlineRename
       ? `<input type="text" class="reference-inline-rename-input" data-action="rename-input" data-sr-id="${escapeHtml(srId)}" maxlength="120" value="${escapeHtml(state.referenceInlineRename.draft || ref.title || 'Untitled')}" />`
       : `
         <div class="reference-title">
           <button type="button" class="reference-color-dot" data-action="toggle-color-picker" data-sr-id="${escapeHtml(srId)}" data-color-tag="${escapeHtml(colorTag)}" title="Set reference color"></button>
-          <span class="reference-title-text">${escapeHtml(ref.title || 'Untitled')}</span>
-          ${isAuto ? `<span class="reference-auto-badge ${escapeHtml(autoStatus)}">AUTO</span>` : ''}
-          ${isAudible ? '<span class="reference-audible-badge">AUDIO</span>' : ''}
+          <span class="reference-title-text" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</span>
+          ${isAuto ? `<span class="reference-inline-flag ${escapeHtml(autoStatus)}">auto</span>` : ''}
+          ${isAudible ? '<span class="reference-inline-flag">audio</span>' : ''}
         </div>
         ${isColorPickerOpen
           ? `
@@ -1955,23 +2124,7 @@ function renderReferences() {
           <div class="reference-item ${isActive ? 'active' : ''} ${isSearchHit ? 'search-hit' : ''} ${colorTag ? `color-${escapeHtml(colorTag)}` : ''}" data-ref-id="${escapeHtml(srId)}">
             ${titleMarkup}
             <div class="reference-sub">${escapeHtml(subtitle)}</div>
-            <div class="reference-actions">
-              ${isPinnable ? `<button data-pin="${escapeHtml(srId)}">${ref.pinned_root ? 'Unpin' : 'Pin'}</button>` : ''}
-              ${isCandidate
-                ? `
-                  <button data-commit-root="${escapeHtml(srId)}">Commit Root</button>
-                  <button data-commit-fork="${escapeHtml(srId)}">Commit Fork</button>
-                `
-                : `
-                  <button data-fork="${escapeHtml(srId)}">Fork</button>
-                  <button data-rename="${escapeHtml(srId)}">Rename</button>
-                  <button data-publish-snapshot="${escapeHtml(srId)}">Publish Snapshot</button>
-                  <button data-share-privately="${escapeHtml(srId)}">Share Privately</button>
-                `
-              }
-              <button class="danger" data-remove="${escapeHtml(srId)}">Remove</button>
-            </div>
-            ${isCandidate ? '' : '<div class="reference-privacy-badge">Keep Private</div>'}
+            <div class="reference-actions">${actionButtons}</div>
           </div>
         </div>
         ${hasChildren ? `<div class="reference-children ${collapsed ? 'collapsed' : ''}" data-parent-id="${escapeHtml(srId)}">${renderedChildren.join('')}</div>` : ''}
@@ -3596,6 +3749,7 @@ async function showArtifactSurface(artifactId) {
     }
   }
   updateArtifactRuntimeControls(artifact);
+  renderArtifactHighlightLayer();
 
   const status = e('artifact-status');
   if (status) status.textContent = 'Saved';
@@ -4049,38 +4203,9 @@ async function syncActiveSurface() {
 }
 
 function renderContextFiles() {
-  const holder = e('context-files');
   const ref = getActiveReference();
-  if (!holder) return;
-  if (!ref) {
-    holder.innerHTML = '';
-    return;
-  }
-
-  const files = Array.isArray(ref.context_files) ? ref.context_files : [];
-  if (!files.length) {
-    holder.innerHTML = '<div class="muted">No mounted context files.</div>';
-    return;
-  }
-
-  holder.innerHTML = files.slice(-20).map((file) => `
-    <div class="context-file-item">
-      <strong>${escapeHtml(file.original_name || file.relative_path || 'file')}</strong>
-      <div class="muted small">${escapeHtml(file.summary || '')}</div>
-      <button data-preview-context="${escapeHtml(file.id)}">Preview</button>
-    </div>
-  `).join('');
-
-  holder.querySelectorAll('button[data-preview-context]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const fileId = String(button.getAttribute('data-preview-context') || '').trim();
-      await previewContextFileById(fileId);
-    });
-  });
-
-  if (state.activeSurface.kind === 'files') {
-    renderFilesPanel();
-  }
+  if (!ref) return;
+  if (state.activeSurface.kind === 'files') renderFilesPanel();
 }
 
 function getDiffQueue(srId) {
@@ -4816,6 +4941,12 @@ function setupBrowserEvents() {
       renderReferences();
     });
   }
+  if (typeof api.onMarkerUpdate === 'function') {
+    api.onMarkerUpdate((payload) => {
+      const message = String((payload && payload.message) || '').trim();
+      if (message) showPassiveNotification(message);
+    });
+  }
 }
 
 async function createRootFromCurrentPage() {
@@ -5006,6 +5137,8 @@ async function setAppView(viewName) {
   if (privateShares) privateShares.classList.toggle('hidden', state.appView !== 'private-shares');
   if (settings) settings.classList.toggle('hidden', state.appView !== 'settings');
   if (history) history.classList.toggle('hidden', state.appView !== 'history');
+  document.body.classList.remove('mobile-left-open', 'mobile-right-open');
+  closeTopbarMenu();
   updateTopbarViewButtons();
   if (state.appView === 'hyperweb' || state.appView === 'private-shares' || state.appView === 'settings') {
     await api.historyPreviewHide();
@@ -5030,7 +5163,6 @@ async function setHyperwebSurfaceTab(tab, options = {}) {
     grid.classList.toggle('view-feed', next === 'feed');
     grid.classList.toggle('view-refs', next === 'refs');
     grid.classList.toggle('view-chat', next === 'chat');
-    grid.style.gridTemplateColumns = '';
   }
   e('hyperweb-tab-feed-btn')?.classList.toggle('active', next === 'feed');
   e('hyperweb-tab-refs-btn')?.classList.toggle('active', next === 'refs');
@@ -5966,12 +6098,11 @@ function updateHistoryPreviewMeta(entry) {
 
 function renderHistoryCachedPreview(entry) {
   const placeholder = e('history-preview-placeholder');
-  if (!placeholder) return;
+  const content = e('history-preview-content');
+  if (!placeholder || !content) return;
   if (!entry) {
-    placeholder.innerHTML = `
-      <h3>History Preview</h3>
-      <p>Select a URL on the left to view cached snapshot details.</p>
-    `;
+    content.innerHTML = '';
+    content.classList.add('hidden');
     placeholder.classList.remove('hidden');
     return;
   }
@@ -5982,7 +6113,7 @@ function renderHistoryCachedPreview(entry) {
     ? escapeHtml(excerpt.slice(0, 2000))
     : 'No cached page excerpt available for this entry.';
   const tokenText = Array.isArray(entry.semantic_tokens) ? entry.semantic_tokens.slice(0, 16).join(', ') : '';
-  placeholder.innerHTML = `
+  content.innerHTML = `
     <div class="history-preview-cached">
       <h4>${title}</h4>
       <div class="history-preview-cached-url">${url}</div>
@@ -5990,7 +6121,8 @@ function renderHistoryCachedPreview(entry) {
       ${tokenText ? `<div class="muted small">${escapeHtml(tokenText)}</div>` : ''}
     </div>
   `;
-  placeholder.classList.remove('hidden');
+  content.classList.remove('hidden');
+  placeholder.classList.add('hidden');
 }
 
 async function showHistoryPreviewForEntry(entry) {
@@ -7108,10 +7240,92 @@ async function refreshProviderStatus(options = {}) {
   const configured = Array.from(configuredSet);
   const selectedProvider = getSelectedProvider();
   const selectedModel = getSelectedModel();
-  status.textContent = configured.length
-    ? `Configured: ${configured.join(', ')}${selectedModel ? ` · model ${selectedProvider}/${selectedModel}` : ''}`
-    : 'No provider keys configured yet.';
+  status.textContent = selectedModel
+    ? `${selectedProvider} · ${selectedModel}`
+    : (configured.length ? `${configured.length} provider${configured.length === 1 ? '' : 's'} configured` : 'No provider keys configured.');
   refreshAgentModeAvailability();
+}
+
+function setupChatPanelResize() {
+  const splitter = e('chat-panel-resizer');
+  const root = e('app-root');
+  if (!splitter || !root) return;
+  let dragging = false;
+
+  const onMove = (event) => {
+    if (!dragging) return;
+    const rect = root.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const width = rect.right - event.clientX;
+    state.chatPanelWidth = clamp(Math.round(width), 252, 420);
+    document.body.style.setProperty('--left-panel-width', `${state.chatPanelWidth}px`);
+    document.body.style.setProperty('--right-panel-width', `${state.chatPanelWidth}px`);
+    if (state.chatPanelCollapsed) setChatPanelCollapsed(false, { skipPersist: true });
+  };
+
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    persistChatPanelWidthPreference(state.chatPanelWidth);
+    persistChatPanelCollapsedPreference(state.chatPanelCollapsed);
+    void syncActiveSurface();
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+
+  splitter.addEventListener('mousedown', (event) => {
+    if (window.innerWidth <= 980) return;
+    event.preventDefault();
+    dragging = true;
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+
+  splitter.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const step = event.key === 'ArrowLeft' ? 20 : -20;
+    state.chatPanelWidth = clamp(Number(state.chatPanelWidth || 252) + step, 252, 420);
+    applyChatPanelState();
+    persistChatPanelWidthPreference(state.chatPanelWidth);
+    if (state.chatPanelCollapsed) setChatPanelCollapsed(false);
+  });
+}
+
+function setupWorkspaceChromeToggles() {
+  e('workspace-left-rail-toggle-btn')?.addEventListener('click', () => {
+    document.body.classList.toggle('mobile-left-open');
+    document.body.classList.remove('mobile-right-open');
+    const button = e('workspace-left-rail-toggle-btn');
+    if (button) button.setAttribute('aria-expanded', document.body.classList.contains('mobile-left-open') ? 'true' : 'false');
+  });
+
+  const toggleRight = () => {
+    if (window.innerWidth <= 980) {
+      document.body.classList.toggle('mobile-right-open');
+      document.body.classList.remove('mobile-left-open');
+      const button = e('workspace-right-rail-toggle-btn');
+      if (button) button.setAttribute('aria-expanded', document.body.classList.contains('mobile-right-open') ? 'true' : 'false');
+    }
+  };
+
+  e('workspace-right-rail-toggle-btn')?.addEventListener('click', toggleRight);
+}
+
+function setupTopbarMenu() {
+  e('app-tools-btn')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleTopbarMenu();
+  });
+
+  e('app-tools-menu')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+  });
+
+  document.addEventListener('click', () => {
+    closeTopbarMenu();
+  });
 }
 
 function setupHyperwebSplitter() {
@@ -7434,6 +7648,8 @@ function bindControls() {
         markerLongPressTriggered = true;
         try {
           const res = await api.markerClearActive();
+          state.references = (res && res.references) || state.references;
+          renderArtifactHighlightLayer();
           const message = String((res && res.message) || 'Marker clear completed.').trim();
           showPassiveNotification(message || 'Marker clear completed.');
         } catch (_) {
@@ -7504,6 +7720,7 @@ function bindControls() {
     if (isMemoryReplayActive()) return;
     if (state.suppressArtifactInput) return;
     if (state.activeSurface.kind !== 'artifact') return;
+    renderArtifactHighlightLayer();
 
     const status = e('artifact-status');
     if (status) status.textContent = 'Saving...';
@@ -7548,15 +7765,26 @@ function bindControls() {
     }, 350);
   });
   artifactInput?.addEventListener('select', () => {
-    scheduleToggleActiveArtifactMarkerSelection(0);
+    renderArtifactHighlightLayer();
+  });
+  artifactInput?.addEventListener('focus', () => {
+    renderArtifactHighlightLayer();
+  });
+  artifactInput?.addEventListener('blur', () => {
+    renderArtifactHighlightLayer();
   });
   artifactInput?.addEventListener('mouseup', () => {
+    renderArtifactHighlightLayer();
     scheduleToggleActiveArtifactMarkerSelection(0);
   });
   artifactInput?.addEventListener('keyup', (event) => {
     const key = String((event && event.key) || '').toLowerCase();
     if (key === 'shift' || key === 'control' || key === 'meta' || key === 'alt') return;
+    renderArtifactHighlightLayer();
     scheduleToggleActiveArtifactMarkerSelection(0);
+  });
+  artifactInput?.addEventListener('scroll', () => {
+    renderArtifactHighlightLayer();
   });
 
   e('artifact-zoom-in-btn')?.addEventListener('click', () => {
@@ -7719,6 +7947,7 @@ function bindControls() {
   });
 
   e('about-open-btn')?.addEventListener('click', () => {
+    closeTopbarMenu();
     showAboutModal(true);
   });
   e('about-close-btn')?.addEventListener('click', () => {
@@ -7779,6 +8008,14 @@ function bindControls() {
 
   e('history-close-btn')?.addEventListener('click', async () => {
     await setAppView('workspace');
+  });
+
+  e('history-view-preview-btn')?.addEventListener('click', () => {
+    setHistoryDetailView('preview');
+  });
+
+  e('history-view-map-btn')?.addEventListener('click', () => {
+    setHistoryDetailView('map');
   });
 
   e('shares-refresh-btn')?.addEventListener('click', async () => {
@@ -8564,6 +8801,7 @@ function bindControls() {
   });
 
   e('trustcommons-connect-btn')?.addEventListener('click', async () => {
+    closeTopbarMenu();
     const res = await api.trustCommonsConnect();
     if (!res || !res.ok) {
       window.alert((res && res.message) || 'Unable to connect Trust Commons.');
@@ -8607,6 +8845,9 @@ function bindControls() {
     drawHistorySemanticMap();
   };
   window.addEventListener('resize', () => {
+    if (window.innerWidth > 980) {
+      document.body.classList.remove('mobile-left-open', 'mobile-right-open');
+    }
     updateBounds();
     updateHistoryBounds();
     if (state.activeSurface.kind === 'artifact') {
@@ -8644,7 +8885,10 @@ async function initialize() {
   state.markerMode = loadBrowserMarkerModePreference();
   state.hyperwebSplitRatio = loadHyperwebSplitRatio();
   state.zenMode = loadZenModePreference();
+  state.chatPanelWidth = loadChatPanelWidthPreference();
+  state.chatPanelCollapsed = loadChatPanelCollapsedPreference();
   applyZenModeUi();
+  applyChatPanelState();
   const savedUiZoom = loadUiZoomPreference();
   if (
     savedUiZoom
@@ -8655,11 +8899,15 @@ async function initialize() {
   }
 
   bindControls();
+  setupTopbarMenu();
+  setupWorkspaceChromeToggles();
+  setupChatPanelResize();
   setupHyperwebSplitter();
   setupArtifactHorizontalSplitter();
   await setHyperwebSurfaceTab(state.hyperwebActiveTab || 'feed', { skipRefresh: true });
   setSharesTab(state.sharesActiveTab || 'incoming');
   applyHyperwebSplitRatio(state.hyperwebSplitRatio, { skipPersist: true });
+  setHistoryDetailView(state.historyDetailView);
   updateBrowserMarkerModeUi();
   await setBrowserMarkerMode(state.markerMode, { persist: false });
   await setupOnboardingBindings();
