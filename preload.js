@@ -273,6 +273,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeAllListeners('browser:shortcut-command');
       ipcRenderer.on('browser:shortcut-command', (_event, data) => callback(data));
     },
+    onMarkerUpdate: (callback) => {
+      ipcRenderer.removeAllListeners('browser:marker-update');
+      ipcRenderer.on('browser:marker-update', (_event, data) => callback(data));
+    },
   },
   tabs: {
     create: (url) => ipcRenderer.invoke('tabs:create', url),
