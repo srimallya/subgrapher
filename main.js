@@ -8096,6 +8096,109 @@ function resolveHyperwebChatThreadMessages(options = {}) {
   return reduced.slice(-limit);
 }
 
+function summarizeHyperwebDmConversationMessage(item = {}, localId = '') {
+  const direction = String((item && item.direction) || '').trim().toLowerCase() === 'out' ? 'out' : 'in';
+  const normalizedText = String((item && item.text) || '').replace(/\s+/g, ' ').trim();
+  const hasFile = !!(item && item.file && typeof item.file === 'object');
+  const fallbackText = hasFile
+    ? (direction === 'out' ? 'Sent a file' : 'Received a file')
+    : '';
+  return {
+    last_message_text: normalizedText || fallbackText,
+    last_message_direction: direction,
+    last_message_has_file: hasFile,
+    unread_increment: direction === 'in'
+      && localId
+      && !(item && item.read_by && typeof item.read_by === 'object' && item.read_by[localId])
+      ? 1
+      : 0,
+  };
+}
+
+function resolveHyperwebDmConversationSummaries() {
+  const state = ensureHyperwebSocialState();
+  const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
+  if (!localId) return [];
+
+  const memberDirectory = new Map();
+  listHyperwebMembers().forEach((member) => {
+    const id = String((member && member.member_id) || '').trim().toUpperCase();
+    if (!id) return;
+    memberDirectory.set(id, member);
+  });
+
+  const conversationsByPeer = new Map();
+  const messages = Array.isArray(state.chat_messages) ? state.chat_messages : [];
+  messages.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    if (String(item.mode || 'dm').trim().toLowerCase() !== 'dm') return;
+
+    const fromPeerId = String((item && item.from_peer_id) || '').trim().toUpperCase();
+    const toPeerId = String((item && item.to_peer_id) || '').trim().toUpperCase();
+    if (!fromPeerId || !toPeerId) return;
+
+    let direction = '';
+    let peerId = '';
+    if (fromPeerId === localId && toPeerId !== localId) {
+      direction = 'out';
+      peerId = toPeerId;
+    } else if (toPeerId === localId && fromPeerId !== localId) {
+      direction = 'in';
+      peerId = fromPeerId;
+    } else {
+      return;
+    }
+
+    const member = memberDirectory.get(peerId) || null;
+    const knownPeer = (state.known_peers && state.known_peers[peerId] && typeof state.known_peers[peerId] === 'object')
+      ? state.known_peers[peerId]
+      : null;
+    const ts = Number((item && item.ts) || 0);
+    const summary = summarizeHyperwebDmConversationMessage({
+      ...item,
+      direction,
+      read_by: ((state.chat_receipts || {})[String((item && item.message_id) || '').trim()] || {}).read_by || {},
+    }, localId);
+    const existing = conversationsByPeer.get(peerId);
+    if (!existing) {
+      conversationsByPeer.set(peerId, {
+        peer_id: peerId,
+        display_name: String(
+          (member && member.display_name)
+          || (knownPeer && knownPeer.alias)
+          || peerId
+        ).trim(),
+        last_message_ts: ts,
+        last_message_text: summary.last_message_text,
+        last_message_direction: summary.last_message_direction,
+        last_message_has_file: summary.last_message_has_file,
+        unread_count: summary.unread_increment,
+      });
+      return;
+    }
+
+    existing.unread_count += summary.unread_increment;
+    if (ts >= Number(existing.last_message_ts || 0)) {
+      existing.last_message_ts = ts;
+      existing.last_message_text = summary.last_message_text;
+      existing.last_message_direction = summary.last_message_direction;
+      existing.last_message_has_file = summary.last_message_has_file;
+      existing.display_name = String(
+        (member && member.display_name)
+        || (knownPeer && knownPeer.alias)
+        || existing.display_name
+        || peerId
+      ).trim();
+    }
+  });
+
+  return Array.from(conversationsByPeer.values()).sort((a, b) => {
+    const tsDiff = Number((b && b.last_message_ts) || 0) - Number((a && a.last_message_ts) || 0);
+    if (tsDiff !== 0) return tsDiff;
+    return String((a && a.display_name) || '').localeCompare(String((b && b.display_name) || ''));
+  });
+}
+
 function ensureHyperwebSocialState() {
   if (!hyperwebSocialState || typeof hyperwebSocialState !== 'object') {
     hyperwebSocialState = readHyperwebSocialState();
@@ -15833,7 +15936,7 @@ ipcMain.handle('browser:memoryList', (_event, payload) => {
   if (idx < 0) return { ok: false, message: 'Reference not found.' };
   const memory = ensureReferenceMemory(refs[idx]);
   const checkpoints = (Array.isArray(memory.checkpoints) ? memory.checkpoints : [])
-    .sort((a, b) => Number((b && b.created_at) || 0) - Number((a && a.created_at) || 0))
+    .sort((a, b) => Number((a && a.created_at) || 0) - Number((b && b.created_at) || 0))
     .map((item) => buildMemoryCheckpointMetadata(item));
   return { ok: true, enabled: !!memory.enabled, checkpoints };
 });
@@ -18293,6 +18396,15 @@ ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
     messages,
     rooms: (rooms && rooms.ok) ? rooms.rooms : [],
     members: listHyperwebMembers(),
+  };
+});
+
+ipcMain.handle('browser:hyperwebChatConversations', async () => {
+  const auth = requireTtcHyperwebAuth();
+  if (!auth.ok) return auth;
+  return {
+    ok: true,
+    conversations: resolveHyperwebDmConversationSummaries(),
   };
 });
 

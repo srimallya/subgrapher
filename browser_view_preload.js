@@ -510,6 +510,7 @@ function getShortcutCommandFromKeyEvent(event) {
 
   const hasCtrlOrMeta = !!(event.ctrlKey || event.metaKey);
   if (hasCtrlOrMeta && !event.altKey) {
+    if (!event.shiftKey && (lowerKey === 'w' || code === 'KeyW')) return 'workspace_tab_close';
     if (key === '0' || code === 'Digit0' || code === 'Numpad0') return 'web_zoom_reset';
     if (key === '+' || key === '=' || code === 'NumpadAdd') return 'web_zoom_in';
     if (key === '-' || key === '_' || code === 'NumpadSubtract') return 'web_zoom_out';

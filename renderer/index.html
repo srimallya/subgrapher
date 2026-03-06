@@ -157,10 +157,12 @@
 
       <div id="memory-rail" class="memory-rail hidden">
         <div class="memory-rail-controls">
-          <button id="memory-prev-btn" type="button">Prev</button>
-          <button id="memory-play-btn" type="button">Play</button>
-          <button id="memory-next-btn" type="button">Next</button>
-          <div id="memory-position" class="muted small">0 / 0</div>
+          <div class="memory-transport">
+            <button id="memory-prev-btn" type="button">Older</button>
+            <button id="memory-play-btn" type="button">Play</button>
+            <button id="memory-next-btn" type="button">Newer</button>
+            <div id="memory-position" class="muted small">0 / 0</div>
+          </div>
           <div class="memory-lane-toggles">
             <button id="memory-lane-all-btn" type="button" class="active">All</button>
             <button id="memory-lane-periodic-btn" type="button">Periodic</button>
@@ -169,10 +171,12 @@
         </div>
         <div class="memory-rail-right">
           <div id="memory-checkpoint-label" class="muted small">No checkpoint</div>
-          <button id="memory-diff-btn" type="button">Diff</button>
-          <button id="memory-attach-btn" type="button">Attach to Lumino</button>
-          <button id="memory-commit-btn" type="button">Commit</button>
-          <button id="memory-exit-btn" type="button">Exit</button>
+          <div class="memory-rail-actions">
+            <button id="memory-diff-btn" type="button">Diff</button>
+            <button id="memory-attach-btn" type="button">Attach to Lumino</button>
+            <button id="memory-commit-btn" type="button">Commit</button>
+            <button id="memory-exit-btn" type="button">Exit</button>
+          </div>
         </div>
       </div>
     </main>
@@ -285,12 +289,17 @@
           <select id="hyperweb-chat-room-select" class="hidden"></select>
           <button id="hyperweb-chat-room-create-btn">New Room</button>
         </div>
-        <div id="hyperweb-chat-thread" class="hyperweb-chat-thread"></div>
-        <div class="hyperweb-compose hyperweb-chat-compose">
-          <button id="hyperweb-chat-file-btn" title="Attach file">+</button>
-          <input id="hyperweb-chat-file-input" type="file" class="hidden" />
-          <textarea id="hyperweb-chat-input" placeholder="Encrypted message..."></textarea>
-          <button id="hyperweb-chat-send-btn">Send</button>
+        <div id="hyperweb-chat-layout" class="hyperweb-chat-layout is-dm">
+          <div id="hyperweb-chat-conversations" class="hyperweb-chat-conversations"></div>
+          <div class="hyperweb-chat-main">
+            <div id="hyperweb-chat-thread" class="hyperweb-chat-thread"></div>
+            <div class="hyperweb-compose hyperweb-chat-compose">
+              <button id="hyperweb-chat-file-btn" title="Attach file">+</button>
+              <input id="hyperweb-chat-file-input" type="file" class="hidden" />
+              <textarea id="hyperweb-chat-input" placeholder="Encrypted message..."></textarea>
+              <button id="hyperweb-chat-send-btn">Send</button>
+            </div>
+          </div>
         </div>
       </section>
     </div>

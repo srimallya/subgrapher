@@ -83,6 +83,7 @@ const state = {
   hyperwebChatPeerId: '',
   hyperwebChatRoomId: '',
   hyperwebChatMessages: [],
+  hyperwebChatConversations: [],
   hyperwebChatRooms: [],
   hyperwebChatMembers: [],
   hyperwebChatPendingFile: null,
@@ -746,6 +747,7 @@ function dedupeMemoryReplayCheckpoints(list = []) {
 function applyMemoryReplayFilter() {
   const lane = String((state.memoryReplay && state.memoryReplay.lane) || 'all').trim().toLowerCase();
   const list = Array.isArray(state.memoryReplay && state.memoryReplay.checkpoints) ? state.memoryReplay.checkpoints : [];
+  const activeCheckpointId = String((state.memoryReplay && state.memoryReplay.activeCheckpointId) || '').trim();
   let filtered = list;
   if (lane === 'periodic') filtered = list.filter((item) => String((item && item.kind) || '').toLowerCase() === 'periodic');
   if (lane === 'semantic') filtered = list.filter((item) => String((item && item.kind) || '').toLowerCase() === 'semantic');
@@ -761,8 +763,13 @@ function applyMemoryReplayFilter() {
     state.memoryReplay.virtualReference = null;
     return;
   }
-  if (state.memoryReplay.index < 0 || state.memoryReplay.index >= filtered.length) {
-    state.memoryReplay.index = 0;
+  const checkpointIndex = activeCheckpointId
+    ? filtered.findIndex((item) => String((item && item.id) || '') === activeCheckpointId)
+    : -1;
+  if (checkpointIndex >= 0) {
+    state.memoryReplay.index = checkpointIndex;
+  } else if (state.memoryReplay.index < 0 || state.memoryReplay.index >= filtered.length) {
+    state.memoryReplay.index = filtered.length - 1;
   }
   const cp = filtered[state.memoryReplay.index] || null;
   state.memoryReplay.activeCheckpointId = cp ? String(cp.id || '') : '';
@@ -805,7 +812,7 @@ function renderMemoryRail() {
   if (nextBtn) nextBtn.disabled = !active || atEnd;
   if (playBtn) {
     playBtn.textContent = state.memoryReplay.playing ? 'Pause' : 'Play';
-    playBtn.disabled = !active || filtered.length <= 1;
+    playBtn.disabled = !active || filtered.length <= 1 || (!state.memoryReplay.playing && atEnd);
   }
 }
 
@@ -863,14 +870,14 @@ async function enterMemoryReplay() {
   state.references = enableRes.references || state.references;
   state.memoryReplay.active = true;
   state.memoryReplay.lane = 'all';
-  state.memoryReplay.index = 0;
+  state.memoryReplay.index = -1;
   state.memoryReplay.activeCheckpointId = '';
   state.memoryReplay.virtualReference = null;
   await refreshMemoryReplayList();
   renderMemoryRail();
   setChatBusy(false);
   if (state.memoryReplay.filtered.length > 0) {
-    await loadMemoryCheckpointByIndex(0);
+    await loadMemoryCheckpointByIndex(state.memoryReplay.filtered.length - 1);
   } else {
     showPassiveNotification('No memory checkpoints available yet for this reference.');
   }
@@ -3299,6 +3306,63 @@ async function activateWorkspaceTransportItem(item) {
   return false;
 }
 
+async function closeActiveWorkspaceTab() {
+  if (!state.activeSrId) return false;
+  if (isMemoryReplayActive()) {
+    showPassiveNotification('Memory replay is read-only.');
+    return true;
+  }
+
+  const refBeforeClose = getActiveReference();
+  if (!refBeforeClose) return false;
+
+  if (state.activeSurface.kind === 'artifact') {
+    return removeActiveArtifactFromCommand();
+  }
+
+  if (state.activeSurface.kind === 'files') {
+    const tabId = String(state.activeSurface.filesTabId || '').trim();
+    if (!tabId) return false;
+    const res = await api.srRemoveTab(state.activeSrId, tabId);
+    if (!res || !res.ok) return false;
+    state.references = res.references || state.references;
+    state.activeSurface = makeActiveSurface('web');
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    void noteReferenceRankingInteraction('remove_tab', { srId: state.activeSrId });
+    return true;
+  }
+
+  if (state.activeSurface.kind === 'skills') {
+    const tabId = String(state.activeSurface.skillsTabId || '').trim();
+    if (!tabId) return false;
+    const res = await api.srRemoveTab(state.activeSrId, tabId);
+    if (!res || !res.ok) return false;
+    state.references = res.references || state.references;
+    state.activeSurface = makeActiveSurface('web');
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    void noteReferenceRankingInteraction('remove_tab', { srId: state.activeSrId });
+    return true;
+  }
+
+  const activeWebTab = getActiveWebTab(refBeforeClose);
+  const tabId = String((state.activeSurface.tabId || (activeWebTab && activeWebTab.id) || '')).trim();
+  if (!tabId) return false;
+  const res = await api.srRemoveTab(state.activeSrId, tabId);
+  if (!res || !res.ok) return false;
+  await detachWorkspaceWebTabMapping(state.activeSrId, tabId);
+  state.references = res.references || state.references;
+  state.activeSurface = makeActiveSurface('web');
+  rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+  renderWorkspaceTabs();
+  await syncActiveSurface();
+  void noteReferenceRankingInteraction('remove_tab', { srId: state.activeSrId });
+  return true;
+}
+
 async function stepReferenceTransport(delta) {
   const order = getReferenceTransportOrder();
   if (!order.length) return false;
@@ -3350,6 +3414,7 @@ function parseShortcutCommandFromKeyboardEvent(event) {
       if (key === 'ArrowDown') return 'reference_next';
       if (key === 'ArrowLeft') return 'workspace_tab_prev';
       if (key === 'ArrowRight') return 'workspace_tab_next';
+      if (lowerKey === 'w' || code === 'KeyW') return 'workspace_tab_close';
     }
     if (key === '0' || code === 'Digit0' || code === 'Numpad0') return 'web_zoom_reset';
     if (key === '+' || key === '=' || code === 'NumpadAdd') return 'web_zoom_in';
@@ -3396,6 +3461,11 @@ async function executeShortcutCommand(command) {
 
   if (cmd === 'workspace_tab_next') {
     await stepWorkspaceTabTransport(1);
+    return;
+  }
+
+  if (cmd === 'workspace_tab_close') {
+    await closeActiveWorkspaceTab();
     return;
   }
 
@@ -5264,7 +5334,7 @@ function setupBrowserEvents() {
   if (typeof api.onHyperwebChat === 'function') {
     api.onHyperwebChat(() => {
       if (state.appView === 'hyperweb' && state.hyperwebActiveTab === 'chat') {
-        refreshHyperwebChatHistory().catch(() => {});
+        refreshHyperwebChatData().catch(() => {});
       }
     });
   }
@@ -5921,22 +5991,86 @@ function hyperwebChatMemberLabel(member) {
   return `${name}${online ? ' (online)' : ''}`;
 }
 
+function getHyperwebSelectableDmPeers() {
+  const peersById = new Map();
+  const members = Array.isArray(state.hyperwebChatMembers) ? state.hyperwebChatMembers : [];
+  members.forEach((member) => {
+    const id = String((member && member.member_id) || '').trim();
+    if (!id || member.is_self || id.toUpperCase().indexOf('TTC_USER:') === 0) return;
+    peersById.set(id, member);
+  });
+  const conversations = Array.isArray(state.hyperwebChatConversations) ? state.hyperwebChatConversations : [];
+  conversations.forEach((conversation) => {
+    const id = String((conversation && conversation.peer_id) || '').trim();
+    if (!id || peersById.has(id)) return;
+    peersById.set(id, {
+      member_id: id,
+      display_name: String((conversation && conversation.display_name) || id),
+      is_self: false,
+      is_online: false,
+    });
+  });
+  return Array.from(peersById.values()).sort((a, b) => {
+    return String((a && a.display_name) || '').localeCompare(String((b && b.display_name) || ''));
+  });
+}
+
+function ensureHyperwebDmSelection() {
+  if (state.hyperwebChatMode !== 'dm') return;
+  if (String(state.hyperwebChatPeerId || '').trim()) return;
+  const conversations = Array.isArray(state.hyperwebChatConversations) ? state.hyperwebChatConversations : [];
+  const mostRecent = conversations[0] || null;
+  if (mostRecent && mostRecent.peer_id) {
+    state.hyperwebChatPeerId = String(mostRecent.peer_id || '').trim();
+  }
+}
+
+function resolveHyperwebPeerDisplayName(peerId = '') {
+  const target = String(peerId || '').trim();
+  if (!target) return 'peer';
+  const member = (Array.isArray(state.hyperwebChatMembers) ? state.hyperwebChatMembers : []).find(
+    (item) => String((item && item.member_id) || '').trim() === target,
+  );
+  if (member && member.display_name) return String(member.display_name || '').trim();
+  const conversation = (Array.isArray(state.hyperwebChatConversations) ? state.hyperwebChatConversations : []).find(
+    (item) => String((item && item.peer_id) || '').trim() === target,
+  );
+  if (conversation && conversation.display_name) return String(conversation.display_name || '').trim();
+  return target;
+}
+
+function truncateHyperwebConversationPreview(text = '', maxLength = 80) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function renderHyperwebChatLayout() {
+  const layout = e('hyperweb-chat-layout');
+  if (!layout) return;
+  const isDm = state.hyperwebChatMode === 'dm';
+  layout.classList.toggle('is-dm', isDm);
+  layout.classList.toggle('is-room', !isDm);
+}
+
 function renderHyperwebChatSelectors() {
   const peerSelect = e('hyperweb-chat-peer-select');
   const roomSelect = e('hyperweb-chat-room-select');
   const modeSelect = e('hyperweb-chat-mode-select');
+  renderHyperwebChatLayout();
   if (modeSelect) modeSelect.value = state.hyperwebChatMode === 'room' ? 'room' : 'dm';
-  const members = Array.isArray(state.hyperwebChatMembers) ? state.hyperwebChatMembers : [];
-  const peers = members.filter((member) => !member.is_self && String(member.member_id || '').trim().toUpperCase().indexOf('TTC_USER:') !== 0);
+  const peers = getHyperwebSelectableDmPeers();
   if (peerSelect) {
-    peerSelect.innerHTML = peers.length === 0
-      ? '<option value="">No peers</option>'
-      : peers.map((peer) => `<option value="${escapeHtml(String(peer.member_id || ''))}">${escapeHtml(hyperwebChatMemberLabel(peer))}</option>`).join('');
+    const options = ['<option value="">Choose a peer</option>'];
+    options.push(...peers.map((peer) => {
+      return `<option value="${escapeHtml(String(peer.member_id || ''))}">${escapeHtml(hyperwebChatMemberLabel(peer))}</option>`;
+    }));
+    peerSelect.innerHTML = options.join('');
     if (state.hyperwebChatPeerId && peers.some((peer) => String(peer.member_id || '') === state.hyperwebChatPeerId)) {
       peerSelect.value = state.hyperwebChatPeerId;
-    } else if (peers[0]) {
-      state.hyperwebChatPeerId = String(peers[0].member_id || '');
-      peerSelect.value = state.hyperwebChatPeerId;
+    } else {
+      peerSelect.value = '';
     }
   }
   const rooms = Array.isArray(state.hyperwebChatRooms) ? state.hyperwebChatRooms : [];
@@ -5956,9 +6090,63 @@ function renderHyperwebChatSelectors() {
   roomSelect?.classList.toggle('hidden', !isRoom);
 }
 
+function renderHyperwebDmConversationList() {
+  const holder = e('hyperweb-chat-conversations');
+  if (!holder) return;
+  if (state.hyperwebChatMode !== 'dm') {
+    holder.innerHTML = '';
+    return;
+  }
+
+  const conversations = Array.isArray(state.hyperwebChatConversations) ? state.hyperwebChatConversations : [];
+  if (conversations.length === 0) {
+    holder.innerHTML = '<div class="hyperweb-chat-conversation-empty muted small">No previous conversations yet.</div>';
+    return;
+  }
+
+  holder.innerHTML = conversations.map((conversation) => {
+    const peerId = String((conversation && conversation.peer_id) || '').trim();
+    const displayName = escapeHtml(String((conversation && conversation.display_name) || peerId || 'Peer'));
+    const isActive = peerId === String(state.hyperwebChatPeerId || '').trim();
+    const preview = truncateHyperwebConversationPreview(String((conversation && conversation.last_message_text) || ''));
+    const unreadCount = Math.max(0, Number((conversation && conversation.unread_count) || 0));
+    const timeLabel = Number((conversation && conversation.last_message_ts) || 0) > 0
+      ? escapeHtml(formatAgo(conversation.last_message_ts))
+      : '';
+    return `
+      <button class="hyperweb-chat-conversation-btn${isActive ? ' active' : ''}" type="button" data-hyperweb-peer-id="${escapeHtml(peerId)}">
+        <div class="hyperweb-chat-conversation-head">
+          <span class="hyperweb-chat-conversation-name">${displayName}</span>
+          <span class="hyperweb-chat-conversation-time">${timeLabel}</span>
+        </div>
+        <div class="hyperweb-chat-conversation-preview">${escapeHtml(preview || 'No messages yet.')}</div>
+        <div class="hyperweb-chat-conversation-foot">
+          <span></span>
+          ${unreadCount > 0 ? `<span class="hyperweb-chat-conversation-unread">${escapeHtml(String(unreadCount))}</span>` : ''}
+        </div>
+      </button>
+    `;
+  }).join('');
+
+  holder.querySelectorAll('button[data-hyperweb-peer-id]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const peerId = String(button.getAttribute('data-hyperweb-peer-id') || '').trim();
+      if (!peerId || peerId === String(state.hyperwebChatPeerId || '').trim()) return;
+      state.hyperwebChatPeerId = peerId;
+      renderHyperwebChatSelectors();
+      renderHyperwebDmConversationList();
+      await refreshHyperwebChatHistory();
+    });
+  });
+}
+
 function renderHyperwebChatThread() {
   const holder = e('hyperweb-chat-thread');
   if (!holder) return;
+  if (state.hyperwebChatMode === 'dm' && !String(state.hyperwebChatPeerId || '').trim()) {
+    holder.innerHTML = '<div class="muted small">Choose a peer to continue a chat.</div>';
+    return;
+  }
   const messages = Array.isArray(state.hyperwebChatMessages) ? state.hyperwebChatMessages : [];
   if (messages.length === 0) {
     holder.innerHTML = '<div class="muted small">No messages yet.</div>';
@@ -5966,8 +6154,8 @@ function renderHyperwebChatThread() {
   }
   holder.innerHTML = messages.map((item) => {
     const outgoing = String((item && item.direction) || '').trim().toLowerCase() === 'out';
-    const from = escapeHtml(String((item && item.from_peer_id) || ''));
-    const to = escapeHtml(String((item && item.to_peer_id) || ''));
+    const from = escapeHtml(resolveHyperwebPeerDisplayName(String((item && item.from_peer_id) || '')));
+    const to = escapeHtml(resolveHyperwebPeerDisplayName(String((item && item.to_peer_id) || '')));
     const text = escapeHtml(String((item && item.text) || ''));
     const file = item && item.file ? item.file : null;
     const receipt = item && item.read_by && Object.keys(item.read_by || {}).length > 0
@@ -5985,6 +6173,21 @@ function renderHyperwebChatThread() {
     `;
   }).join('');
   holder.scrollTop = holder.scrollHeight;
+}
+
+async function refreshHyperwebChatConversations() {
+  if (!api.hyperwebChatConversations) return;
+  const res = await api.hyperwebChatConversations();
+  if (!res || !res.ok) {
+    state.hyperwebChatConversations = [];
+    renderHyperwebChatSelectors();
+    renderHyperwebDmConversationList();
+    return;
+  }
+  state.hyperwebChatConversations = Array.isArray(res.conversations) ? res.conversations : [];
+  ensureHyperwebDmSelection();
+  renderHyperwebChatSelectors();
+  renderHyperwebDmConversationList();
 }
 
 async function refreshHyperwebChatHistory() {
@@ -6006,6 +6209,7 @@ async function refreshHyperwebChatHistory() {
   state.hyperwebChatRooms = Array.isArray(res.rooms) ? res.rooms : state.hyperwebChatRooms;
   state.hyperwebChatMembers = Array.isArray(res.members) ? res.members : state.hyperwebChatMembers;
   renderHyperwebChatSelectors();
+  renderHyperwebDmConversationList();
   renderHyperwebChatThread();
   setStatusText('hyperweb-chat-status', `Messages: ${state.hyperwebChatMessages.length}`);
   if (api.hyperwebChatMarkRead && state.hyperwebChatMessages.length > 0) {
@@ -6014,24 +6218,33 @@ async function refreshHyperwebChatHistory() {
       .map((item) => String((item && item.message_id) || '').trim())
       .filter(Boolean);
     if (unread.length > 0) {
-      void api.hyperwebChatMarkRead({
+      const markReadRes = await api.hyperwebChatMarkRead({
         peer_id: state.hyperwebChatMode === 'dm' ? state.hyperwebChatPeerId : '',
         room_id: state.hyperwebChatMode === 'room' ? state.hyperwebChatRoomId : '',
         message_ids: unread,
       });
+      if (markReadRes && markReadRes.ok && state.hyperwebChatMode === 'dm') {
+        await refreshHyperwebChatConversations();
+      }
     }
   }
 }
 
 async function refreshHyperwebChatData() {
   if (!api.hyperwebMembersList) return;
-  const [membersRes, roomsRes] = await Promise.all([
+  const [membersRes, roomsRes, conversationsRes] = await Promise.all([
     api.hyperwebMembersList(),
     api.hyperwebChatRoomsList ? api.hyperwebChatRoomsList() : Promise.resolve({ ok: true, rooms: [] }),
+    api.hyperwebChatConversations ? api.hyperwebChatConversations() : Promise.resolve({ ok: true, conversations: [] }),
   ]);
   state.hyperwebChatMembers = (membersRes && membersRes.ok && Array.isArray(membersRes.members)) ? membersRes.members : [];
   state.hyperwebChatRooms = (roomsRes && roomsRes.ok && Array.isArray(roomsRes.rooms)) ? roomsRes.rooms : [];
+  state.hyperwebChatConversations = (conversationsRes && conversationsRes.ok && Array.isArray(conversationsRes.conversations))
+    ? conversationsRes.conversations
+    : [];
+  ensureHyperwebDmSelection();
   renderHyperwebChatSelectors();
+  renderHyperwebDmConversationList();
   await refreshHyperwebChatHistory();
 }
 
@@ -9038,11 +9251,11 @@ function bindControls() {
   e('hyperweb-chat-mode-select')?.addEventListener('change', async (event) => {
     const mode = String(event.target && event.target.value ? event.target.value : 'dm').trim().toLowerCase();
     state.hyperwebChatMode = mode === 'room' ? 'room' : 'dm';
-    renderHyperwebChatSelectors();
-    await refreshHyperwebChatHistory();
+    await refreshHyperwebChatData();
   });
   e('hyperweb-chat-peer-select')?.addEventListener('change', async (event) => {
     state.hyperwebChatPeerId = String(event.target && event.target.value ? event.target.value : '').trim();
+    renderHyperwebDmConversationList();
     await refreshHyperwebChatHistory();
   });
   e('hyperweb-chat-room-select')?.addEventListener('change', async (event) => {
@@ -9129,7 +9342,7 @@ function bindControls() {
     if (input) input.value = '';
     state.hyperwebChatPendingFile = null;
     if (fileInput) fileInput.value = '';
-    await refreshHyperwebChatHistory();
+    await refreshHyperwebChatData();
   });
   e('hyperweb-chat-input')?.addEventListener('keydown', async (event) => {
     if (event.key !== 'Enter' || event.shiftKey) return;
