@@ -6528,6 +6528,58 @@ function renderSettingsRagStatus() {
   node.textContent = `source=${source} · ready=${Number(counts.ready || 0)}, missing=${Number(counts.missing || 0)}, empty=${Number(counts.empty || 0)}, error=${Number(counts.error || 0)}${runtimeText}${latestText}`;
 }
 
+function isConfiguredSettingsValue(key = '', value, defaults = {}) {
+  if (!key) return false;
+  const baseline = defaults[key];
+  if (Array.isArray(value) || Array.isArray(baseline)) {
+    return JSON.stringify(Array.isArray(value) ? value : []) !== JSON.stringify(Array.isArray(baseline) ? baseline : []);
+  }
+  return value !== baseline;
+}
+
+function renderSettingsConfiguredState() {
+  const defaults = normalizeSettingsDraft({});
+  const configuredSections = new Set();
+  getSettingsFormElements().forEach((node) => {
+    const key = String(node.getAttribute('data-setting') || '').trim();
+    const field = node.closest('.settings-field');
+    const configured = isConfiguredSettingsValue(key, (state.settingsDraft || {})[key], defaults);
+    if (field) field.classList.toggle('settings-configured', configured);
+    node.classList.toggle('settings-configured-control', configured);
+    const section = node.closest('.settings-accordion');
+    if (configured && section) configuredSections.add(section);
+  });
+
+  const statusConfiguredSelectors = [
+    ['#settings-lmstudio-token-status', !!state.lmstudioTokenConfigured],
+    ['#settings-orchestrator-web-key-status', !!state.orchestratorWebKeyConfigured],
+    ['#settings-telegram-token-status', !!(state.telegramRuntimeStatus && state.telegramRuntimeStatus.token_configured)],
+  ];
+  statusConfiguredSelectors.forEach(([selector, configured]) => {
+    const node = document.querySelector(selector);
+    const field = node ? node.closest('.settings-field') : null;
+    if (field) field.classList.toggle('settings-configured', configured);
+    if (configured && field) {
+      const section = field.closest('.settings-accordion');
+      if (section) configuredSections.add(section);
+    }
+  });
+
+  const providerKeysSection = e('settings-provider-keys');
+  const providerEntries = Array.isArray(state.providerKeysState && state.providerKeysState.providers)
+    ? state.providerKeysState.providers
+    : [];
+  const hasConfiguredProviderKeys = providerEntries.some((entry) => entry && (entry.configured || (Array.isArray(entry.keys) && entry.keys.length > 0)));
+  if (providerKeysSection) {
+    providerKeysSection.classList.toggle('settings-section-configured', hasConfiguredProviderKeys);
+    if (hasConfiguredProviderKeys) configuredSections.add(providerKeysSection);
+  }
+
+  document.querySelectorAll('#settings-page .settings-accordion').forEach((section) => {
+    section.classList.toggle('settings-section-configured', configuredSections.has(section));
+  });
+}
+
 function normalizeSettingsDraft(raw = {}) {
   const src = (raw && typeof raw === 'object') ? raw : {};
   const telegramAllowedChatIds = parseCommaSeparatedList(src.telegram_allowed_chat_ids);
@@ -6750,6 +6802,7 @@ function renderSettingsForm() {
   renderSettingsAbstractionStatus();
   renderSettingsRagStatus();
   renderSettingsStatusLine();
+  renderSettingsConfiguredState();
 }
 
 function renderSettingsDiagnostics() {
@@ -6776,6 +6829,7 @@ function renderTelegramSettingsStatus() {
   const running = !!runtime.running;
   const activeUsers = Math.max(0, Number(status.active_user_count || 0));
   node.textContent = `enabled=${enabled ? 'yes' : 'no'}, token=${configured ? 'configured' : 'missing'}, running=${running ? 'yes' : 'no'}, users=${activeUsers}`;
+  renderSettingsConfiguredState();
 }
 
 function renderOrchestratorUsersList() {
@@ -6820,6 +6874,7 @@ function renderLmstudioTokenStatus() {
     return;
   }
   node.textContent = state.lmstudioTokenConfigured ? 'Configured' : 'Missing';
+  renderSettingsConfiguredState();
 }
 
 function renderOrchestratorWebKeyStatus() {
@@ -6830,6 +6885,7 @@ function renderOrchestratorWebKeyStatus() {
     return;
   }
   node.textContent = state.orchestratorWebKeyConfigured ? 'Configured' : 'Missing';
+  renderSettingsConfiguredState();
 }
 
 async function refreshTelegramSettingsStatus() {
@@ -6938,9 +6994,30 @@ async function loadSettingsData() {
   }
 }
 
+function resetSettingsAccordion(openSection = '') {
+  const sections = Array.from(document.querySelectorAll('#settings-page .settings-accordion'));
+  sections.forEach((section) => {
+    const key = String(section.getAttribute('data-settings-section') || '').trim();
+    section.open = !!(openSection && key === openSection);
+  });
+}
+
+function setupSettingsAccordion() {
+  const sections = Array.from(document.querySelectorAll('#settings-page .settings-accordion'));
+  sections.forEach((section) => {
+    section.addEventListener('toggle', () => {
+      if (!section.open) return;
+      sections.forEach((other) => {
+        if (other !== section) other.open = false;
+      });
+    });
+  });
+}
+
 async function openSettingsPage() {
   await setAppView('settings');
   await loadSettingsData();
+  resetSettingsAccordion('');
 }
 
 function applySettingsToTopbar(settings) {
@@ -7084,6 +7161,7 @@ function renderSettingsProviderKeys() {
       </article>
     `;
   }).join('');
+  renderSettingsConfiguredState();
 
   holder.querySelectorAll('button[data-provider-key-add]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -8930,6 +9008,7 @@ async function initialize() {
   }
 
   bindControls();
+  setupSettingsAccordion();
   setupTopbarMenu();
   setupWorkspaceChromeToggles();
   setupChatPanelResize();

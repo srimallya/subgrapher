@@ -338,9 +338,10 @@
     </div>
 
     <div class="settings-body">
-      <section class="settings-section">
-        <h3>General</h3>
-        <div class="settings-grid">
+      <details class="settings-section settings-accordion" data-settings-section="general">
+        <summary>General</summary>
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-3">
           <label class="settings-field">Default Search Engine
             <select id="settings-default-search-engine" data-setting="default_search_engine">
               <option value="ddg">DuckDuckGo</option>
@@ -348,35 +349,45 @@
               <option value="bing">Bing</option>
             </select>
           </label>
-          <label class="settings-field settings-toggle">
-            <input id="settings-history-enabled" data-setting="history_enabled" type="checkbox" />
-            <span>Enable Private URL History</span>
+          <label class="settings-field settings-boolean-field">
+            <span>Private URL History</span>
+            <span class="settings-toggle-card">
+              <input id="settings-history-enabled" data-setting="history_enabled" type="checkbox" />
+              <span>Enabled</span>
+            </span>
           </label>
           <label class="settings-field">History Max Entries
             <input id="settings-history-max" data-setting="history_max_entries" type="number" min="500" max="10000" />
           </label>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>Multi-Device Sync</h3>
+      <details class="settings-section settings-accordion" data-settings-section="sync">
+        <summary>Multi-Device Sync</summary>
+        <div class="settings-section-content">
         <p class="muted small">Optional automatic reference sync across your devices. Requires Trust Commons identity.</p>
-        <div class="settings-grid">
-          <label class="settings-field settings-toggle">
-            <input id="settings-trustcommons-sync-enabled" data-setting="trustcommons_sync_enabled" type="checkbox" />
-            <span>Enable Multi-Device Auto Sync</span>
+        <div class="settings-grid settings-grid-2">
+          <label class="settings-field settings-boolean-field">
+            <span>Multi-Device Auto Sync</span>
+            <span class="settings-toggle-card">
+              <input id="settings-trustcommons-sync-enabled" data-setting="trustcommons_sync_enabled" type="checkbox" />
+              <span>Enabled</span>
+            </span>
           </label>
           <div class="settings-field">
             <span>Eligibility</span>
             <div id="settings-sync-eligibility" class="muted small">Checking Trust Commons identity...</div>
           </div>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>Data Protection</h3>
+      <details class="settings-section settings-accordion" data-settings-section="protection">
+        <summary>Data Protection</summary>
+        <div class="settings-section-content">
         <p class="muted small">Reference and metadata stores are encrypted at rest. Locking requires system authentication to unlock.</p>
-        <div class="settings-grid">
+        <div class="settings-grid settings-grid-1">
           <div class="settings-field">
             <span>Status</span>
             <div id="settings-appdata-lock-status" class="muted small">Checking...</div>
@@ -388,20 +399,24 @@
             </div>
           </div>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>Browser Import</h3>
+      <details class="settings-section settings-accordion" data-settings-section="import">
+        <summary>Browser Import</summary>
+        <div class="settings-section-content">
         <p class="muted small">Import tabs from your existing browser into a new reference workspace.</p>
         <div class="settings-inline-actions">
           <button id="settings-import-chrome-btn">Import from Chrome</button>
           <button id="settings-import-safari-btn">Import from Safari</button>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>AI Provider Defaults</h3>
-        <div class="settings-grid">
+      <details class="settings-section settings-accordion" data-settings-section="provider-defaults">
+        <summary>AI Provider Defaults</summary>
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-2">
           <label class="settings-field">Provider
             <select id="settings-lumino-provider" data-setting="lumino_last_provider">
               <option value="openai">OpenAI</option>
@@ -415,11 +430,13 @@
             <input id="settings-lumino-model" data-setting="lumino_last_model" type="text" placeholder="e.g. gpt-4.1-mini" />
           </label>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>LM Studio</h3>
-        <div class="settings-grid">
+      <details class="settings-section settings-accordion" data-settings-section="lmstudio">
+        <summary>LM Studio</summary>
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-3">
           <label class="settings-field">Base URL
             <input id="settings-lmstudio-base-url" data-setting="lmstudio_base_url" type="text" placeholder="http://127.0.0.1:1234" />
           </label>
@@ -433,7 +450,7 @@
             </select>
           </label>
         </div>
-        <div class="settings-grid">
+        <div class="settings-grid settings-grid-2 settings-grid-status-2x2">
           <label class="settings-field">LM Studio Token (optional)
             <input id="settings-lmstudio-token-input" type="password" placeholder="Optional token for local server" />
           </label>
@@ -457,23 +474,33 @@
             </div>
           </div>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>Abstraction</h3>
+      <details class="settings-section settings-accordion" data-settings-section="abstraction">
+        <summary>Abstraction</summary>
+        <div class="settings-section-content">
         <p class="muted small">Build a redacted abstraction copy of local files for remote/API model use.</p>
-        <div class="settings-grid">
-          <label class="settings-field settings-toggle">
-            <input id="settings-abstraction-enabled" data-setting="abstraction_enabled" type="checkbox" />
-            <span>Enable local-file abstraction routing</span>
+        <div class="settings-grid settings-grid-3">
+          <label class="settings-field settings-boolean-field">
+            <span>Local-File Abstraction Routing</span>
+            <span class="settings-toggle-card">
+              <input id="settings-abstraction-enabled" data-setting="abstraction_enabled" type="checkbox" />
+              <span>Enabled</span>
+            </span>
           </label>
-          <label class="settings-field settings-toggle">
-            <input id="settings-abstraction-strict-redaction" data-setting="abstraction_strict_redaction" type="checkbox" />
-            <span>Strict redaction (emails, keys, paths, URLs, tokens)</span>
+          <label class="settings-field settings-boolean-field">
+            <span>Strict Redaction</span>
+            <span class="settings-toggle-card">
+              <input id="settings-abstraction-strict-redaction" data-setting="abstraction_strict_redaction" type="checkbox" />
+              <span>Emails, keys, paths, URLs, tokens</span>
+            </span>
           </label>
           <label class="settings-field">Abstraction Model (LM Studio)
             <select id="settings-abstraction-model" data-setting="abstraction_model"></select>
           </label>
+        </div>
+        <div class="settings-grid settings-grid-1 settings-grid-actions">
           <div class="settings-field">
             <span>Abstraction Actions</span>
             <div class="settings-inline-actions">
@@ -483,12 +510,14 @@
             <div id="settings-abstraction-status" class="muted small">Unknown</div>
           </div>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>Image Analysis</h3>
+      <details class="settings-section settings-accordion" data-settings-section="image-analysis">
+        <summary>Image Analysis</summary>
+        <div class="settings-section-content">
         <p class="muted small">Configure LM Studio VLM for detailed image-to-text analysis in Lumino tools.</p>
-        <div class="settings-grid">
+        <div class="settings-grid settings-grid-2">
           <label class="settings-field">Image Analysis Model (LM Studio)
             <select id="settings-image-analysis-model" data-setting="image_analysis_model"></select>
           </label>
@@ -498,19 +527,26 @@
               <button id="settings-image-analysis-fetch-models-btn">Fetch Models</button>
             </div>
           </div>
+        </div>
+        <div class="settings-grid settings-grid-1">
           <label class="settings-field settings-field-wide">Default Image Prompt
             <textarea id="settings-image-analysis-prompt" data-setting="image_analysis_prompt" rows="4" placeholder="Describe the image in details and write the context."></textarea>
           </label>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>Local RAG</h3>
+      <details class="settings-section settings-accordion" data-settings-section="rag">
+        <summary>Local RAG</summary>
+        <div class="settings-section-content">
         <p class="muted small">Persistent local evidence index with selectable embedding source (LM Studio or bundled inbuilt runtime).</p>
-        <div class="settings-grid">
-          <label class="settings-field settings-toggle">
-            <input id="settings-rag-enabled" data-setting="rag_enabled" type="checkbox" />
-            <span>Enable persistent local RAG index</span>
+        <div class="settings-grid settings-grid-3">
+          <label class="settings-field settings-boolean-field">
+            <span>Persistent Local RAG Index</span>
+            <span class="settings-toggle-card">
+              <input id="settings-rag-enabled" data-setting="rag_enabled" type="checkbox" />
+              <span>Enabled</span>
+            </span>
           </label>
           <label class="settings-field">Embedding Source
             <select id="settings-rag-embedding-source" data-setting="rag_embedding_source">
@@ -521,6 +557,8 @@
           <label class="settings-field">Embedding Model (LM Studio)
             <select id="settings-rag-embedding-model" data-setting="rag_embedding_model"></select>
           </label>
+        </div>
+        <div class="settings-grid settings-grid-2 settings-grid-rag-footer">
           <label class="settings-field">Top-K
             <input id="settings-rag-top-k" data-setting="rag_top_k" type="number" min="1" max="24" />
           </label>
@@ -533,20 +571,25 @@
             <div id="settings-rag-status" class="muted small">Unknown</div>
           </div>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section">
-        <h3>Telegram Bot</h3>
-        <div class="settings-grid">
-          <label class="settings-field settings-toggle">
-            <input id="settings-telegram-enabled" data-setting="telegram_enabled" type="checkbox" />
-            <span>Enable Telegram Orchestrator (Path B)</span>
+      <details class="settings-section settings-accordion" data-settings-section="telegram">
+        <summary>Telegram Bot</summary>
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-2">
+          <label class="settings-field settings-boolean-field">
+            <span>Telegram Orchestrator (Path B)</span>
+            <span class="settings-toggle-card">
+              <input id="settings-telegram-enabled" data-setting="telegram_enabled" type="checkbox" />
+              <span>Enabled</span>
+            </span>
           </label>
           <label class="settings-field">Polling Interval (sec)
             <input id="settings-telegram-poll-interval" data-setting="telegram_poll_interval_sec" type="number" min="1" max="30" />
           </label>
         </div>
-        <div class="settings-grid">
+        <div class="settings-grid settings-grid-3 settings-grid-telegram-main">
           <label class="settings-field">Bot Token
             <input id="settings-telegram-token-input" type="password" placeholder="123456:ABC..." />
           </label>
@@ -563,32 +606,39 @@
             </div>
           </div>
         </div>
-        <div class="settings-grid">
+        <div class="settings-grid settings-grid-1">
           <div class="settings-field settings-field-wide">
             <span>Active Telegram Users</span>
             <div id="settings-telegram-users-list" class="settings-user-list muted small">No active users.</div>
           </div>
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section class="settings-section" id="settings-provider-keys">
-        <h3>Provider Keys</h3>
+      <details class="settings-section settings-accordion" id="settings-provider-keys" data-settings-section="provider-keys">
+        <summary>Provider Keys</summary>
+        <div class="settings-section-content">
         <p class="muted small">Manage multiple keys per provider, choose a primary key, and fetch models per key.</p>
         <div id="settings-provider-keys-list" class="settings-provider-keys-list"></div>
-      </section>
+        </div>
+      </details>
 
-      <details class="settings-section" id="settings-advanced-crawler">
+      <details class="settings-section settings-accordion" id="settings-advanced-crawler" data-settings-section="crawler">
         <summary>Crawler Defaults</summary>
-        <div class="settings-grid">
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-3">
           <label class="settings-field">Mode
             <select id="settings-crawler-mode" data-setting="crawler_mode">
               <option value="broad">Broad</option>
               <option value="safe">Safe</option>
             </select>
           </label>
-          <label class="settings-field settings-toggle">
-            <input id="settings-crawler-markdown-first" data-setting="crawler_markdown_first" type="checkbox" />
-            <span>Prefer Markdown-first extraction</span>
+          <label class="settings-field settings-boolean-field">
+            <span>Markdown-First Extraction</span>
+            <span class="settings-toggle-card">
+              <input id="settings-crawler-markdown-first" data-setting="crawler_markdown_first" type="checkbox" />
+              <span>Preferred</span>
+            </span>
           </label>
           <label class="settings-field">Robots
             <select id="settings-crawler-robots" data-setting="crawler_robots_default">
@@ -603,21 +653,28 @@
             <input id="settings-crawler-cap" data-setting="crawler_page_cap_default" type="number" min="5" max="300" />
           </label>
         </div>
-      </details>
-
-      <details class="settings-section" id="settings-advanced-agent">
-        <summary>Agent Mode</summary>
-        <div class="settings-grid">
-          <label class="settings-field settings-toggle">
-            <input id="settings-agent-mode-enabled" data-setting="agent_mode_v1_enabled" type="checkbox" />
-            <span>Enable Agent Mode v1</span>
-          </label>
         </div>
       </details>
 
-      <details class="settings-section" id="settings-advanced-trustcommons">
+      <details class="settings-section settings-accordion" id="settings-advanced-agent" data-settings-section="agent">
+        <summary>Agent Mode</summary>
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-1">
+          <label class="settings-field settings-boolean-field">
+            <span>Agent Mode v1</span>
+            <span class="settings-toggle-card">
+              <input id="settings-agent-mode-enabled" data-setting="agent_mode_v1_enabled" type="checkbox" />
+              <span>Enabled</span>
+            </span>
+          </label>
+        </div>
+        </div>
+      </details>
+
+      <details class="settings-section settings-accordion" id="settings-advanced-trustcommons" data-settings-section="trustcommons">
         <summary>TrustCommons App Paths</summary>
-        <div class="settings-grid">
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-2">
           <label class="settings-field">Download URL
             <input id="settings-tc-download-url" data-setting="trustcommons_download_url" type="text" />
           </label>
@@ -625,11 +682,13 @@
             <input id="settings-tc-bundle-id" data-setting="trustcommons_app_bundle_id" type="text" />
           </label>
         </div>
+        </div>
       </details>
 
-      <details class="settings-section" id="settings-diagnostics">
+      <details class="settings-section settings-accordion" id="settings-diagnostics" data-settings-section="diagnostics">
         <summary>Diagnostics</summary>
-        <div class="settings-grid">
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-3">
           <div class="settings-readout">
             <h4>TrustCommons</h4>
             <pre id="settings-diagnostics-trustcommons"></pre>
@@ -649,15 +708,18 @@
           <button id="settings-hyperweb-connect-btn">Hyperweb Connect</button>
           <button id="settings-hyperweb-disconnect-btn">Hyperweb Disconnect</button>
         </div>
+        </div>
       </details>
 
-      <details class="settings-section settings-danger" id="settings-danger-zone">
+      <details class="settings-section settings-danger settings-accordion" id="settings-danger-zone" data-settings-section="danger">
         <summary>Danger Zone</summary>
+        <div class="settings-section-content">
         <p class="muted small">These actions are destructive and require typing RESET.</p>
         <div class="settings-inline-actions">
           <button id="settings-danger-reset-hyperweb-identity-btn">Reset Hyperweb Identity</button>
           <button id="settings-danger-clear-social-cache-btn">Clear Hyperweb Social Cache</button>
           <button id="settings-danger-reset-trustcommons-link-btn">Reset TrustCommons Link</button>
+        </div>
         </div>
       </details>
     </div>
