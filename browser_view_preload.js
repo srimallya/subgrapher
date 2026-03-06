@@ -2,6 +2,15 @@ const { ipcRenderer } = require('electron');
 
 let markerModeEnabled = false;
 let syncedHighlights = [];
+let markerMutationObserver = null;
+let markerRefreshTimer = null;
+let markerOverlay = null;
+let applyingHighlights = false;
+let suppressMarkerObserverUntil = 0;
+
+const MARKER_STYLE_ID = 'subgrapher-marker-style';
+const MARKER_OVERLAY_ID = 'subgrapher-marker-overlay';
+const MARKER_RECT_CLASS = 'subgrapher-marker-rect';
 
 function canonicalizeUrl(rawUrl) {
   const target = String(rawUrl || '').trim();
@@ -17,38 +26,56 @@ function canonicalizeUrl(rawUrl) {
 }
 
 function ensureMarkerStyles() {
-  if (!document || document.getElementById('subgrapher-marker-style')) return;
+  if (!document || document.getElementById(MARKER_STYLE_ID)) return;
   const style = document.createElement('style');
-  style.id = 'subgrapher-marker-style';
+  style.id = MARKER_STYLE_ID;
   style.textContent = `
-    mark[data-subgrapher-marker-id] {
-      background: rgba(255, 230, 128, 0.62);
-      color: inherit;
+    #${MARKER_OVERLAY_ID} {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2147483646;
+      overflow: hidden;
+    }
+
+    #${MARKER_OVERLAY_ID} .${MARKER_RECT_CLASS} {
+      position: absolute;
+      background: rgba(255, 230, 128, 0.72);
+      border: 1px solid rgba(194, 150, 30, 0.38);
       border-radius: 2px;
-      box-shadow: inset 0 0 0 1px rgba(194, 150, 30, 0.32);
-      padding: 0;
+      box-sizing: border-box;
     }
   `;
   (document.head || document.documentElement).appendChild(style);
 }
 
-function isIgnoredNode(node) {
-  if (!node) return true;
-  if (node.nodeType !== Node.ELEMENT_NODE) return false;
-  const tagName = String(node.tagName || '').toLowerCase();
-  return tagName === 'script' || tagName === 'style' || tagName === 'noscript';
-}
-
-function unwrapMarkerElement(mark) {
-  if (!mark || !mark.parentNode) return;
-  const parent = mark.parentNode;
-  while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-  parent.removeChild(mark);
+function ensureMarkerOverlay() {
+  if (!document) return null;
+  if (markerOverlay && markerOverlay.isConnected) return markerOverlay;
+  markerOverlay = document.getElementById(MARKER_OVERLAY_ID);
+  if (markerOverlay) return markerOverlay;
+  const root = document.body || document.documentElement;
+  if (!root) return null;
+  markerOverlay = document.createElement('div');
+  markerOverlay.id = MARKER_OVERLAY_ID;
+  root.appendChild(markerOverlay);
+  return markerOverlay;
 }
 
 function clearAppliedHighlights() {
-  const marks = document.querySelectorAll('mark[data-subgrapher-marker-id]');
-  marks.forEach((mark) => unwrapMarkerElement(mark));
+  const overlay = ensureMarkerOverlay();
+  if (!overlay) return;
+  overlay.innerHTML = '';
+}
+
+function isIgnoredNode(node) {
+  if (!node) return true;
+  if (node.nodeType !== Node.ELEMENT_NODE) return false;
+  const el = node;
+  const tagName = String(el.tagName || '').toLowerCase();
+  if (tagName === 'script' || tagName === 'style' || tagName === 'noscript') return true;
+  const id = String(el.id || '').trim();
+  return id === MARKER_STYLE_ID || id === MARKER_OVERLAY_ID;
 }
 
 function getNearestEditableElement(node) {
@@ -70,8 +97,7 @@ function getDocumentRoot() {
   return document.body || document.documentElement || null;
 }
 
-function collectTextSegments(options = {}) {
-  const includeMarkedText = !!options.includeMarkedText;
+function collectTextSegments() {
   const root = getDocumentRoot();
   if (!root) return { text: '', segments: [] };
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -79,10 +105,8 @@ function collectTextSegments(options = {}) {
       if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
       let parent = node.parentNode;
       while (parent) {
-        if (parent.nodeType === Node.ELEMENT_NODE) {
-          const el = parent;
-          if (isIgnoredNode(el)) return NodeFilter.FILTER_REJECT;
-          if (!includeMarkedText && el.matches && el.matches('mark[data-subgrapher-marker-id]')) return NodeFilter.FILTER_REJECT;
+        if (parent.nodeType === Node.ELEMENT_NODE && isIgnoredNode(parent)) {
+          return NodeFilter.FILTER_REJECT;
         }
         parent = parent.parentNode;
       }
@@ -208,22 +232,20 @@ function buildWebHighlightPayloadFromBounds(bounds, fullText, pageUrl, pageUrlNo
   };
 }
 
-function getIntersectingMarkerElements(range) {
-  if (!range) return [];
-  const markers = Array.from(document.querySelectorAll('mark[data-subgrapher-marker-id]'));
-  return markers.filter((mark) => {
-    try {
-      if (typeof range.intersectsNode === 'function') return range.intersectsNode(mark);
-    } catch (_) { }
-    try {
-      const markRange = document.createRange();
-      markRange.selectNodeContents(mark);
-      return range.compareBoundaryPoints(Range.END_TO_START, markRange) < 0
-        && range.compareBoundaryPoints(Range.START_TO_END, markRange) > 0;
-    } catch (_) {
-      return false;
-    }
-  });
+function normalizeHighlightBounds(highlight, fullText) {
+  const text = String((highlight && highlight.text) || '');
+  if (!text) return null;
+  const resolved = reconcileBoundsWithText({
+    start: Number(highlight && highlight.web_start),
+    end: Number(highlight && highlight.web_end),
+  }, text, fullText);
+  if (!resolved) return null;
+  return {
+    id: String((highlight && highlight.id) || '').trim(),
+    start: resolved.start,
+    end: resolved.end,
+    text,
+  };
 }
 
 function buildPartialUnmarkPayload(range) {
@@ -234,7 +256,7 @@ function buildPartialUnmarkPayload(range) {
   const pageUrl = String(window.location && window.location.href ? window.location.href : '');
   const pageUrlNorm = canonicalizeUrl(pageUrl);
   if (!pageUrlNorm) return null;
-  const indexData = collectTextSegments({ includeMarkedText: true });
+  const indexData = collectTextSegments();
   const fullText = String((indexData && indexData.text) || '');
   const selectedText = String(range.toString() || '');
   if (!selectedText.trim()) return null;
@@ -242,35 +264,24 @@ function buildPartialUnmarkPayload(range) {
   const bounds = reconcileBoundsWithText(getRangeAbsoluteBounds(range), selectedText, fullText);
   if (!bounds) return null;
 
-  const affectedMarkers = getIntersectingMarkerElements(range);
-  if (!affectedMarkers.length) return null;
+  const affectedHighlights = (Array.isArray(syncedHighlights) ? syncedHighlights : [])
+    .map((item) => normalizeHighlightBounds(item, fullText))
+    .filter((item) => item && item.id && item.end > bounds.start && item.start < bounds.end);
+  if (!affectedHighlights.length) return null;
 
   const removeIds = new Set();
   const additions = [];
-
-  affectedMarkers.forEach((mark) => {
-    const markerId = String(mark.getAttribute('data-subgrapher-marker-id') || '').trim();
-    if (!markerId) return;
-    removeIds.add(markerId);
-    let markRange = null;
-    try {
-      markRange = document.createRange();
-      markRange.selectNodeContents(mark);
-    } catch (_) {
-      return;
-    }
-    const markBounds = getRangeAbsoluteBounds(markRange);
-    if (!markBounds) return;
-    const overlapStart = Math.max(markBounds.start, bounds.start);
-    const overlapEnd = Math.min(markBounds.end, bounds.end);
+  affectedHighlights.forEach((item) => {
+    removeIds.add(item.id);
+    const overlapStart = Math.max(item.start, bounds.start);
+    const overlapEnd = Math.min(item.end, bounds.end);
     if (overlapEnd <= overlapStart) return;
-    const leftPayload = buildWebHighlightPayloadFromBounds({ start: markBounds.start, end: overlapStart }, fullText, pageUrl, pageUrlNorm);
+    const leftPayload = buildWebHighlightPayloadFromBounds({ start: item.start, end: overlapStart }, fullText, pageUrl, pageUrlNorm);
     if (leftPayload) additions.push(leftPayload);
-    const rightPayload = buildWebHighlightPayloadFromBounds({ start: overlapEnd, end: markBounds.end }, fullText, pageUrl, pageUrlNorm);
+    const rightPayload = buildWebHighlightPayloadFromBounds({ start: overlapEnd, end: item.end }, fullText, pageUrl, pageUrlNorm);
     if (rightPayload) additions.push(rightPayload);
   });
 
-  if (!removeIds.size) return null;
   return {
     source: 'web',
     action: 'partial_unmark',
@@ -282,27 +293,23 @@ function buildPartialUnmarkPayload(range) {
 }
 
 function findHighlightRange(highlight, indexData) {
+  if (!indexData || typeof indexData.text !== 'string' || !Array.isArray(indexData.segments) || !indexData.segments.length) {
+    return null;
+  }
   const directStart = Number(highlight && highlight.web_start);
   const directEnd = Number(highlight && highlight.web_end);
-  if (
-    indexData
-    && typeof indexData.text === 'string'
-    && Array.isArray(indexData.segments)
-    && Number.isFinite(directStart)
-    && Number.isFinite(directEnd)
-    && directEnd > directStart
-  ) {
+  if (Number.isFinite(directStart) && Number.isFinite(directEnd) && directEnd > directStart) {
     const startIndex = Math.max(0, Math.min(Math.round(directStart), indexData.text.length));
     const endIndex = Math.max(startIndex, Math.min(Math.round(directEnd), indexData.text.length));
     if (endIndex > startIndex && indexData.text.slice(startIndex, endIndex) === String((highlight && highlight.text) || '')) {
       const startPos = resolveTextIndexPosition(indexData.segments, startIndex);
       const endPos = resolveTextIndexPosition(indexData.segments, endIndex);
       if (startPos && endPos) {
-        const range = document.createRange();
         try {
+          const range = document.createRange();
           range.setStart(startPos.node, Math.max(0, Math.min(startPos.offset, String(startPos.node.nodeValue || '').length)));
           range.setEnd(endPos.node, Math.max(0, Math.min(endPos.offset, String(endPos.node.nodeValue || '').length)));
-          if (!range.collapsed) return { range, startIndex };
+          if (!range.collapsed) return { range, startIndex, endIndex };
         } catch (_) {
           // fallback below
         }
@@ -311,7 +318,7 @@ function findHighlightRange(highlight, indexData) {
   }
 
   const selectedText = String((highlight && highlight.text) || '');
-  if (!selectedText || !indexData || !indexData.text) return null;
+  if (!selectedText) return null;
   const prefix = String((highlight && highlight.context_before) || '');
   const suffix = String((highlight && highlight.context_after) || '');
 
@@ -333,54 +340,90 @@ function findHighlightRange(highlight, indexData) {
     || candidates.find((c) => c.beforeOk)
     || candidates.find((c) => c.afterOk)
     || candidates[0];
-
-  const startPos = resolveTextIndexPosition(indexData.segments, picked.hit);
-  const endPos = resolveTextIndexPosition(indexData.segments, picked.hit + selectedText.length);
+  const startIndex = picked.hit;
+  const endIndex = picked.hit + selectedText.length;
+  const startPos = resolveTextIndexPosition(indexData.segments, startIndex);
+  const endPos = resolveTextIndexPosition(indexData.segments, endIndex);
   if (!startPos || !endPos) return null;
-
-  const range = document.createRange();
   try {
+    const range = document.createRange();
     range.setStart(startPos.node, Math.max(0, Math.min(startPos.offset, String(startPos.node.nodeValue || '').length)));
     range.setEnd(endPos.node, Math.max(0, Math.min(endPos.offset, String(endPos.node.nodeValue || '').length)));
+    if (range.collapsed) return null;
+    return { range, startIndex, endIndex };
   } catch (_) {
     return null;
   }
-  if (range.collapsed) return null;
-  return { range, startIndex: picked.hit };
+}
+
+function renderRangeToOverlay(range, markerId) {
+  if (!range || range.collapsed) return;
+  const overlay = ensureMarkerOverlay();
+  if (!overlay) return;
+  const rects = Array.from(range.getClientRects())
+    .filter((rect) => rect && rect.width > 1 && rect.height > 1);
+  rects.forEach((rect, idx) => {
+    const node = document.createElement('div');
+    node.className = MARKER_RECT_CLASS;
+    node.setAttribute('data-subgrapher-marker-id', markerId || 'marker');
+    node.style.left = `${Math.max(0, Math.round(rect.left))}px`;
+    node.style.top = `${Math.max(0, Math.round(rect.top))}px`;
+    node.style.width = `${Math.max(1, Math.round(rect.width))}px`;
+    node.style.height = `${Math.max(1, Math.round(rect.height))}px`;
+    node.style.opacity = idx === 0 ? '1' : '0.98';
+    overlay.appendChild(node);
+  });
 }
 
 function applyHighlights(highlights) {
-  clearAppliedHighlights();
+  suppressMarkerObserverUntil = Date.now() + 250;
+  applyingHighlights = true;
   ensureMarkerStyles();
+  clearAppliedHighlights();
   const list = Array.isArray(highlights) ? highlights : [];
-  if (!list.length) return;
+  if (!list.length) {
+    applyingHighlights = false;
+    return;
+  }
 
   const indexData = collectTextSegments();
-  if (!indexData.text || !Array.isArray(indexData.segments) || !indexData.segments.length) return;
+  if (!indexData.text || !Array.isArray(indexData.segments) || !indexData.segments.length) {
+    applyingHighlights = false;
+    return;
+  }
 
-  const prepared = [];
   list.forEach((item) => {
     const found = findHighlightRange(item, indexData);
-    if (!found) return;
-    prepared.push({
-      id: String((item && item.id) || ''),
-      range: found.range,
-      startIndex: found.startIndex,
-    });
+    if (!found || !found.range) return;
+    renderRangeToOverlay(found.range, String((item && item.id) || 'marker'));
   });
+  applyingHighlights = false;
+  suppressMarkerObserverUntil = Date.now() + 250;
+}
 
-  prepared.sort((a, b) => b.startIndex - a.startIndex);
-  prepared.forEach((entry) => {
-    const mark = document.createElement('mark');
-    mark.setAttribute('data-subgrapher-marker-id', entry.id || 'marker');
-    try {
-      const fragment = entry.range.extractContents();
-      if (!fragment || !fragment.textContent) return;
-      mark.appendChild(fragment);
-      entry.range.insertNode(mark);
-    } catch (_) {
-      // ignore overlaps
-    }
+function scheduleHighlightRefresh(delayMs = 80) {
+  if (!Array.isArray(syncedHighlights)) return;
+  if (markerRefreshTimer) clearTimeout(markerRefreshTimer);
+  markerRefreshTimer = setTimeout(() => {
+    markerRefreshTimer = null;
+    if (applyingHighlights) return;
+    applyHighlights(syncedHighlights);
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function ensureMarkerObserver() {
+  if (markerMutationObserver || !document) return;
+  const root = document.documentElement || document.body;
+  if (!root || typeof MutationObserver === 'undefined') return;
+  markerMutationObserver = new MutationObserver(() => {
+    if (applyingHighlights) return;
+    if (Date.now() < suppressMarkerObserverUntil) return;
+    scheduleHighlightRefresh(120);
+  });
+  markerMutationObserver.observe(root, {
+    childList: true,
+    subtree: true,
+    characterData: true,
   });
 }
 
@@ -395,7 +438,7 @@ function selectionToPayload(rangeInput) {
   const root = getDocumentRoot();
   if (!root) return null;
 
-  const corpus = collectTextSegments({ includeMarkedText: true });
+  const corpus = collectTextSegments();
   const corpusText = String((corpus && corpus.text) || '');
   const resolvedBounds = reconcileBoundsWithText(getRangeAbsoluteBounds(range), selectedText, corpusText);
 
@@ -489,6 +532,7 @@ ipcRenderer.on('browser:marker-mode', (_event, data) => {
 ipcRenderer.on('browser:marker-sync', (_event, data) => {
   markerModeEnabled = !!(data && data.enabled);
   syncedHighlights = (data && Array.isArray(data.highlights)) ? data.highlights : [];
+  ensureMarkerObserver();
   applyHighlights(syncedHighlights);
 });
 
@@ -507,10 +551,25 @@ window.addEventListener('keyup', (event) => {
   if (key === 'shift' || key === 'control' || key === 'meta' || key === 'alt') return;
   scheduleSelectionEmit();
 }, true);
+window.addEventListener('scroll', () => {
+  scheduleHighlightRefresh(0);
+}, true);
+window.addEventListener('resize', () => {
+  scheduleHighlightRefresh(0);
+}, true);
 
 window.addEventListener('DOMContentLoaded', () => {
   ensureMarkerStyles();
+  ensureMarkerOverlay();
+  ensureMarkerObserver();
   if (Array.isArray(syncedHighlights) && syncedHighlights.length) {
     applyHighlights(syncedHighlights);
   }
+});
+
+window.addEventListener('load', () => {
+  ensureMarkerStyles();
+  ensureMarkerOverlay();
+  ensureMarkerObserver();
+  scheduleHighlightRefresh(120);
 });
