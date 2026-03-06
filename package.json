@@ -8,9 +8,10 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
+    "generate:icons:mac": "bash scripts/generate_mac_icons.sh",
     "prepare:python:mac-arm64": "node scripts/prepare_bundled_python.js --target darwin-arm64",
     "prepare:python:win-x64": "node scripts/prepare_windows_python_or_placeholder.js",
-    "build:mac": "npm run prepare:python:mac-arm64 && electron-builder --mac dmg --arm64",
+    "build:mac": "npm run generate:icons:mac && npm run prepare:python:mac-arm64 && electron-builder --mac dmg --arm64",
     "build:win": "npm run prepare:python:win-x64 && electron-builder --win nsis --x64",
     "build:release": "npm run build:mac && npm run build:win"
   },
