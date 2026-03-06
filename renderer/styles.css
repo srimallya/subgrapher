@@ -1715,6 +1715,41 @@ summary:focus-visible {
   min-height: 100%;
 }
 
+.history-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 0 12px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-map-legend.hidden {
+  display: none !important;
+}
+
+.history-map-legend-note {
+  width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-map-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+}
+
 #history-map-canvas {
   width: 100%;
   height: 100%;
@@ -1733,6 +1768,18 @@ summary:focus-visible {
   border-radius: var(--radius-sm);
   background: #1f1f1f;
   box-shadow: var(--shadow);
+  pointer-events: none;
+  line-height: 1.4;
+}
+
+.history-map-tooltip > div {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.history-map-tooltip > div + div {
+  margin-top: 2px;
 }
 
 .history-preview-cached-url,

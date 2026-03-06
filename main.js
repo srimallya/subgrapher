@@ -14464,10 +14464,11 @@ function updateHistoryPreviewBounds(bounds) {
 }
 
 function syncMarkerStateToBrowserView() {
-  if (!browserView || !browserView.webContents || browserView.webContents.isDestroyed()) return;
+  const view = getOperationalBrowserView();
+  if (!view || !view.webContents || view.webContents.isDestroyed()) return;
   let currentUrl = '';
   try {
-    currentUrl = String(browserView.webContents.getURL() || '').trim();
+    currentUrl = String(view.webContents.getURL() || '').trim();
   } catch (_) {
     currentUrl = '';
   }
@@ -14479,8 +14480,8 @@ function syncMarkerStateToBrowserView() {
     artifact_id: markerContext.artifactId || null,
     highlights,
   };
-  browserView.webContents.send('browser:marker-mode', payload);
-  browserView.webContents.send('browser:marker-sync', payload);
+  view.webContents.send('browser:marker-mode', payload);
+  view.webContents.send('browser:marker-sync', payload);
 }
 
 async function getPageContentFromBrowser() {

@@ -122,6 +122,7 @@ const state = {
   historyDetailView: 'preview',
   historyMapPoints: [],
   historyMapBounds: null,
+  historyMapClusters: [],
   historyHoveredPointId: '',
   memoryReplay: {
     active: false,
@@ -6083,6 +6084,33 @@ function historyPointById(pointId) {
   return (Array.isArray(state.historyMapPoints) ? state.historyMapPoints : []).find((point) => String((point && point.id) || '') === String(pointId || '')) || null;
 }
 
+function renderHistoryMapLegend() {
+  const holder = e('history-map-legend');
+  if (!holder) return;
+  const clusters = Array.isArray(state.historyMapClusters) ? state.historyMapClusters : [];
+  if (!clusters.length) {
+    holder.innerHTML = '';
+    holder.classList.add('hidden');
+    return;
+  }
+  const note = '<div class="history-map-legend-note">Colors show semantic groups of similar pages. They are cluster labels, not fixed content categories.</div>';
+  const items = clusters
+    .slice()
+    .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
+    .map((cluster) => {
+      const clusterId = Number(cluster.cluster_id || 0);
+      const count = Number(cluster.count || 0);
+      return `
+        <div class="history-map-legend-item" title="${escapeHtml(`Semantic cluster ${clusterId}`)}">
+          <span class="history-map-legend-swatch" style="background:${escapeHtml(historyClusterColor(clusterId))};"></span>
+          <span>Group ${escapeHtml(String(clusterId + 1))} (${escapeHtml(String(count))})</span>
+        </div>
+      `;
+    });
+  holder.innerHTML = `${note}${items.join('')}`;
+  holder.classList.remove('hidden');
+}
+
 function updateHistoryPreviewMeta(entry) {
   const node = e('history-preview-meta');
   if (!node) return;
@@ -6220,6 +6248,7 @@ function drawHistorySemanticMap() {
   const canvas = e('history-map-canvas');
   const tooltip = e('history-map-tooltip');
   const wrap = e('history-map-canvas-wrap');
+  renderHistoryMapLegend();
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -6294,13 +6323,13 @@ function drawHistorySemanticMap() {
     `;
     const hostWidth = Math.max(20, Number((wrap && wrap.clientWidth) || canvas.clientWidth || cssWidth));
     const hostHeight = Math.max(20, Number((wrap && wrap.clientHeight) || canvas.clientHeight || cssHeight));
+    tooltip.classList.remove('hidden');
     const tooltipWidth = Math.max(20, Number(tooltip.offsetWidth || 220));
     const tooltipHeight = Math.max(20, Number(tooltip.offsetHeight || 80));
     const left = Math.min(Math.max(8, Number(event.offsetX || 0) + 14), Math.max(8, hostWidth - tooltipWidth - 8));
     const top = Math.min(Math.max(8, Number(event.offsetY || 0) + 14), Math.max(8, hostHeight - tooltipHeight - 8));
     tooltip.style.left = `${left}px`;
     tooltip.style.top = `${top}px`;
-    tooltip.classList.remove('hidden');
   };
   canvas.onmouseleave = () => {
     if (tooltip) tooltip.classList.add('hidden');
@@ -6344,11 +6373,13 @@ async function refreshHistorySemanticMap() {
   if (!res || !res.ok) {
     state.historyMapPoints = [];
     state.historyMapBounds = null;
+    state.historyMapClusters = [];
     drawHistorySemanticMap();
     return;
   }
   state.historyMapPoints = Array.isArray(res.points) ? res.points : [];
   state.historyMapBounds = res.bounds || null;
+  state.historyMapClusters = Array.isArray(res.clusters) ? res.clusters : [];
   drawHistorySemanticMap();
 }
 
