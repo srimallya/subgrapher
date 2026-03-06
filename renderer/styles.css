@@ -551,6 +551,16 @@ summary:focus-visible {
   padding: 20px 12px;
 }
 
+.reference-section + .reference-section {
+  margin-top: 10px;
+}
+
+.reference-section-label {
+  padding: 6px 8px 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .reference-tree-node {
   display: flex;
   flex-direction: column;

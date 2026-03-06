@@ -60,6 +60,7 @@ const APP_ICON_ICNS_PATH = path.join(__dirname, 'assets', 'icons', 'app-icon.icn
 const MAX_IMPORTED_TABS = 120;
 const PUBLIC_FEED_FILENAME = 'public_references_feed.json';
 const APP_SETTINGS_FILENAME = 'app_settings.json';
+const REFERENCE_RANKING_FILENAME = 'reference_ranking.json';
 const GLOBAL_SKILLS_FILENAME = 'global_skills.json';
 const LOCAL_SKILLS_FILENAME = 'local_skills.json';
 const PRIVATE_HISTORY_FILENAME = 'private_history.json';
@@ -94,9 +95,14 @@ const HYPERWEB_SNAPSHOT_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 const HYPERWEB_SEARCH_MAX_RESULTS = 80;
 const HISTORY_DEFAULT_MAX_ENTRIES = 5000;
 const HISTORY_RECENT_DUP_WINDOW_MS = 2 * 60 * 1000;
+const REFERENCE_RERANK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const REFERENCE_RANKING_USAGE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const REFERENCE_RANKING_CONTEXT_LIMIT = 24;
+const REFERENCE_RANKING_TERMS_LIMIT = 120;
 const HISTORY_EMBED_DIM = 96;
 const SETTINGS_EDITABLE_KEYS = new Set([
   'default_search_engine',
+  'reference_ranking_enabled',
   'lumino_last_provider',
   'lumino_last_model',
   'hyperweb_enabled',
@@ -161,6 +167,11 @@ const SHORTCUT_COMMAND_ALLOWLIST = new Set([
   'ui_zoom_out',
   'ui_zoom_reset',
   'toggle_zen',
+  'focus_lumino',
+  'reference_prev',
+  'reference_next',
+  'workspace_tab_prev',
+  'workspace_tab_next',
 ]);
 const PROVIDER_SUMMARY_MODEL_FALLBACK = {
   openai: 'gpt-4o-mini',
@@ -2228,6 +2239,7 @@ function isEncryptedDataFilePath(filePath = '') {
   return new Set([
     STORE_FILENAME,
     PUBLIC_FEED_FILENAME,
+    REFERENCE_RANKING_FILENAME,
     HYPERWEB_PUBLIC_SNAPSHOTS_FILENAME,
     HYPERWEB_PRIVATE_SHARES_FILENAME,
     PRIVATE_HISTORY_FILENAME,
@@ -2393,6 +2405,457 @@ function writeJsonStore(filePath, payload) {
   const encryptedText = createEncryptedEnvelopeForJson(rawJson, key);
   fs.writeFileSync(filePath, encryptedText, 'utf8');
   return true;
+}
+
+function getReferenceRankingPath() {
+  return path.join(app.getPath('userData'), REFERENCE_RANKING_FILENAME);
+}
+
+function getDefaultReferenceRankingStore() {
+  return {
+    version: 1,
+    enabled_at: 0,
+    last_ranked_at: 0,
+    last_active_reference_id: '',
+    order_ids: [],
+    references: {},
+    recent_context: {
+      pages: [],
+      prompts: [],
+    },
+  };
+}
+
+function normalizeReferenceRankingActionCounts(raw = {}) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const out = {};
+  Object.keys(src).forEach((key) => {
+    const next = Number(src[key] || 0);
+    if (!Number.isFinite(next) || next <= 0) return;
+    out[String(key || '').trim().toLowerCase()] = Math.max(0, Math.round(next));
+  });
+  return out;
+}
+
+function compactReferenceRankingTerms(rawTerms = []) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(rawTerms) ? rawTerms : []).forEach((term) => {
+    const value = String(term || '').trim().toLowerCase();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    out.push(value);
+  });
+  return out.slice(0, REFERENCE_RANKING_TERMS_LIMIT);
+}
+
+function compactReferenceRankingActions(rawActions = [], now = nowTs()) {
+  return (Array.isArray(rawActions) ? rawActions : [])
+    .map((item) => ({
+      action: String((item && item.action) || '').trim().toLowerCase(),
+      at: Number((item && item.at) || 0),
+      weight: Number((item && item.weight) || 0),
+    }))
+    .filter((item) => item.action && Number.isFinite(item.at) && item.at > 0 && (now - item.at) <= REFERENCE_RANKING_USAGE_WINDOW_MS)
+    .slice(-96);
+}
+
+function compactReferenceRankingContextEntries(rawEntries = [], field = 'text', now = nowTs()) {
+  return (Array.isArray(rawEntries) ? rawEntries : [])
+    .map((item) => ({
+      text: String((item && item[field]) || (item && item.text) || '').trim(),
+      at: Number((item && item.at) || 0),
+      sr_id: String((item && item.sr_id) || '').trim(),
+      title: String((item && item.title) || '').trim(),
+      host: String((item && item.host) || '').trim().toLowerCase(),
+    }))
+    .filter((item) => item.at > 0 && (now - item.at) <= REFERENCE_RANKING_USAGE_WINDOW_MS && (item.text || item.title || item.host))
+    .slice(-REFERENCE_RANKING_CONTEXT_LIMIT);
+}
+
+function normalizeReferenceRankingEntry(raw = {}, now = nowTs()) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  return {
+    action_counts: normalizeReferenceRankingActionCounts(src.action_counts),
+    last_action_at: Number(src.last_action_at || 0),
+    recent_actions: compactReferenceRankingActions(src.recent_actions, now),
+    semantic_terms: compactReferenceRankingTerms(src.semantic_terms),
+    last_score: Number.isFinite(Number(src.last_score)) ? Number(src.last_score) : 0,
+    last_rank: Number.isFinite(Number(src.last_rank)) ? Math.max(0, Math.round(Number(src.last_rank))) : -1,
+  };
+}
+
+function normalizeReferenceRankingStore(raw = {}, refs = [], now = nowTs()) {
+  const fallback = getDefaultReferenceRankingStore();
+  const src = (raw && typeof raw === 'object') ? raw : fallback;
+  const refMap = {};
+  const validIds = new Set(
+    (Array.isArray(refs) ? refs : [])
+      .map((ref) => String((ref && ref.id) || '').trim())
+      .filter(Boolean),
+  );
+  const sourceRefs = (src.references && typeof src.references === 'object') ? src.references : {};
+  Object.keys(sourceRefs).forEach((srId) => {
+    const key = String(srId || '').trim();
+    if (!key || (validIds.size > 0 && !validIds.has(key))) return;
+    refMap[key] = normalizeReferenceRankingEntry(sourceRefs[key], now);
+  });
+  validIds.forEach((srId) => {
+    if (!refMap[srId]) refMap[srId] = normalizeReferenceRankingEntry({}, now);
+  });
+  return {
+    version: 1,
+    enabled_at: Number(src.enabled_at || 0),
+    last_ranked_at: Number(src.last_ranked_at || 0),
+    last_active_reference_id: String(src.last_active_reference_id || '').trim(),
+    order_ids: Array.isArray(src.order_ids)
+      ? src.order_ids.map((id) => String(id || '').trim()).filter((id) => validIds.size === 0 || validIds.has(id))
+      : [],
+    references: refMap,
+    recent_context: {
+      pages: compactReferenceRankingContextEntries(src.recent_context && src.recent_context.pages, 'title', now),
+      prompts: compactReferenceRankingContextEntries(src.recent_context && src.recent_context.prompts, 'text', now),
+    },
+  };
+}
+
+function readReferenceRankingStore(refs = getReferences()) {
+  const raw = readJsonStore(getReferenceRankingPath(), getDefaultReferenceRankingStore);
+  return normalizeReferenceRankingStore(raw, refs, nowTs());
+}
+
+function writeReferenceRankingStore(store, refs = getReferences()) {
+  const normalized = normalizeReferenceRankingStore(store, refs, nowTs());
+  writeJsonStore(getReferenceRankingPath(), normalized);
+  return normalized;
+}
+
+function normalizeReferenceSortText(value = '') {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function compareReferencesAlphabetically(a, b) {
+  const aTitle = normalizeReferenceSortText((a && a.title) || '') || normalizeReferenceSortText((a && a.intent) || '');
+  const bTitle = normalizeReferenceSortText((b && b.title) || '') || normalizeReferenceSortText((b && b.intent) || '');
+  if (aTitle !== bTitle) return aTitle.localeCompare(bTitle);
+  const aIntent = normalizeReferenceSortText((a && a.intent) || '');
+  const bIntent = normalizeReferenceSortText((b && b.intent) || '');
+  if (aIntent !== bIntent) return aIntent.localeCompare(bIntent);
+  return String((a && a.id) || '').localeCompare(String((b && b.id) || ''));
+}
+
+function buildAlphabeticalReferenceOrderIds(refs = []) {
+  return (Array.isArray(refs) ? refs : [])
+    .slice()
+    .sort(compareReferencesAlphabetically)
+    .map((ref) => String((ref && ref.id) || '').trim())
+    .filter(Boolean);
+}
+
+function tokenizeReferenceRankingText(raw = '') {
+  const text = String(raw || '').toLowerCase();
+  const matches = text.match(/[a-z0-9]{2,}/g) || [];
+  const stopwords = new Set([
+    'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'your', 'have', 'about',
+    'http', 'https', 'www', 'com', 'org', 'net', 'app', 'subgrapher', 'lumino',
+  ]);
+  const out = [];
+  const seen = new Set();
+  matches.forEach((token) => {
+    if (stopwords.has(token) || seen.has(token)) return;
+    seen.add(token);
+    out.push(token);
+  });
+  return out;
+}
+
+function mergeReferenceRankingTerms(currentTerms = [], incomingTerms = []) {
+  const next = compactReferenceRankingTerms([
+    ...(Array.isArray(incomingTerms) ? incomingTerms : []),
+    ...(Array.isArray(currentTerms) ? currentTerms : []),
+  ]);
+  return next.slice(0, REFERENCE_RANKING_TERMS_LIMIT);
+}
+
+function getReferenceRankingActionWeight(action = '') {
+  const weights = {
+    activate_reference: 5,
+    commit_page: 7,
+    add_tab: 4,
+    remove_tab: 3,
+    artifact_create: 5,
+    artifact_edit: 3,
+    artifact_delete: 3,
+    context_file_add: 4,
+    context_file_remove: 3,
+    chat_send: 6,
+  };
+  return Number(weights[String(action || '').trim().toLowerCase()] || 1);
+}
+
+function getReferenceStaticSemanticTerms(ref = {}) {
+  const artifactTitles = Array.isArray(ref.artifacts) ? ref.artifacts.map((item) => String((item && item.title) || '').trim()) : [];
+  const tabBits = Array.isArray(ref.tabs)
+    ? ref.tabs.map((tab) => {
+      const title = String((tab && tab.title) || '').trim();
+      const url = String((tab && tab.url) || '').trim();
+      let host = '';
+      try {
+        host = url ? String(new URL(url).host || '').trim().toLowerCase() : '';
+      } catch (_) {
+        host = '';
+      }
+      return `${title} ${host}`;
+    })
+    : [];
+  return tokenizeReferenceRankingText([
+    String(ref.title || ''),
+    String(ref.intent || ''),
+    String(ref.relation_type || ''),
+    ...(Array.isArray(ref.tags) ? ref.tags.map((tag) => String(tag || '')) : []),
+    ...artifactTitles,
+    ...tabBits,
+  ].join(' '));
+}
+
+function getReferenceLineageIds(refs = [], targetSrId = '') {
+  const targetId = String(targetSrId || '').trim();
+  if (!targetId) return { self: '', parent: '', children: new Set(), siblings: new Set() };
+  const list = Array.isArray(refs) ? refs : [];
+  const current = list.find((ref) => String((ref && ref.id) || '') === targetId) || null;
+  const parentId = String((current && current.parent_id) || '').trim();
+  const children = new Set();
+  const siblings = new Set();
+  list.forEach((ref) => {
+    const refId = String((ref && ref.id) || '').trim();
+    if (!refId) return;
+    if (String((ref && ref.parent_id) || '').trim() === targetId) {
+      children.add(refId);
+    }
+    if (parentId && String((ref && ref.parent_id) || '').trim() === parentId && refId !== targetId) {
+      siblings.add(refId);
+    }
+  });
+  return {
+    self: targetId,
+    parent: parentId,
+    children,
+    siblings,
+  };
+}
+
+function getReferenceRankingAnchorTimestamp(store = {}) {
+  const lastRanked = Number(store.last_ranked_at || 0);
+  if (lastRanked > 0) return lastRanked;
+  const enabledAt = Number(store.enabled_at || 0);
+  if (enabledAt > 0) return enabledAt;
+  return 0;
+}
+
+function bootstrapReferenceRankingStore(store, refs = [], options = {}) {
+  const now = Number(options.now || nowTs());
+  const next = normalizeReferenceRankingStore(store, refs, now);
+  const alphaOrderIds = buildAlphabeticalReferenceOrderIds(refs);
+  if (!Array.isArray(next.order_ids) || next.order_ids.length === 0) {
+    next.order_ids = alphaOrderIds.slice();
+  } else {
+    const seen = new Set(next.order_ids);
+    alphaOrderIds.forEach((id) => {
+      if (!seen.has(id)) {
+        seen.add(id);
+        next.order_ids.push(id);
+      }
+    });
+  }
+  if (options.reset) {
+    next.enabled_at = now;
+    next.last_ranked_at = 0;
+    next.order_ids = alphaOrderIds.slice();
+    Object.keys(next.references).forEach((srId) => {
+      next.references[srId].last_score = 0;
+      next.references[srId].last_rank = -1;
+    });
+  }
+  return next;
+}
+
+function buildReferenceRankingIntentTerms(refs = [], store = {}) {
+  const terms = [];
+  const anchorId = String(store.last_active_reference_id || '').trim();
+  if (anchorId) {
+    const anchorRef = (Array.isArray(refs) ? refs : []).find((ref) => String((ref && ref.id) || '') === anchorId) || null;
+    if (anchorRef) {
+      terms.push(...getReferenceStaticSemanticTerms(anchorRef));
+      const lineage = getReferenceLineageIds(refs, anchorId);
+      [lineage.parent, ...Array.from(lineage.children), ...Array.from(lineage.siblings)].forEach((srId) => {
+        const ref = (Array.isArray(refs) ? refs : []).find((item) => String((item && item.id) || '') === String(srId || '')) || null;
+        if (!ref) return;
+        terms.push(...getReferenceStaticSemanticTerms(ref));
+      });
+    }
+  }
+  const recentPages = (store.recent_context && Array.isArray(store.recent_context.pages)) ? store.recent_context.pages : [];
+  recentPages.forEach((item) => {
+    terms.push(...tokenizeReferenceRankingText(`${String(item.title || '')} ${String(item.host || '')}`));
+  });
+  const recentPrompts = (store.recent_context && Array.isArray(store.recent_context.prompts)) ? store.recent_context.prompts : [];
+  recentPrompts.forEach((item) => {
+    terms.push(...tokenizeReferenceRankingText(String(item.text || '')));
+  });
+  return compactReferenceRankingTerms(terms);
+}
+
+function scoreReferenceRankingEntry(ref = {}, entry = {}, refs = [], store = {}, now = nowTs()) {
+  const recentActions = compactReferenceRankingActions(entry.recent_actions, now);
+  const usageScore = recentActions.reduce((sum, action) => {
+    const ageRatio = Math.max(0, 1 - ((now - Number(action.at || 0)) / REFERENCE_RANKING_USAGE_WINDOW_MS));
+    return sum + (Number(action.weight || 0) * ageRatio);
+  }, 0);
+  const intentTerms = new Set(buildReferenceRankingIntentTerms(refs, store));
+  const candidateTerms = new Set([
+    ...getReferenceStaticSemanticTerms(ref),
+    ...(Array.isArray(entry.semantic_terms) ? entry.semantic_terms : []),
+  ]);
+  let overlapCount = 0;
+  candidateTerms.forEach((term) => {
+    if (intentTerms.has(term)) overlapCount += 1;
+  });
+  const semanticScore = intentTerms.size > 0 ? (overlapCount / Math.max(1, Math.min(intentTerms.size, candidateTerms.size || 1))) : 0;
+  const lineage = getReferenceLineageIds(refs, String(store.last_active_reference_id || '').trim());
+  const refId = String((ref && ref.id) || '').trim();
+  let lineageBonus = 0;
+  if (refId && refId === lineage.self) lineageBonus = 1;
+  else if (refId && refId === lineage.parent) lineageBonus = 0.6;
+  else if (lineage.children.has(refId)) lineageBonus = 0.5;
+  else if (lineage.siblings.has(refId)) lineageBonus = 0.3;
+  const previousRank = Number(entry.last_rank);
+  const stabilityBias = Number.isFinite(previousRank) && previousRank >= 0 ? (1 / (previousRank + 1)) : 0;
+  return Number(((usageScore * 0.55) + (semanticScore * 8 * 0.3) + (lineageBonus * 2.5) + (stabilityBias * 0.5)).toFixed(6));
+}
+
+function maybeRerankReferenceRankingStore(store, refs = [], settings = readSettings(), options = {}) {
+  const enabled = !!(settings && settings.reference_ranking_enabled);
+  const now = Number(options.now || nowTs());
+  let next = bootstrapReferenceRankingStore(store, refs, { now });
+  if (!enabled) {
+    return { store: next, reranked: false };
+  }
+  if (!next.enabled_at) next.enabled_at = now;
+  const shouldForce = !!options.force;
+  const anchorTs = getReferenceRankingAnchorTimestamp(next);
+  const due = anchorTs > 0 && (now - anchorTs) >= REFERENCE_RERANK_INTERVAL_MS;
+  if (!shouldForce && !due) {
+    return { store: next, reranked: false };
+  }
+  const scored = (Array.isArray(refs) ? refs : [])
+    .map((ref) => {
+      const srId = String((ref && ref.id) || '').trim();
+      const entry = next.references[srId] || normalizeReferenceRankingEntry({}, now);
+      const score = scoreReferenceRankingEntry(ref, entry, refs, next, now);
+      next.references[srId] = {
+        ...entry,
+        last_score: score,
+      };
+      return { ref, srId, score };
+    })
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return compareReferencesAlphabetically(a.ref, b.ref);
+    });
+  next.order_ids = scored.map((item, index) => {
+    if (next.references[item.srId]) next.references[item.srId].last_rank = index;
+    return item.srId;
+  });
+  next.last_ranked_at = now;
+  return { store: next, reranked: true };
+}
+
+function buildReferenceRankingStatePayload(store, settings = readSettings()) {
+  const enabled = !!(settings && settings.reference_ranking_enabled);
+  const normalized = normalizeReferenceRankingStore(store, getReferences(), nowTs());
+  const scores = {};
+  Object.keys(normalized.references).forEach((srId) => {
+    scores[srId] = Number((normalized.references[srId] && normalized.references[srId].last_score) || 0);
+  });
+  return {
+    ok: true,
+    enabled,
+    enabled_at: Number(normalized.enabled_at || 0),
+    last_ranked_at: Number(normalized.last_ranked_at || 0),
+    order_ids: Array.isArray(normalized.order_ids) ? normalized.order_ids.slice() : [],
+    scores,
+  };
+}
+
+function resetReferenceRankingStore(refs = getReferences()) {
+  const next = bootstrapReferenceRankingStore(readReferenceRankingStore(refs), refs, { now: nowTs(), reset: true });
+  return writeReferenceRankingStore(next, refs);
+}
+
+function touchReferenceRankingStore(refs = getReferences(), options = {}) {
+  const current = readReferenceRankingStore(refs);
+  const next = bootstrapReferenceRankingStore(current, refs, { now: nowTs(), reset: !!options.reset });
+  return writeReferenceRankingStore(next, refs);
+}
+
+function recordReferenceRankingInteraction(payload = {}) {
+  const settings = readSettings();
+  if (!settings.reference_ranking_enabled) {
+    return buildReferenceRankingStatePayload(readReferenceRankingStore(getReferences()), settings);
+  }
+  const refs = getReferences();
+  let store = bootstrapReferenceRankingStore(readReferenceRankingStore(refs), refs, { now: nowTs() });
+  const now = nowTs();
+  const action = String((payload && payload.action) || '').trim().toLowerCase();
+  const srId = String((payload && payload.sr_id) || (payload && payload.srId) || '').trim();
+  if (!action || !srId || findReferenceIndex(refs, srId) < 0) {
+    const refreshed = maybeRerankReferenceRankingStore(store, refs, settings, { now });
+    store = refreshed.store;
+    writeReferenceRankingStore(store, refs);
+    return buildReferenceRankingStatePayload(store, settings);
+  }
+  const entry = store.references[srId] || normalizeReferenceRankingEntry({}, now);
+  entry.action_counts[action] = Number((entry.action_counts && entry.action_counts[action]) || 0) + 1;
+  entry.last_action_at = now;
+  entry.recent_actions = compactReferenceRankingActions([
+    ...(Array.isArray(entry.recent_actions) ? entry.recent_actions : []),
+    { action, at: now, weight: getReferenceRankingActionWeight(action) },
+  ], now);
+  const semanticBits = [];
+  const browserTitle = String((payload && (payload.browser_title || payload.tab_title)) || '').trim();
+  const browserUrl = String((payload && (payload.browser_url || payload.tab_url)) || '').trim();
+  const promptText = String((payload && (payload.chat_prompt || payload.prompt)) || '').trim();
+  if (browserTitle) semanticBits.push(browserTitle);
+  if (browserUrl) semanticBits.push(browserUrl);
+  if (promptText) semanticBits.push(promptText);
+  entry.semantic_terms = mergeReferenceRankingTerms(entry.semantic_terms, tokenizeReferenceRankingText(semanticBits.join(' ')));
+  store.references[srId] = entry;
+  store.last_active_reference_id = srId;
+  if (browserTitle || browserUrl) {
+    let host = '';
+    try {
+      host = browserUrl ? String(new URL(browserUrl).host || '').trim().toLowerCase() : '';
+    } catch (_) {
+      host = '';
+    }
+    store.recent_context.pages = compactReferenceRankingContextEntries([
+      ...(store.recent_context && Array.isArray(store.recent_context.pages) ? store.recent_context.pages : []),
+      { title: browserTitle, host, at: now, sr_id: srId },
+    ], 'title', now);
+  }
+  if (promptText) {
+    store.recent_context.prompts = compactReferenceRankingContextEntries([
+      ...(store.recent_context && Array.isArray(store.recent_context.prompts) ? store.recent_context.prompts : []),
+      { text: promptText, at: now, sr_id: srId },
+    ], 'text', now);
+  }
+  const reranked = maybeRerankReferenceRankingStore(store, refs, settings, { now });
+  store = reranked.store;
+  writeReferenceRankingStore(store, refs);
+  return {
+    ...buildReferenceRankingStatePayload(store, settings),
+    reranked: !!reranked.reranked,
+  };
 }
 
 function verifyCurrentUserPassword(password = '') {
@@ -4073,6 +4536,7 @@ function upsertProviderPrimaryCompatibility(provider, apiKey) {
 function getDefaultSettings() {
   return {
     default_search_engine: 'ddg',
+    reference_ranking_enabled: false,
     trustcommons_bootstrap_complete: false,
     trustcommons_identity_id: '',
     trustcommons_display_name: '',
@@ -4159,6 +4623,9 @@ function readSettings() {
       : defaults.trustcommons_sync_enabled;
     return {
       default_search_engine: ['google', 'bing', 'ddg'].includes(engine) ? engine : 'ddg',
+      reference_ranking_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'reference_ranking_enabled')
+        ? !!parsed.reference_ranking_enabled
+        : defaults.reference_ranking_enabled,
       trustcommons_bootstrap_complete: !!(parsed && parsed.trustcommons_bootstrap_complete),
       trustcommons_identity_id: identityId,
       trustcommons_display_name: String((parsed && parsed.trustcommons_display_name) || '').trim(),
@@ -4374,6 +4841,9 @@ function writeSettings(next) {
     default_search_engine: ['google', 'bing', 'ddg'].includes(requestedEngine)
       ? requestedEngine
       : 'ddg',
+    reference_ranking_enabled: Object.prototype.hasOwnProperty.call(input, 'reference_ranking_enabled')
+      ? !!input.reference_ranking_enabled
+      : !!current.reference_ranking_enabled,
     trustcommons_bootstrap_complete: Object.prototype.hasOwnProperty.call(input, 'trustcommons_bootstrap_complete')
       ? !!input.trustcommons_bootstrap_complete
       : !!current.trustcommons_bootstrap_complete,
@@ -9836,6 +10306,7 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
   const prev = previousSettings || readSettings();
   const next = nextSettings || readSettings();
   const applied = {
+    reference_ranking: { ok: true, changed: false },
     hyperweb: { ok: true, changed: false },
     trustcommons_sync: { ok: true, changed: false },
     history: { ok: true, changed: false },
@@ -9843,6 +10314,17 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
     orchestrator_scheduler: { ok: true, changed: false },
     abstraction: { ok: true, changed: false },
   };
+
+  const rankingChanged = !!prev.reference_ranking_enabled !== !!next.reference_ranking_enabled;
+  if (rankingChanged) {
+    applied.reference_ranking.changed = true;
+    const refs = getReferences();
+    if (next.reference_ranking_enabled) {
+      resetReferenceRankingStore(refs);
+    } else {
+      touchReferenceRankingStore(refs);
+    }
+  }
 
   const hyperwebChanged = (
     prev.hyperweb_enabled !== next.hyperweb_enabled
@@ -15308,6 +15790,27 @@ function applySnapshotToForkReference(targetRef, snapshot = {}) {
 }
 
 ipcMain.handle('browser:srList', () => getReferences());
+
+ipcMain.handle('browser:referenceRankingState', (_event, payload) => {
+  const refs = getReferences();
+  const settings = readSettings();
+  let store = bootstrapReferenceRankingStore(readReferenceRankingStore(refs), refs, { now: nowTs() });
+  if (payload && payload.ensure_fresh) {
+    const reranked = maybeRerankReferenceRankingStore(store, refs, settings, { now: nowTs() });
+    store = reranked.store;
+    writeReferenceRankingStore(store, refs);
+    return {
+      ...buildReferenceRankingStatePayload(store, settings),
+      reranked: !!reranked.reranked,
+    };
+  }
+  writeReferenceRankingStore(store, refs);
+  return buildReferenceRankingStatePayload(store, settings);
+});
+
+ipcMain.handle('browser:referenceRankingRecord', (_event, payload) => {
+  return recordReferenceRankingInteraction(payload || {});
+});
 
 ipcMain.handle('browser:memorySetEnabled', (_event, payload) => {
   const srId = String((payload && payload.srId) || '').trim();

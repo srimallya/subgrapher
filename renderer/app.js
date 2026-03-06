@@ -103,6 +103,14 @@ const state = {
   privateRoomEditorSaveTimer: null,
   settingsDraft: null,
   settingsPersisted: null,
+  referenceRanking: {
+    enabled: false,
+    enabledAt: 0,
+    lastRankedAt: 0,
+    orderIds: [],
+    scoreById: {},
+  },
+  visibleReferenceOrder: [],
   settingsDirty: false,
   settingsValidationErrors: {},
   settingsDiagnostics: null,
@@ -475,6 +483,97 @@ function getReferenceById(srId) {
 
 function ensureReferencesArray() {
   if (!Array.isArray(state.references)) state.references = [];
+}
+
+function normalizeReferenceSortText(value = '') {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function compareReferencesAlphabetically(a, b) {
+  const aTitle = normalizeReferenceSortText((a && a.title) || '') || normalizeReferenceSortText((a && a.intent) || '');
+  const bTitle = normalizeReferenceSortText((b && b.title) || '') || normalizeReferenceSortText((b && b.intent) || '');
+  if (aTitle !== bTitle) return aTitle.localeCompare(bTitle);
+  const aIntent = normalizeReferenceSortText((a && a.intent) || '');
+  const bIntent = normalizeReferenceSortText((b && b.intent) || '');
+  if (aIntent !== bIntent) return aIntent.localeCompare(bIntent);
+  return String((a && a.id) || '').localeCompare(String((b && b.id) || ''));
+}
+
+function compareReferencesByRankOrAlphabetical(a, b) {
+  const ranking = (state.referenceRanking && typeof state.referenceRanking === 'object') ? state.referenceRanking : {};
+  if (!ranking.enabled) return compareReferencesAlphabetically(a, b);
+  const orderIds = Array.isArray(ranking.orderIds) ? ranking.orderIds : [];
+  const orderMap = ranking.orderMap instanceof Map
+    ? ranking.orderMap
+    : new Map(orderIds.map((id, index) => [String(id || '').trim(), index]));
+  const aIndex = orderMap.has(String((a && a.id) || '').trim()) ? Number(orderMap.get(String((a && a.id) || '').trim())) : -1;
+  const bIndex = orderMap.has(String((b && b.id) || '').trim()) ? Number(orderMap.get(String((b && b.id) || '').trim())) : -1;
+  if (aIndex >= 0 && bIndex >= 0 && aIndex !== bIndex) return aIndex - bIndex;
+  return compareReferencesAlphabetically(a, b);
+}
+
+function getReferenceRankingPayloadOrderMap(payload = {}) {
+  const orderIds = Array.isArray(payload.order_ids) ? payload.order_ids.map((id) => String(id || '').trim()).filter(Boolean) : [];
+  return new Map(orderIds.map((id, index) => [id, index]));
+}
+
+async function refreshReferenceRankingState(options = {}) {
+  if (!api || typeof api.referenceRankingState !== 'function') return null;
+  let res = null;
+  try {
+    res = await api.referenceRankingState({ ensure_fresh: !!options.ensureFresh });
+  } catch (_) {
+    res = null;
+  }
+  if (!res || !res.ok) return null;
+  state.referenceRanking = {
+    enabled: !!res.enabled,
+    enabledAt: Number(res.enabled_at || 0),
+    lastRankedAt: Number(res.last_ranked_at || 0),
+    orderIds: Array.isArray(res.order_ids) ? res.order_ids.map((id) => String(id || '').trim()).filter(Boolean) : [],
+    orderMap: getReferenceRankingPayloadOrderMap(res),
+    scoreById: (res.scores && typeof res.scores === 'object') ? { ...res.scores } : {},
+  };
+  return state.referenceRanking;
+}
+
+function buildReferenceRankingInteractionPayload(action, options = {}) {
+  const payload = {
+    action: String(action || '').trim().toLowerCase(),
+    sr_id: String((options && options.srId) || state.activeSrId || '').trim(),
+  };
+  const ref = getReferenceById(payload.sr_id) || getActiveReference();
+  const useLiveWebContext = String((state.activeSurface && state.activeSurface.kind) || 'web') === 'web';
+  const fallbackWeb = useLiveWebContext && ref ? getActiveWebTab(ref) : null;
+  const browserTitle = String((options && options.browserTitle) || (fallbackWeb && fallbackWeb.title) || (useLiveWebContext ? state.browserCurrentTitle : '') || '').trim();
+  const browserUrl = String((options && options.browserUrl) || (fallbackWeb && fallbackWeb.url) || (useLiveWebContext ? state.browserCurrentUrl : '') || '').trim();
+  if (browserTitle) payload.browser_title = browserTitle;
+  if (browserUrl) payload.browser_url = browserUrl;
+  const chatPrompt = String((options && options.chatPrompt) || '').trim();
+  if (chatPrompt) payload.chat_prompt = chatPrompt;
+  return payload;
+}
+
+async function noteReferenceRankingInteraction(action, options = {}) {
+  if (!api || typeof api.referenceRankingRecord !== 'function') return null;
+  const payload = buildReferenceRankingInteractionPayload(action, options);
+  if (!payload.action || !payload.sr_id) return null;
+  let res = null;
+  try {
+    res = await api.referenceRankingRecord(payload);
+  } catch (_) {
+    res = null;
+  }
+  if (!res || !res.ok) return null;
+  state.referenceRanking = {
+    enabled: !!res.enabled,
+    enabledAt: Number(res.enabled_at || 0),
+    lastRankedAt: Number(res.last_ranked_at || 0),
+    orderIds: Array.isArray(res.order_ids) ? res.order_ids.map((id) => String(id || '').trim()).filter(Boolean) : [],
+    orderMap: getReferenceRankingPayloadOrderMap(res),
+    scoreById: (res.scores && typeof res.scores === 'object') ? { ...res.scores } : {},
+  };
+  return res;
 }
 
 function repairActiveReferenceSelection() {
@@ -1676,6 +1775,7 @@ async function convertActiveWebTabToArtifact() {
   renderDiffPanel();
   await syncActiveSurface();
   await syncUrlBarForActiveSurface();
+  void noteReferenceRankingInteraction('artifact_create', { srId: state.activeSrId });
   return true;
 }
 
@@ -1732,6 +1832,7 @@ async function renameActiveArtifactFromCommand(nameInput) {
   renderDiffPanel();
   await syncActiveSurface();
   await syncUrlBarForActiveSurface();
+  void noteReferenceRankingInteraction('artifact_edit', { srId: state.activeSrId });
   return true;
 }
 
@@ -1786,6 +1887,7 @@ async function removeActiveArtifactFromCommand() {
   renderDiffPanel();
   await syncActiveSurface();
   await syncUrlBarForActiveSurface();
+  void noteReferenceRankingInteraction('artifact_delete', { srId: state.activeSrId });
   return true;
 }
 
@@ -1904,6 +2006,7 @@ async function activateReferenceSurface(srId, surface = null) {
   await syncActiveSurface();
   if (activationSeq !== Number(state.referenceActivationSeq || 0) || String(state.activeSrId || '') !== next) return false;
   await refreshUncommittedActionCue();
+  void noteReferenceRankingInteraction('activate_reference', { srId: next });
   return true;
 }
 
@@ -1985,19 +2088,8 @@ function renderReferences() {
     if (childrenMap[parentId]) childrenMap[parentId].push(ref);
   });
 
-  const sortByPinnedThenUpdated = (a, b) => {
-    const aPinned = !!(a && a.pinned_root);
-    const bPinned = !!(b && b.pinned_root);
-    if (aPinned !== bPinned) return bPinned ? 1 : -1;
-    // Within the same zone, the active reference always sorts first
-    const aActive = String(a && a.id) === String(state.activeSrId);
-    const bActive = String(b && b.id) === String(state.activeSrId);
-    if (aActive !== bActive) return bActive ? 1 : -1;
-    return Number((b && b.updated_at) || 0) - Number((a && a.updated_at) || 0);
-  };
-
   Object.keys(childrenMap).forEach((parentId) => {
-    childrenMap[parentId].sort(sortByPinnedThenUpdated);
+    childrenMap[parentId].sort(compareReferencesByRankOrAlphabetical);
   });
 
   const roots = refs
@@ -2005,7 +2097,9 @@ function renderReferences() {
       const parentId = String((ref && ref.parent_id) || '').trim();
       return !parentId || !idMap[parentId];
     })
-    .sort(sortByPinnedThenUpdated);
+    .sort(compareReferencesByRankOrAlphabetical);
+  const pinnedRoots = roots.filter((ref) => !!(ref && ref.pinned_root));
+  const unpinnedRoots = roots.filter((ref) => !(ref && ref.pinned_root));
 
   let matchedIds = new Set();
   if (query) {
@@ -2040,6 +2134,7 @@ function renderReferences() {
   }
 
   if (!roots.length) {
+    state.visibleReferenceOrder = [];
     if (!allRefs.length) {
       list.innerHTML = '<div class="references-empty">No saved references yet.</div>';
     } else {
@@ -2133,8 +2228,26 @@ function renderReferences() {
     `;
   };
 
-  const treeMarkup = roots.map((root) => renderNode(root, 0)).filter(Boolean).join('');
+  const renderSection = (title, sectionRoots) => {
+    if (!Array.isArray(sectionRoots) || sectionRoots.length === 0) return '';
+    const content = sectionRoots.map((root) => renderNode(root, 0)).filter(Boolean).join('');
+    if (!content) return '';
+    return `
+      <section class="reference-section" data-reference-section="${escapeHtml(title.toLowerCase())}">
+        <div class="reference-section-label">${escapeHtml(title)}</div>
+        <div class="reference-section-body">${content}</div>
+      </section>
+    `;
+  };
+  const treeMarkup = [
+    renderSection('Pinned', pinnedRoots),
+    renderSection('Unpinned', unpinnedRoots),
+  ].filter(Boolean).join('');
   list.innerHTML = treeMarkup || '<div class="references-empty">No references match this query.</div>';
+  state.visibleReferenceOrder = Array.from(list.querySelectorAll('.reference-tree-node[data-sr-id]'))
+    .filter((node) => !!(node && (node.offsetParent || node.getClientRects().length)))
+    .map((node) => String(node.getAttribute('data-sr-id') || '').trim())
+    .filter(Boolean);
 
   list.querySelectorAll('button[data-action="toggle-collapse"]').forEach((button) => {
     button.addEventListener('click', (event) => {
@@ -2553,6 +2666,11 @@ function renderWorkspaceTabs() {
             renderReferences();
             renderWorkspaceTabs();
             await syncActiveSurface();
+            void noteReferenceRankingInteraction('add_tab', {
+              srId: state.activeSrId,
+              browserTitle: currentTitle,
+              browserUrl: currentUrl,
+            });
           }
           return;
         }
@@ -2582,6 +2700,7 @@ function renderWorkspaceTabs() {
             renderContextFiles();
             renderDiffPanel();
             await syncActiveSurface();
+            void noteReferenceRankingInteraction('add_tab', { srId: state.activeSrId, browserTitle: 'Skills' });
           }
         }
       });
@@ -2629,6 +2748,7 @@ function renderWorkspaceTabs() {
         rememberSurfaceForReference(state.activeSrId, state.activeSurface);
         renderWorkspaceTabs();
         await syncActiveSurface();
+        void noteReferenceRankingInteraction('remove_tab', { srId: state.activeSrId });
       }
     });
   });
@@ -2677,6 +2797,7 @@ function renderWorkspaceTabs() {
       }
       renderWorkspaceTabs();
       await syncActiveSurface();
+      void noteReferenceRankingInteraction('remove_tab', { srId: state.activeSrId });
     });
   });
 
@@ -2724,6 +2845,7 @@ function renderWorkspaceTabs() {
       }
       renderWorkspaceTabs();
       await syncActiveSurface();
+      void noteReferenceRankingInteraction('remove_tab', { srId: state.activeSrId });
     });
   });
 
@@ -2788,6 +2910,7 @@ function renderWorkspaceTabs() {
         renderReferences();
         renderWorkspaceTabs();
         syncActiveSurface();
+        void noteReferenceRankingInteraction('artifact_delete', { srId: state.activeSrId });
       }
     });
   });
@@ -3050,6 +3173,170 @@ function isEditableKeyboardTarget(target) {
   return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
 }
 
+function getFocusedEditableElement() {
+  const active = document.activeElement;
+  return isEditableKeyboardTarget(active) ? active : null;
+}
+
+function clearActiveDomSelection() {
+  try {
+    const selection = window.getSelection ? window.getSelection() : null;
+    if (selection && typeof selection.removeAllRanges === 'function') selection.removeAllRanges();
+  } catch (_) {
+    // noop
+  }
+}
+
+function blurFocusedEditableAndClearSelection() {
+  const active = getFocusedEditableElement();
+  if (!active) {
+    clearActiveDomSelection();
+    return false;
+  }
+  if (typeof active.selectionStart === 'number' && typeof active.selectionEnd === 'number' && typeof active.setSelectionRange === 'function') {
+    const end = Number(active.selectionEnd || 0);
+    try {
+      active.setSelectionRange(end, end);
+    } catch (_) {
+      // noop
+    }
+  }
+  clearActiveDomSelection();
+  if (typeof active.blur === 'function') active.blur();
+  return true;
+}
+
+function getReferenceTransportOrder() {
+  return Array.isArray(state.visibleReferenceOrder) ? state.visibleReferenceOrder.map((id) => String(id || '').trim()).filter(Boolean) : [];
+}
+
+function getWorkspaceTransportItems(ref = getActiveReference()) {
+  if (!ref) return [];
+  const tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
+  const webTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || 'web').trim().toLowerCase() === 'web');
+  const filesTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'files');
+  const skillsTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'skills');
+  const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
+  return [
+    ...webTabs.map((tab) => ({ kind: 'web', id: String((tab && tab.id) || '').trim() })),
+    ...filesTabs.map((tab) => ({ kind: 'files', id: String((tab && tab.id) || '').trim() })),
+    ...skillsTabs.map((tab) => ({ kind: 'skills', id: String((tab && tab.id) || '').trim() })),
+    ...artifacts.map((artifact) => ({ kind: 'artifact', id: String((artifact && artifact.id) || '').trim() })),
+  ].filter((item) => item.id);
+}
+
+function getActiveWorkspaceTransportIndex(items = getWorkspaceTransportItems()) {
+  const list = Array.isArray(items) ? items : [];
+  const activeWebId = state.activeSurface.kind === 'web'
+    ? String(state.activeSurface.tabId || (getActiveWebTab(getActiveReference()) && getActiveWebTab(getActiveReference()).id) || '').trim()
+    : '';
+  const activeIdByKind = {
+    web: activeWebId,
+    files: String(state.activeSurface.filesTabId || '').trim(),
+    skills: String(state.activeSurface.skillsTabId || '').trim(),
+    artifact: String(state.activeSurface.artifactId || '').trim(),
+  };
+  return list.findIndex((item) => item.kind === String(state.activeSurface.kind || '').trim() && item.id === activeIdByKind[item.kind]);
+}
+
+async function activateWorkspaceTransportItem(item) {
+  const next = (item && typeof item === 'object') ? item : null;
+  if (!next || !next.id || !state.activeSrId) return false;
+  const replayMode = isMemoryReplayActive();
+  if (next.kind === 'web') {
+    if (replayMode) {
+      state.activeSurface = makeActiveSurface('web', { tabId: next.id });
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+      return true;
+    }
+    const res = await api.srSetActiveTab(state.activeSrId, next.id);
+    if (!res || !res.ok) return false;
+    state.references = res.references || state.references;
+    state.activeSurface = makeActiveSurface('web', { tabId: next.id });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    return true;
+  }
+  if (next.kind === 'files') {
+    if (replayMode) {
+      state.activeSurface = makeActiveSurface('files', { filesTabId: next.id });
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+      return true;
+    }
+    const res = await api.srSetActiveTab(state.activeSrId, next.id);
+    state.references = (res && res.ok) ? (res.references || state.references) : await api.srList();
+    state.activeSurface = makeActiveSurface('files', { filesTabId: next.id });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    return true;
+  }
+  if (next.kind === 'skills') {
+    if (replayMode) {
+      state.activeSurface = makeActiveSurface('skills', { skillsTabId: next.id });
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+      return true;
+    }
+    const res = await api.srSetActiveTab(state.activeSrId, next.id);
+    state.references = (res && res.ok) ? (res.references || state.references) : await api.srList();
+    state.activeSurface = makeActiveSurface('skills', { skillsTabId: next.id });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    return true;
+  }
+  if (next.kind === 'artifact') {
+    state.activeSurface = makeActiveSurface('artifact', { artifactId: next.id });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    return true;
+  }
+  return false;
+}
+
+async function stepReferenceTransport(delta) {
+  const order = getReferenceTransportOrder();
+  if (!order.length) return false;
+  const currentIndex = order.indexOf(String(state.activeSrId || '').trim());
+  const fallbackIndex = delta > 0 ? -1 : order.length;
+  const baseIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+  const nextIndex = baseIndex + (delta > 0 ? 1 : -1);
+  if (nextIndex < 0 || nextIndex >= order.length) return false;
+  await activateReferenceSurface(order[nextIndex]);
+  return true;
+}
+
+async function stepWorkspaceTabTransport(delta) {
+  const items = getWorkspaceTransportItems();
+  if (!items.length) return false;
+  const currentIndex = getActiveWorkspaceTransportIndex(items);
+  const fallbackIndex = delta > 0 ? -1 : items.length;
+  const baseIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+  const nextIndex = baseIndex + (delta > 0 ? 1 : -1);
+  if (nextIndex < 0 || nextIndex >= items.length) return false;
+  return activateWorkspaceTransportItem(items[nextIndex]);
+}
+
+async function focusLuminoInputFromShortcut() {
+  if (state.appView !== 'workspace') return false;
+  if (window.innerWidth <= 980) {
+    document.body.classList.add('mobile-right-open');
+    document.body.classList.remove('mobile-left-open');
+    e('workspace-right-rail-toggle-btn')?.setAttribute('aria-expanded', 'true');
+  }
+  if (state.chatPanelCollapsed) setChatPanelCollapsed(false);
+  const input = e('chat-input');
+  if (!input) return false;
+  input.focus();
+  if (typeof input.select === 'function' && String(input.value || '').trim()) input.select();
+  return true;
+}
+
 function parseShortcutCommandFromKeyboardEvent(event) {
   if (!event) return '';
   const key = String(event.key || '');
@@ -3058,6 +3345,12 @@ function parseShortcutCommandFromKeyboardEvent(event) {
 
   const hasCtrlOrMeta = !!(event.ctrlKey || event.metaKey);
   if (hasCtrlOrMeta && !event.altKey) {
+    if (!event.shiftKey) {
+      if (key === 'ArrowUp') return 'reference_prev';
+      if (key === 'ArrowDown') return 'reference_next';
+      if (key === 'ArrowLeft') return 'workspace_tab_prev';
+      if (key === 'ArrowRight') return 'workspace_tab_next';
+    }
     if (key === '0' || code === 'Digit0' || code === 'Numpad0') return 'web_zoom_reset';
     if (key === '+' || key === '=' || code === 'NumpadAdd') return 'web_zoom_in';
     if (key === '-' || key === '_' || code === 'NumpadSubtract') return 'web_zoom_out';
@@ -3070,6 +3363,9 @@ function parseShortcutCommandFromKeyboardEvent(event) {
     if (key === '-' || key === '_' || code === 'NumpadSubtract') return 'ui_zoom_out';
     if (lowerKey === 'z' || code === 'KeyZ') return 'toggle_zen';
   }
+  if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+    if (lowerKey === 'l' || code === 'KeyL') return 'focus_lumino';
+  }
   return '';
 }
 
@@ -3080,6 +3376,31 @@ async function executeShortcutCommand(command) {
   if (cmd === 'toggle_zen') {
     await toggleZenMode();
     showPassiveNotification(`Zen mode ${state.zenMode ? 'on' : 'off'}.`, 1000);
+    return;
+  }
+
+  if (cmd === 'reference_prev') {
+    await stepReferenceTransport(-1);
+    return;
+  }
+
+  if (cmd === 'reference_next') {
+    await stepReferenceTransport(1);
+    return;
+  }
+
+  if (cmd === 'workspace_tab_prev') {
+    await stepWorkspaceTabTransport(-1);
+    return;
+  }
+
+  if (cmd === 'workspace_tab_next') {
+    await stepWorkspaceTabTransport(1);
+    return;
+  }
+
+  if (cmd === 'focus_lumino') {
+    await focusLuminoInputFromShortcut();
     return;
   }
 
@@ -3149,13 +3470,25 @@ function bindBrowserZoomShortcuts() {
     const key = String(event.key || '');
     if (
       key === 'Escape'
+      && !event.ctrlKey
+      && !event.metaKey
+      && !event.altKey
+      && !event.shiftKey
+      && blurFocusedEditableAndClearSelection()
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (
+      key === 'Escape'
       && state.zenMode
       && !event.ctrlKey
       && !event.metaKey
       && !event.altKey
       && !event.shiftKey
       && !hasBlockingOverlay()
-      && !isEditableKeyboardTarget(event.target)
+      && !getFocusedEditableElement()
     ) {
       event.preventDefault();
       event.stopPropagation();
@@ -3164,7 +3497,7 @@ function bindBrowserZoomShortcuts() {
       return;
     }
     if (hasBlockingOverlay()) return;
-    if (isEditableKeyboardTarget(event.target)) return;
+    if (getFocusedEditableElement()) return;
     const command = parseShortcutCommandFromKeyboardEvent(event);
     if (!command) return;
     event.preventDefault();
@@ -3910,6 +4243,7 @@ function renderFilesPanel() {
       renderFilesPanel();
       renderDiffPanel();
       await syncActiveSurface();
+      void noteReferenceRankingInteraction('context_file_remove', { srId: state.activeSrId });
     });
   });
 }
@@ -4852,6 +5186,7 @@ async function sendChatMessage() {
   state.chatUserNodeByRequest.set(requestId, userNode);
   state.chatStatusByRequest.delete(requestId);
   await api.srAppendChatMessage(state.activeSrId, 'user', message);
+  void noteReferenceRankingInteraction('chat_send', { srId: state.activeSrId, chatPrompt: message });
   state.activeChatRequestId = requestId;
   state.activeChatRequestSrId = state.activeSrId;
   clearStreamingAssistantState();
@@ -5037,6 +5372,7 @@ async function importExternalContextFile(filePath) {
   renderWorkspaceTabs();
   renderContextFiles();
   renderFilesPanel();
+  void noteReferenceRankingInteraction('context_file_add', { srId: state.activeSrId, browserTitle: filePath });
 }
 
 async function commitCurrentPageToActiveReference() {
@@ -5076,6 +5412,11 @@ async function commitCurrentPageToActiveReference() {
     if (state.activeSrId && currentTab.url) {
       void maybeQueueYouTubeTranscriptIngestion(state.activeSrId, currentTab.url, currentTab.title, { silentFailure: true });
     }
+    void noteReferenceRankingInteraction('commit_page', {
+      srId: state.activeSrId,
+      browserTitle: currentTab.title,
+      browserUrl: currentTab.url,
+    });
   }
 }
 
@@ -6602,6 +6943,7 @@ function normalizeSettingsDraft(raw = {}) {
     : 'lmstudio';
   return {
     default_search_engine: String(src.default_search_engine || 'ddg').trim().toLowerCase(),
+    reference_ranking_enabled: !!src.reference_ranking_enabled,
     lumino_last_provider: String(src.lumino_last_provider || 'openai').trim().toLowerCase(),
     lumino_last_model: String(src.lumino_last_model || '').trim(),
     lmstudio_base_url: String(src.lmstudio_base_url || 'http://127.0.0.1:1234').trim(),
@@ -7048,6 +7390,7 @@ async function saveSettingsDraft() {
   state.settingsDirty = false;
   state.settingsSaveState = 'Saved.';
   applySettingsToTopbar(state.settingsPersisted);
+  await refreshReferenceRankingState({ ensureFresh: true });
   await fetchModelsForProvider(state.settingsPersisted.lumino_last_provider, {
     statusId: 'provider-status',
     forceModel: state.settingsPersisted.lumino_last_model,
@@ -7061,6 +7404,7 @@ async function saveSettingsDraft() {
   await refreshTrustCommonsStatus();
   await refreshHyperwebStatus();
   renderSettingsForm();
+  renderReferences();
   const diagnostics = await api.settingsDiagnostics();
   if (diagnostics && diagnostics.ok) {
     state.settingsDiagnostics = diagnostics;
@@ -7868,6 +8212,7 @@ function bindControls() {
         const updatedArtifact = (Array.isArray(updatedRef && updatedRef.artifacts) ? updatedRef.artifacts : [])
           .find((item) => String((item && item.id) || '') === String(artifact.id || ''));
         if (updatedArtifact) updateArtifactRuntimeControls(updatedArtifact);
+        void noteReferenceRankingInteraction('artifact_edit', { srId: state.activeSrId });
       } else if (status) {
         status.textContent = 'Save failed';
       }
@@ -9035,6 +9380,7 @@ async function initialize() {
     state.selectedProvider = PROVIDERS.includes(savedProvider) ? savedProvider : 'openai';
     state.selectedModel = savedModel;
   }
+  await refreshReferenceRankingState({ ensureFresh: true });
 
   state.references = await api.srList();
   if (!Array.isArray(state.references) || state.references.length === 0) {
