@@ -1733,6 +1733,47 @@ summary:focus-visible {
   border-radius: var(--radius-sm);
   background: #1f1f1f;
   box-shadow: var(--shadow);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.history-map-tooltip > div {
+  min-width: 0;
+}
+
+.history-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.history-map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #242424;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-map-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.history-map-legend-label {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .history-preview-cached-url,

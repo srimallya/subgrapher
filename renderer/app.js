@@ -6079,6 +6079,47 @@ function historyClusterColor(clusterId) {
   return palette[idx];
 }
 
+function renderHistoryMapLegend(points) {
+  const node = e('history-map-legend');
+  if (!node) return;
+  const rows = Array.isArray(points) ? points : [];
+  if (!rows.length) {
+    node.innerHTML = '';
+    return;
+  }
+  const clusters = new Map();
+  rows.forEach((point) => {
+    const clusterId = Number((point && point.cluster_id) || 0);
+    if (!clusters.has(clusterId)) {
+      clusters.set(clusterId, { clusterId, count: 0, tokenCounts: new Map() });
+    }
+    const bucket = clusters.get(clusterId);
+    bucket.count += 1;
+    (Array.isArray(point && point.semantic_tokens) ? point.semantic_tokens : []).forEach((token) => {
+      const key = String(token || '').trim().toLowerCase();
+      if (!key) return;
+      bucket.tokenCounts.set(key, Number(bucket.tokenCounts.get(key) || 0) + 1);
+    });
+  });
+  node.innerHTML = Array.from(clusters.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6)
+    .map((cluster) => {
+      const label = Array.from(cluster.tokenCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 2)
+        .map(([token]) => token)
+        .join(' · ') || `Cluster ${cluster.clusterId + 1}`;
+      return `
+        <div class="history-map-legend-item" title="${escapeHtml(label)}">
+          <span class="history-map-legend-dot" style="background:${historyClusterColor(cluster.clusterId)}"></span>
+          <span class="history-map-legend-label">${escapeHtml(label)}</span>
+          <span class="muted">${cluster.count}</span>
+        </div>
+      `;
+    }).join('');
+}
+
 function historyPointById(pointId) {
   return (Array.isArray(state.historyMapPoints) ? state.historyMapPoints : []).find((point) => String((point && point.id) || '') === String(pointId || '')) || null;
 }
@@ -6225,6 +6266,7 @@ function drawHistorySemanticMap() {
   if (!ctx) return;
 
   const points = Array.isArray(state.historyMapPoints) ? state.historyMapPoints : [];
+  renderHistoryMapLegend(points);
   const bounds = state.historyMapBounds || { min_x: -1, max_x: 1, min_y: -1, max_y: 1 };
   const dpr = Math.max(1, Number(window.devicePixelRatio || 1));
   const cssWidth = Math.max(240, Math.floor(canvas.clientWidth || 900));
