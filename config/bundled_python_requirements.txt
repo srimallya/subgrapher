@@ -6,3 +6,5 @@ scipy==1.15.1
 seaborn==0.13.2
 plotly==5.24.1
 requests==2.32.3
+Pillow==11.3.0
+rapidocr-onnxruntime==1.4.4

@@ -6,5 +6,7 @@
   "seaborn",
   "plotly",
   "pygame",
-  "requests"
+  "requests",
+  "pillow",
+  "rapidocr-onnxruntime"
 ]

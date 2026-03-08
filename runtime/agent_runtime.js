@@ -542,6 +542,28 @@ const AGENT_TOOLS = [
     },
   },
   {
+    name: 'ocr_context_images',
+    allowed_callers: ['direct'],
+    description: [
+      'Run local Python OCR on mounted image context files.',
+      'Use this when the task is extracting visible text or filename-like tokens from many images without using model vision.',
+      'Returns per-image OCR text, regex matches, inferred filename-like matches, and the best candidate for each image.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        context_file_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional specific image context file IDs. If omitted, OCR runs across image context files in scope.',
+        },
+        match_pattern: { type: 'string', description: 'Optional regex used to extract high-priority matches from OCR text.' },
+        max_files: { type: 'number', description: 'Optional cap on images processed in one call (default 200, max 500).' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'open_web_tab',
     allowed_callers: ['direct'],
     description: 'Open a URL in a web tab in the active reference workspace.',

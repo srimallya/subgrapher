@@ -70,6 +70,9 @@ This implementation delivers:
     - tries active provider native image understanding first (when available for selected model)
     - falls back automatically to LM Studio image analysis on native failure/unavailability
     - supports `image_url`, `local_path`, and mounted-file `context_file_id`
+  - local OCR for mounted images:
+    - `ocr_context_images` runs bundled Python OCR over image context files without using model vision
+    - returns raw OCR text plus filename-like candidates for batch extraction workflows
 - Local-file abstraction routing:
   - when abstraction is enabled and a non-LM Studio provider is selected, local mounted files are abstracted before remote use
   - image/doc/pdf/binary context files can be analyzed through LM Studio during abstraction copy generation
@@ -109,6 +112,7 @@ This implementation delivers:
   - packaged builds use immutable runtime policy (`pip install` disabled at runtime)
   - if bundled Python is missing in Windows packaging, app falls back to system Python for tool execution where available
   - `requests` is available via bundled dependency and sandbox fallback shim
+  - bundled OCR dependencies include `Pillow` and `rapidocr-onnxruntime`
   - pygame compatibility is gated: pygame runtime hooks are enabled only when user code imports/uses `pygame`
 
 ## Run

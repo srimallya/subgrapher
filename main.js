@@ -30,6 +30,7 @@ const {
 const { PythonSandboxManager, cleanupStaleSandboxes, spawnPythonInteractiveProcess } = require('./runtime/python_sandbox');
 const { installAllowedPackages } = require('./runtime/python_packages');
 const { createPythonRuntimeResolver } = require('./runtime/python_runtime');
+const { buildBatchImageOcrScript, parseBatchImageOcrResult } = require('./runtime/python_ocr');
 const { TrustCommonsSyncBridge, isLoopbackUrl } = require('./runtime/trustcommons_sync_bridge');
 const keychain = require('./runtime/keychain');
 const trustCommonsIdentity = require('./runtime/trustcommons_identity');
@@ -12659,6 +12660,114 @@ async function runPythonForReference(srId, code, timeoutMs = PYTHON_EXEC_TIMEOUT
   return runRes;
 }
 
+function selectImageContextFiles(ref, options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const requestedIds = Array.isArray(opts.contextFileIds)
+    ? opts.contextFileIds.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const requestedSet = new Set(requestedIds);
+  const maxFiles = Number.isFinite(Number(opts.maxFiles))
+    ? Math.max(1, Math.min(500, Math.round(Number(opts.maxFiles))))
+    : 200;
+  const contextFiles = Array.isArray(ref && ref.context_files) ? ref.context_files : [];
+  const selected = [];
+  let totalImages = 0;
+
+  contextFiles.forEach((file) => {
+    const safe = (file && typeof file === 'object') ? file : {};
+    const storedPath = String(safe.stored_path || '').trim();
+    const relativePath = String(safe.relative_path || storedPath || '').trim();
+    const ext = String(path.extname(relativePath) || '').trim().toLowerCase();
+    const mimeType = String(safe.mime_type || detectMimeType(ext, isTextExtension(ext))).trim();
+    const isImage = isImageExtension(ext) || (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml');
+    if (!isImage) return;
+    totalImages += 1;
+    const fileId = String(safe.id || '').trim();
+    if (requestedSet.size > 0 && !requestedSet.has(fileId)) return;
+    if (!storedPath || !fs.existsSync(storedPath)) return;
+    if (selected.length >= maxFiles) return;
+    selected.push({
+      context_file_id: fileId,
+      file_name: String(safe.original_name || relativePath || path.basename(storedPath) || '').trim(),
+      relative_path: relativePath || path.basename(storedPath),
+      stored_path: storedPath,
+    });
+  });
+
+  return {
+    selected,
+    requested_count: requestedIds.length,
+    total_images: totalImages,
+  };
+}
+
+async function runBatchContextImageOcr(srId, ref, options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const selection = selectImageContextFiles(ref, {
+    contextFileIds: opts.contextFileIds,
+    maxFiles: opts.maxFiles,
+  });
+  const jobs = Array.isArray(selection.selected) ? selection.selected : [];
+  if (jobs.length === 0) {
+    return {
+      ok: false,
+      message: selection.requested_count > 0
+        ? 'No matching image context files were found.'
+        : 'No image context files are available.',
+      results: [],
+      selected_count: 0,
+      total_images: Number(selection.total_images || 0),
+    };
+  }
+
+  const code = buildBatchImageOcrScript({
+    jobs,
+    matchPattern: String(opts.matchPattern || '').trim(),
+  });
+  const timeoutMs = Math.max(20_000, Math.min(5 * 60_000, 12_000 + (jobs.length * 2_500)));
+  const runRes = await runPythonForReference(srId, code, timeoutMs, {}, 'tool');
+  const payload = parseBatchImageOcrResult(runRes && runRes.stdout);
+  if (!runRes || !runRes.ok || !payload || !Array.isArray(payload.results)) {
+    return {
+      ok: false,
+      message: String((runRes && runRes.stderr) || 'OCR execution failed.'),
+      results: [],
+      selected_count: jobs.length,
+      total_images: Number(selection.total_images || 0),
+      execution_id: String((runRes && runRes.execution_id) || ''),
+      stderr: String((runRes && runRes.stderr) || ''),
+      stdout: String((runRes && runRes.stdout) || ''),
+    };
+  }
+
+  return {
+    ok: true,
+    message: `OCR completed for ${payload.results.length} image(s).`,
+    engine: String(payload.engine || 'rapidocr-onnxruntime'),
+    results: payload.results.map((item) => ({
+      context_file_id: String((item && item.context_file_id) || '').trim(),
+      file_name: String((item && item.file_name) || '').trim(),
+      relative_path: String((item && item.relative_path) || '').trim(),
+      ok: !!(item && item.ok),
+      error: String((item && item.error) || '').trim(),
+      text: String((item && item.text) || ''),
+      matches: Array.isArray(item && item.matches) ? item.matches.map((value) => String(value || '').trim()).filter(Boolean) : [],
+      inferred_matches: Array.isArray(item && item.inferred_matches) ? item.inferred_matches.map((value) => String(value || '').trim()).filter(Boolean) : [],
+      best_match: String((item && item.best_match) || '').trim(),
+      lines: Array.isArray(item && item.lines)
+        ? item.lines.map((line) => ({
+          text: String((line && line.text) || '').trim(),
+          score: Number.isFinite(Number(line && line.score)) ? Number(line.score) : 0,
+        })).filter((line) => line.text)
+        : [],
+      variant_used: String((item && item.variant_used) || '').trim(),
+    })),
+    selected_count: jobs.length,
+    total_images: Number(selection.total_images || 0),
+    execution_id: String((runRes && runRes.execution_id) || ''),
+  };
+}
+
 async function dispatchProgrammaticTool(req, { srId, refs }) {
   const name = String((req && req.name) || '').trim();
   const args = (req && typeof req.args === 'object' && req.args !== null) ? req.args : {};
@@ -12990,6 +13099,12 @@ function formatToolStatusStart(toolName, args = {}) {
   if (name === 'analyze_image') {
     const target = String(payload.local_path || payload.image_url || payload.context_file_id || '').trim();
     return `Analyzing image: ${trimStatusText(target, 96) || '(selected image)'}`;
+  }
+  if (name === 'ocr_context_images') {
+    const count = Array.isArray(payload.context_file_ids) ? payload.context_file_ids.length : 0;
+    return count > 0
+      ? `Running OCR on ${count} image context file(s)...`
+      : 'Running OCR on image context files...';
   }
   if (name === 'capture_html_artifact_png') {
     const target = String(payload.artifact_id || payload.sr_id || '').trim();
@@ -14255,6 +14370,29 @@ async function executeLuminoChat(input, options = {}) {
               mime_type: String(analysisRes.mime_type || ''),
               bytes: Number(analysisRes.bytes || 0),
             },
+          };
+        }
+
+        if (name === 'ocr_context_images') {
+          const refs = getReferences();
+          const refIdx = findReferenceIndex(refs, srId);
+          if (refIdx < 0) {
+            return { ok: false, message: 'Active reference not found.', tool_output: { ok: false, message: 'Active reference not found.' } };
+          }
+          const contextFileIds = Array.isArray(args.context_file_ids)
+            ? args.context_file_ids.map((item) => String(item || '').trim()).filter(Boolean)
+            : [];
+          const ocrRes = await runBatchContextImageOcr(srId, refs[refIdx], {
+            contextFileIds,
+            maxFiles: Number(args.max_files || 0),
+            matchPattern: String(args.match_pattern || '').trim(),
+          });
+          return {
+            ok: !!(ocrRes && ocrRes.ok),
+            message: ocrRes && ocrRes.ok
+              ? `OCR completed for ${ocrRes.selected_count} image(s).`
+              : String((ocrRes && ocrRes.message) || 'OCR failed.'),
+            tool_output: ocrRes || { ok: false, message: 'OCR failed.' },
           };
         }
 
