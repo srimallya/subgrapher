@@ -18,6 +18,7 @@ const state = {
     artifactId: null,
     filesTabId: null,
     skillsTabId: null,
+    mailTabId: null,
   },
   artifactSaveTimer: null,
   artifactPreviewSeq: 0,
@@ -62,6 +63,7 @@ const state = {
   activeArtifactByRef: new Map(),
   activeFilesByRef: new Map(),
   activeSkillsByRef: new Map(),
+  activeMailByRef: new Map(),
   workspaceBrowserTabMap: new Map(),
   trustCommonsStatus: null,
   hyperwebStatus: null,
@@ -115,6 +117,10 @@ const state = {
   settingsDirty: false,
   settingsValidationErrors: {},
   settingsDiagnostics: null,
+  mailStatus: null,
+  mailSearchQueryByRef: new Map(),
+  mailSearchResultsByRef: new Map(),
+  mailSelectedSourceIdsByRef: new Map(),
   appDataProtectionStatus: null,
   settingsSaveState: '',
   telegramRuntimeStatus: null,
@@ -473,6 +479,7 @@ function makeActiveSurface(kind, patch = {}) {
     artifactId: null,
     filesTabId: null,
     skillsTabId: null,
+    mailTabId: null,
     ...(patch && typeof patch === 'object' ? patch : {}),
   };
 }
@@ -640,23 +647,34 @@ function rememberSurfaceForReference(srId, surface = state.activeSurface) {
     state.activeArtifactByRef.set(refId, String(surface.artifactId));
     state.activeFilesByRef.delete(refId);
     state.activeSkillsByRef.delete(refId);
+    state.activeMailByRef.delete(refId);
     return;
   }
   if (kind === 'files' && surface.filesTabId) {
     state.activeFilesByRef.set(refId, String(surface.filesTabId));
     state.activeArtifactByRef.delete(refId);
     state.activeSkillsByRef.delete(refId);
+    state.activeMailByRef.delete(refId);
     return;
   }
   if (kind === 'skills' && surface.skillsTabId) {
     state.activeSkillsByRef.set(refId, String(surface.skillsTabId));
     state.activeArtifactByRef.delete(refId);
     state.activeFilesByRef.delete(refId);
+    state.activeMailByRef.delete(refId);
+    return;
+  }
+  if (kind === 'mail' && surface.mailTabId) {
+    state.activeMailByRef.set(refId, String(surface.mailTabId));
+    state.activeArtifactByRef.delete(refId);
+    state.activeFilesByRef.delete(refId);
+    state.activeSkillsByRef.delete(refId);
     return;
   }
   state.activeArtifactByRef.delete(refId);
   state.activeFilesByRef.delete(refId);
   state.activeSkillsByRef.delete(refId);
+  state.activeMailByRef.delete(refId);
 }
 
 function restoreSurfaceForReference(ref) {
@@ -684,6 +702,14 @@ function restoreSurfaceForReference(ref) {
     && String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'skills'
   ))) {
     return makeActiveSurface('skills', { skillsTabId });
+  }
+
+  const mailTabId = String(state.activeMailByRef.get(srId) || '').trim();
+  if (mailTabId && tabs.some((tab) => (
+    String((tab && tab.id) || '') === mailTabId
+    && String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail'
+  ))) {
+    return makeActiveSurface('mail', { mailTabId });
   }
 
   const activeWeb = getActiveWebTab(ref);
@@ -1362,6 +1388,18 @@ function getActiveSkillsTab(ref) {
   const preferredId = surfaceTabId || String(ref.active_tab_id || '');
   const preferred = skillsTabs.find((tab) => String((tab && tab.id) || '') === preferredId);
   return preferred || skillsTabs[0];
+}
+
+function getActiveMailTab(ref) {
+  if (!ref || !Array.isArray(ref.tabs)) return null;
+  const mailTabs = ref.tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail');
+  if (!mailTabs.length) return null;
+  const surfaceTabId = state.activeSurface.kind === 'mail'
+    ? String(state.activeSurface.mailTabId || '')
+    : '';
+  const preferredId = surfaceTabId || String(ref.active_tab_id || '');
+  const preferred = mailTabs.find((tab) => String((tab && tab.id) || '') === preferredId);
+  return preferred || mailTabs[0];
 }
 
 function getNextArtifactName(ref) {
@@ -2058,7 +2096,8 @@ function updateActiveReferenceMeta() {
   const tabCount = Array.isArray(ref.tabs) ? ref.tabs.length : 0;
   const artifactCount = Array.isArray(ref.artifacts) ? ref.artifacts.length : 0;
   const contextCount = Array.isArray(ref.context_files) ? ref.context_files.length : 0;
-  meta.textContent = `${tabCount} tab(s) · ${artifactCount} artifact(s) · ${contextCount} context file(s)`;
+  const mailCount = Array.isArray(ref.mail_threads) ? ref.mail_threads.length : 0;
+  meta.textContent = `${tabCount} tab(s) · ${artifactCount} artifact(s) · ${contextCount} context file(s) · ${mailCount} mail thread(s)`;
 }
 
 async function commitInlineRename(srId, nextTitle) {
@@ -2580,6 +2619,7 @@ function renderWorkspaceTabs() {
   const webTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || 'web') === 'web');
   const filesTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'files');
   const skillsTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'skills');
+  const mailTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail');
   const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
 
   const activeWeb = getActiveWebTab(ref);
@@ -2591,6 +2631,7 @@ function renderWorkspaceTabs() {
       <button type="button" data-workspace-add-action="web">+ web</button>
       <button type="button" data-workspace-add-action="md">+ md</button>
       <button type="button" data-workspace-add-action="folder">+ folder</button>
+      <button type="button" data-workspace-add-action="mail">+ mail</button>
       <button type="button" data-workspace-add-action="skills">+ skills</button>
     </div>
     ${webTabs.map((tab) => `
@@ -2611,6 +2652,12 @@ function renderWorkspaceTabs() {
         <button data-close-skills="${escapeHtml(tab.id)}" title="Close skills tab">×</button>
       </div>
     `).join('')}
+    ${mailTabs.map((tab) => `
+      <div class="workspace-tab ${(state.activeSurface.kind === 'mail' && String(state.activeSurface.mailTabId || '') === String(tab.id || '')) ? 'active' : ''}" data-kind="mail" data-tab-id="${escapeHtml(tab.id)}">
+        <span class="workspace-tab-label-wrap"><span class="workspace-tab-label" title="${escapeHtml(tab.title || 'Mail')}">${escapeHtml(tab.title || 'Mail')}</span></span>
+        <button data-close-mail="${escapeHtml(tab.id)}" title="Close mail tab">×</button>
+      </div>
+    `).join('')}
     ${artifacts.map((artifact) => `
       <div class="workspace-tab ${(state.activeSurface.kind === 'artifact' && String(state.activeSurface.artifactId || '') === String(artifact.id || '')) ? 'active' : ''}" data-kind="artifact" data-artifact-id="${escapeHtml(artifact.id)}">
         <span class="workspace-tab-label-wrap"><span class="workspace-tab-label" title="${escapeHtml(artifact.title || 'Artifact')}">${escapeHtml(artifact.title || 'Artifact')}</span></span>
@@ -2623,22 +2670,16 @@ function renderWorkspaceTabs() {
   const addMenu = e('workspace-add-menu');
   if (addBtn && addMenu) {
     addBtn.disabled = replayMode;
-    const positionAddMenu = () => {
-      const rect = addBtn.getBoundingClientRect();
-      const menuHeight = Math.max(120, Number(addMenu.offsetHeight || 0));
-      const menuWidth = Math.max(130, Number(addMenu.offsetWidth || 0));
-      const top = Math.max(8, Math.round(rect.top - menuHeight - 6));
-      const maxLeft = Math.max(8, Math.round(window.innerWidth - menuWidth - 8));
-      const left = Math.max(8, Math.min(Math.round(rect.left), maxLeft));
-      addMenu.style.left = `${left}px`;
-      addMenu.style.top = `${top}px`;
-    };
-    const hideAddMenu = () => {
+    const hideAddMenu = async () => {
+      const wasOpen = !addMenu.classList.contains('hidden');
       addMenu.classList.add('hidden');
       addMenu.style.visibility = '';
       addMenu.style.pointerEvents = '';
+      addMenu.style.left = '';
+      addMenu.style.top = '';
+      if (wasOpen) await syncActiveSurface();
     };
-    addBtn.addEventListener('click', (event) => {
+    addBtn.addEventListener('click', async (event) => {
       if (replayMode) {
         event.preventDefault();
         showPassiveNotification('Memory replay is read-only.');
@@ -2648,18 +2689,17 @@ function renderWorkspaceTabs() {
       event.stopPropagation();
       const willOpen = addMenu.classList.contains('hidden');
       if (!willOpen) {
-        hideAddMenu();
+        await hideAddMenu();
         return;
       }
       addMenu.classList.remove('hidden');
-      addMenu.style.visibility = 'hidden';
-      addMenu.style.pointerEvents = 'none';
-      positionAddMenu();
-      requestAnimationFrame(() => {
-        positionAddMenu();
-        addMenu.style.visibility = '';
-        addMenu.style.pointerEvents = '';
-      });
+      addMenu.style.visibility = '';
+      addMenu.style.pointerEvents = '';
+      try {
+        await api.hide();
+      } catch (_) {
+        // noop
+      }
     });
     addMenu.querySelectorAll('button[data-workspace-add-action]').forEach((button) => {
       button.addEventListener('click', async (event) => {
@@ -2672,7 +2712,7 @@ function renderWorkspaceTabs() {
         event.preventDefault();
         event.stopPropagation();
         const action = String(button.getAttribute('data-workspace-add-action') || '').trim().toLowerCase();
-        hideAddMenu();
+        await hideAddMenu();
         if (action === 'web') {
           const homeUrl = getDefaultSearchHomeUrl();
           const homeTitle = getDefaultSearchHomeTitle();
@@ -2713,6 +2753,27 @@ function renderWorkspaceTabs() {
         }
         if (action === 'folder') {
           await mountFolderToActiveReference();
+          return;
+        }
+        if (action === 'mail') {
+          if (!state.activeSrId) {
+            showPassiveNotification('Select a reference first.');
+            return;
+          }
+          const res = await api.srAddTab(state.activeSrId, { tab_kind: 'mail', title: 'Mail' });
+          if (res && res.ok) {
+            state.references = res.references || await api.srList();
+            const tabId = String(((res && res.tab && res.tab.id) || '')).trim();
+            if (tabId) {
+              state.activeSurface = makeActiveSurface('mail', { mailTabId: tabId });
+              rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+            }
+            renderReferences();
+            renderWorkspaceTabs();
+            renderContextFiles();
+            renderDiffPanel();
+            await syncActiveSurface();
+          }
           return;
         }
         if (action === 'skills') {
@@ -2858,6 +2919,49 @@ function renderWorkspaceTabs() {
     });
   });
 
+  holder.querySelectorAll('.workspace-tab[data-kind="mail"]').forEach((node) => {
+    node.addEventListener('click', async (event) => {
+      if (event.target && event.target.matches('button[data-close-mail]')) return;
+      const tabId = String(node.getAttribute('data-tab-id') || '').trim();
+      if (!tabId || !state.activeSrId) return;
+      if (replayMode) {
+        state.activeSurface = makeActiveSurface('mail', { mailTabId: tabId });
+        renderWorkspaceTabs();
+        await syncActiveSurface();
+        return;
+      }
+      const res = await api.srSetActiveTab(state.activeSrId, tabId);
+      state.references = (res && res.ok) ? (res.references || state.references) : await api.srList();
+      state.activeSurface = makeActiveSurface('mail', { mailTabId: tabId });
+      rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+    });
+  });
+
+  holder.querySelectorAll('button[data-close-mail]').forEach((btn) => {
+    btn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (replayMode) {
+        showPassiveNotification('Memory replay is read-only.');
+        return;
+      }
+      const tabId = String(btn.getAttribute('data-close-mail') || '').trim();
+      if (!tabId || !state.activeSrId) return;
+      const wasActive = state.activeSurface.kind === 'mail'
+        && String(state.activeSurface.mailTabId || '') === tabId;
+      const res = await api.srRemoveTab(state.activeSrId, tabId);
+      if (!res || !res.ok) return;
+      state.references = res.references || state.references;
+      if (wasActive) {
+        state.activeSurface = makeActiveSurface('web');
+        rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      }
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+    });
+  });
+
   holder.querySelectorAll('button[data-close-skills]').forEach((btn) => {
     btn.addEventListener('click', async (event) => {
       event.stopPropagation();
@@ -2964,31 +3068,21 @@ function renderWorkspaceTabs() {
   });
 
   if (!document.__workspaceAddMenuCloseBound) {
-    document.addEventListener('click', (event) => {
+    document.addEventListener('click', async (event) => {
       const menu = e('workspace-add-menu');
       const btn = e('workspace-add-tab-btn');
       const target = event.target;
       if (!menu) return;
       if (menu.contains(target)) return;
       if (btn && btn.contains(target)) return;
+      const wasOpen = !menu.classList.contains('hidden');
       menu.classList.add('hidden');
+      if (wasOpen) await syncActiveSurface();
     });
     document.__workspaceAddMenuCloseBound = true;
   }
   if (!document.__workspaceAddMenuViewportBound) {
-    const reposition = () => {
-      const menu = e('workspace-add-menu');
-      const btn = e('workspace-add-tab-btn');
-      if (!menu || !btn || menu.classList.contains('hidden')) return;
-      const rect = btn.getBoundingClientRect();
-      const menuHeight = Math.max(120, Number(menu.offsetHeight || 0));
-      const menuWidth = Math.max(130, Number(menu.offsetWidth || 0));
-      const top = Math.max(8, Math.round(rect.top - menuHeight - 6));
-      const maxLeft = Math.max(8, Math.round(window.innerWidth - menuWidth - 8));
-      const left = Math.max(8, Math.min(Math.round(rect.left), maxLeft));
-      menu.style.left = `${left}px`;
-      menu.style.top = `${top}px`;
-    };
+    const reposition = () => {};
     window.addEventListener('resize', reposition);
     window.addEventListener('scroll', reposition, true);
     document.__workspaceAddMenuViewportBound = true;
@@ -3043,6 +3137,7 @@ function hideNonWebSurfaces() {
   e('artifact-editor')?.classList.add('hidden');
   e('files-panel')?.classList.add('hidden');
   e('skills-panel')?.classList.add('hidden');
+  e('mail-panel')?.classList.add('hidden');
 }
 
 function isModalOpen(id) {
@@ -3051,9 +3146,15 @@ function isModalOpen(id) {
   return !overlay.classList.contains('hidden');
 }
 
+function isWorkspaceAddMenuOpen() {
+  const menu = e('workspace-add-menu');
+  return !!(menu && !menu.classList.contains('hidden'));
+}
+
 function hasBlockingOverlay() {
   return (
-    isModalOpen('context-preview-overlay')
+    isWorkspaceAddMenuOpen()
+    || isModalOpen('context-preview-overlay')
     || isModalOpen('onboarding-overlay')
     || isModalOpen('about-overlay')
     || isModalOpen('publish-snapshot-overlay')
@@ -3249,11 +3350,13 @@ function getWorkspaceTransportItems(ref = getActiveReference()) {
   const webTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || 'web').trim().toLowerCase() === 'web');
   const filesTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'files');
   const skillsTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'skills');
+  const mailTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail');
   const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
   return [
     ...webTabs.map((tab) => ({ kind: 'web', id: String((tab && tab.id) || '').trim() })),
     ...filesTabs.map((tab) => ({ kind: 'files', id: String((tab && tab.id) || '').trim() })),
     ...skillsTabs.map((tab) => ({ kind: 'skills', id: String((tab && tab.id) || '').trim() })),
+    ...mailTabs.map((tab) => ({ kind: 'mail', id: String((tab && tab.id) || '').trim() })),
     ...artifacts.map((artifact) => ({ kind: 'artifact', id: String((artifact && artifact.id) || '').trim() })),
   ].filter((item) => item.id);
 }
@@ -3267,6 +3370,7 @@ function getActiveWorkspaceTransportIndex(items = getWorkspaceTransportItems()) 
     web: activeWebId,
     files: String(state.activeSurface.filesTabId || '').trim(),
     skills: String(state.activeSurface.skillsTabId || '').trim(),
+    mail: String(state.activeSurface.mailTabId || '').trim(),
     artifact: String(state.activeSurface.artifactId || '').trim(),
   };
   return list.findIndex((item) => item.kind === String(state.activeSurface.kind || '').trim() && item.id === activeIdByKind[item.kind]);
@@ -3317,6 +3421,21 @@ async function activateWorkspaceTransportItem(item) {
     const res = await api.srSetActiveTab(state.activeSrId, next.id);
     state.references = (res && res.ok) ? (res.references || state.references) : await api.srList();
     state.activeSurface = makeActiveSurface('skills', { skillsTabId: next.id });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    return true;
+  }
+  if (next.kind === 'mail') {
+    if (replayMode) {
+      state.activeSurface = makeActiveSurface('mail', { mailTabId: next.id });
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+      return true;
+    }
+    const res = await api.srSetActiveTab(state.activeSrId, next.id);
+    state.references = (res && res.ok) ? (res.references || state.references) : await api.srList();
+    state.activeSurface = makeActiveSurface('mail', { mailTabId: next.id });
     rememberSurfaceForReference(state.activeSrId, state.activeSurface);
     renderWorkspaceTabs();
     await syncActiveSurface();
@@ -4141,6 +4260,7 @@ async function showArtifactSurface(artifactId) {
   e('browser-placeholder')?.classList.add('hidden');
   e('files-panel')?.classList.add('hidden');
   e('skills-panel')?.classList.add('hidden');
+  e('mail-panel')?.classList.add('hidden');
 
   const editor = e('artifact-editor');
   const title = e('artifact-title');
@@ -4402,6 +4522,7 @@ async function showFilesSurface(tabId) {
   e('browser-placeholder')?.classList.add('hidden');
   e('artifact-editor')?.classList.add('hidden');
   e('skills-panel')?.classList.add('hidden');
+  e('mail-panel')?.classList.add('hidden');
   const panel = e('files-panel');
   if (panel) panel.classList.remove('hidden');
   renderFilesPanel();
@@ -4563,9 +4684,243 @@ async function showSkillsSurface(tabId) {
   e('browser-placeholder')?.classList.add('hidden');
   e('artifact-editor')?.classList.add('hidden');
   e('files-panel')?.classList.add('hidden');
+  e('mail-panel')?.classList.add('hidden');
   const panel = e('skills-panel');
   if (panel) panel.classList.remove('hidden');
   await renderSkillsPanel();
+  await syncUrlBarForActiveSurface();
+  await api.markerSetContext({ srId: state.activeSrId, artifactId: null });
+}
+
+function getMailSearchState(srId) {
+  const refId = String(srId || '').trim();
+  return {
+    query: String(state.mailSearchQueryByRef.get(refId) || '').trim(),
+    results: Array.isArray(state.mailSearchResultsByRef.get(refId)) ? state.mailSearchResultsByRef.get(refId) : [],
+    selected: state.mailSelectedSourceIdsByRef.get(refId) instanceof Set
+      ? state.mailSelectedSourceIdsByRef.get(refId)
+      : new Set(),
+  };
+}
+
+function setMailSelectedSource(srId, sourceId, checked) {
+  const refId = String(srId || '').trim();
+  const current = state.mailSelectedSourceIdsByRef.get(refId) instanceof Set
+    ? new Set(state.mailSelectedSourceIdsByRef.get(refId))
+    : new Set();
+  if (checked) current.add(String(sourceId || '').trim());
+  else current.delete(String(sourceId || '').trim());
+  state.mailSelectedSourceIdsByRef.set(refId, current);
+}
+
+async function runMailSearch(srId, query) {
+  const refId = String(srId || '').trim();
+  state.mailSearchQueryByRef.set(refId, String(query || '').trim());
+  const res = await api.mailSearchLocalThreads(String(query || '').trim(), 40, true);
+  state.mailSearchResultsByRef.set(refId, (res && Array.isArray(res.items)) ? res.items : []);
+  state.mailStatus = await api.mailStatus();
+  return res;
+}
+
+async function renderMailPanel() {
+  const body = e('mail-body');
+  const status = e('mail-status');
+  const ref = getActiveReference();
+  if (!body || !status) return;
+  if (!ref || !state.activeSrId) {
+    status.textContent = 'No active reference';
+    body.innerHTML = '<div class="muted">Select a reference to manage mail.</div>';
+    return;
+  }
+
+  const listRes = await api.srListMailThreads(state.activeSrId);
+  const threads = (listRes && listRes.ok && Array.isArray(listRes.threads)) ? listRes.threads : [];
+  const mailTab = getActiveMailTab(ref);
+  const selectedThreadId = String(
+    (mailTab && mailTab.mail_view_state && mailTab.mail_view_state.selected_thread_id)
+    || ((threads[0] && threads[0].id) || '')
+  ).trim();
+  const selectedThread = threads.find((item) => String((item && item.id) || '') === selectedThreadId) || threads[0] || null;
+  const searchState = getMailSearchState(state.activeSrId);
+  const query = searchState.query;
+  const results = searchState.results;
+  const selectedSources = searchState.selected;
+  const mailStatus = state.mailStatus || await api.mailStatus();
+  state.mailStatus = mailStatus || null;
+  const permissionBlocked = String((mailStatus && mailStatus.error_code) || '') === 'permission_denied';
+
+  status.textContent = `${threads.length} attached thread(s)`;
+  const resultsMarkup = results.length
+    ? results.map((item) => {
+      const sourceId = String((item && item.source_id) || '').trim();
+      return `
+        <label class="mail-row">
+          <input type="checkbox" data-mail-source-id="${escapeHtml(sourceId)}" ${selectedSources.has(sourceId) ? 'checked' : ''} />
+          <div class="mail-row-main">
+            <div class="mail-row-title">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
+            <div class="mail-row-sub muted small">${escapeHtml(String((item && item.from) || ''))} · ${escapeHtml(String((item && item.sent_at) || ''))}</div>
+            <div class="mail-row-sub">${escapeHtml(String((item && item.snippet) || ''))}</div>
+          </div>
+        </label>
+      `;
+    }).join('')
+    : `<div class="muted small">${
+      permissionBlocked
+        ? 'Mail access is blocked by macOS. Open Privacy settings and grant Full Disk Access to the app running Subgrapher.'
+        : (query ? 'No local mail results.' : 'Search local Apple Mail to attach threads.')
+    }</div>`;
+
+  const attachedMarkup = threads.length
+    ? threads.map((thread) => `
+      <button class="mail-thread-item ${String((thread && thread.id) || '') === String((selectedThread && selectedThread.id) || '') ? 'active' : ''}" data-mail-thread-id="${escapeHtml(String((thread && thread.id) || ''))}">
+        <div class="mail-row-title">${escapeHtml(String((thread && thread.subject) || 'Untitled thread'))}</div>
+        <div class="mail-row-sub muted small">${escapeHtml(String((thread && thread.message_count) || 0))} message(s) · ${escapeHtml(String((thread && thread.attachment_count) || 0))} attachment(s)</div>
+        <div class="mail-row-sub">${escapeHtml(String((thread && thread.snippet) || ''))}</div>
+      </button>
+    `).join('')
+    : '<div class="muted small">No attached mail threads yet.</div>';
+
+  const threadMarkup = selectedThread
+    ? (Array.isArray(selectedThread.messages) ? selectedThread.messages : []).map((message) => `
+      <div class="mail-message">
+        <div class="mail-message-head">
+          <div class="mail-row-title">${escapeHtml(String((message && message.subject) || 'Message'))}</div>
+          <div class="mail-row-sub muted small">${escapeHtml(String((message && message.from) || ''))} · ${escapeHtml(String((message && message.sent_at) || ''))}</div>
+        </div>
+        <div class="mail-message-body">${escapeHtml(String((message && message.body_text) || (message && message.snippet) || ''))}</div>
+        ${Array.isArray(message && message.attachments) && message.attachments.length ? `
+          <div class="mail-attachment-list">
+            ${message.attachments.map((attachment) => `
+              <div class="mail-attachment">
+                <span>${escapeHtml(String((attachment && attachment.file_name) || 'attachment'))}</span>
+                <span class="muted small">${escapeHtml(String((attachment && attachment.imported_context_file_id) || 'stored'))}</span>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+      </div>
+    `).join('')
+    : '<div class="muted small">Select an attached thread to view it.</div>';
+
+  const persistMailTabState = async (patch = {}) => {
+    const liveRef = getActiveReference();
+    const liveTab = getActiveMailTab(liveRef);
+    if (!liveTab || !state.activeSrId) return;
+    const res = await api.srPatchTab(state.activeSrId, liveTab.id, {
+      mail_view_state: {
+        ...(liveTab.mail_view_state || {}),
+        ...patch,
+      },
+    });
+    if (res && res.ok) state.references = res.references || state.references;
+  };
+
+  body.innerHTML = `
+    <div class="mail-toolbar">
+      <input id="mail-search-input" type="text" value="${escapeHtml(query)}" placeholder="Search local Apple Mail" />
+      <button id="mail-search-btn">Search</button>
+      <button id="mail-attach-btn">Add Selected</button>
+      <button id="mail-import-btn">Import Files</button>
+      ${permissionBlocked ? '<button id="mail-open-privacy-btn">Grant Access</button>' : ''}
+      <span class="muted small">${escapeHtml(String((mailStatus && mailStatus.message) || ''))}</span>
+    </div>
+    <div class="mail-block">
+      <h4>Search Results</h4>
+      ${resultsMarkup}
+    </div>
+    <div class="mail-block">
+      <h4>Attached Threads</h4>
+      ${attachedMarkup}
+    </div>
+    <div class="mail-block mail-thread-view">
+      <h4>Thread</h4>
+      ${threadMarkup}
+    </div>
+  `;
+
+  e('mail-search-btn')?.addEventListener('click', async () => {
+    const nextQuery = (e('mail-search-input') && e('mail-search-input').value) || '';
+    await runMailSearch(state.activeSrId, nextQuery);
+    await persistMailTabState({ query: String(nextQuery || '').trim() });
+    await renderMailPanel();
+  });
+  e('mail-search-input')?.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    const nextQuery = (e('mail-search-input') && e('mail-search-input').value) || '';
+    await runMailSearch(state.activeSrId, nextQuery);
+    await persistMailTabState({ query: String(nextQuery || '').trim() });
+    await renderMailPanel();
+  });
+  e('mail-import-btn')?.addEventListener('click', async () => {
+    const res = await api.srImportMailFiles(state.activeSrId, []);
+    if (!res || !res.ok) {
+      if (!(res && res.canceled)) window.alert((res && res.message) || 'Unable to import mail files.');
+      return;
+    }
+    state.references = res.references || await api.srList();
+    if (res.tab && res.tab.id) {
+      state.activeSurface = makeActiveSurface('mail', { mailTabId: String(res.tab.id || '').trim() });
+      rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    }
+    renderReferences();
+    renderWorkspaceTabs();
+    await renderMailPanel();
+  });
+  e('mail-open-privacy-btn')?.addEventListener('click', async () => {
+    await api.openMailPrivacySettings();
+  });
+  e('mail-attach-btn')?.addEventListener('click', async () => {
+    const chosen = results.filter((item) => selectedSources.has(String((item && item.source_id) || '').trim()));
+    if (!chosen.length) {
+      showPassiveNotification('Select at least one mail thread to add.');
+      return;
+    }
+    const res = await api.srAttachMailThreads(state.activeSrId, chosen, 'apple_mail_local');
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to attach mail threads.');
+      return;
+    }
+    state.references = res.references || await api.srList();
+    if (res.tab && res.tab.id) {
+      state.activeSurface = makeActiveSurface('mail', { mailTabId: String(res.tab.id || '').trim() });
+      rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    }
+    state.mailSelectedSourceIdsByRef.set(String(state.activeSrId || '').trim(), new Set());
+    renderReferences();
+    renderWorkspaceTabs();
+    await renderMailPanel();
+  });
+  body.querySelectorAll('input[data-mail-source-id]').forEach((node) => {
+    node.addEventListener('change', () => {
+      setMailSelectedSource(state.activeSrId, node.getAttribute('data-mail-source-id'), !!node.checked);
+    });
+  });
+  body.querySelectorAll('button[data-mail-thread-id]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const threadId = String(node.getAttribute('data-mail-thread-id') || '').trim();
+      if (!threadId || !state.activeSrId) return;
+      await persistMailTabState({ selected_thread_id: threadId, query });
+      await renderMailPanel();
+    });
+  });
+}
+
+async function showMailSurface(tabId) {
+  const ref = getActiveReference();
+  if (!ref) return;
+  stopHtmlArtifactRuntime();
+  const tab = (Array.isArray(ref.tabs) ? ref.tabs : []).find((item) => String((item && item.id) || '') === String(tabId || ''));
+  if (!tab || String((tab && tab.tab_kind) || '').trim().toLowerCase() !== 'mail') return;
+
+  await api.hide();
+  e('browser-placeholder')?.classList.add('hidden');
+  e('artifact-editor')?.classList.add('hidden');
+  e('files-panel')?.classList.add('hidden');
+  e('skills-panel')?.classList.add('hidden');
+  const panel = e('mail-panel');
+  if (panel) panel.classList.remove('hidden');
+  await renderMailPanel();
   await syncUrlBarForActiveSurface();
   await api.markerSetContext({ srId: state.activeSrId, artifactId: null });
 }
@@ -4601,6 +4956,7 @@ async function syncActiveSurface() {
   const rememberedArtifactId = String(state.activeArtifactByRef.get(String(ref.id || '')) || '').trim();
   const rememberedFilesTabId = String(state.activeFilesByRef.get(String(ref.id || '')) || '').trim();
   const rememberedSkillsTabId = String(state.activeSkillsByRef.get(String(ref.id || '')) || '').trim();
+  const rememberedMailTabId = String(state.activeMailByRef.get(String(ref.id || '')) || '').trim();
   if (state.activeSurface.kind === 'web') {
     if (rememberedArtifactId) {
       state.activeSurface = makeActiveSurface('artifact', { artifactId: rememberedArtifactId });
@@ -4608,6 +4964,8 @@ async function syncActiveSurface() {
       state.activeSurface = makeActiveSurface('files', { filesTabId: rememberedFilesTabId });
     } else if (rememberedSkillsTabId) {
       state.activeSurface = makeActiveSurface('skills', { skillsTabId: rememberedSkillsTabId });
+    } else if (rememberedMailTabId) {
+      state.activeSurface = makeActiveSurface('mail', { mailTabId: rememberedMailTabId });
     }
   }
 
@@ -4650,6 +5008,20 @@ async function syncActiveSurface() {
     rememberSurfaceForReference(state.activeSrId, state.activeSurface);
   }
 
+  if (state.activeSurface.kind === 'mail') {
+    const mailExists = tabs.some((tab) => (
+      String((tab && tab.id) || '') === String(state.activeSurface.mailTabId || '')
+      && String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail'
+    ));
+    if (mailExists) {
+      rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      await showMailSurface(state.activeSurface.mailTabId);
+      return;
+    }
+    state.activeSurface = makeActiveSurface('web');
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+  }
+
   const activeWeb = getActiveWebTab(ref);
   if (activeWeb) {
     state.activeSurface = makeActiveSurface('web', { tabId: activeWeb.id });
@@ -4671,6 +5043,14 @@ async function syncActiveSurface() {
     state.activeSurface = makeActiveSurface('skills', { skillsTabId: activeSkills.id });
     rememberSurfaceForReference(state.activeSrId, state.activeSurface);
     await showSkillsSurface(activeSkills.id);
+    return;
+  }
+
+  const activeMail = getActiveMailTab(ref);
+  if (activeMail) {
+    state.activeSurface = makeActiveSurface('mail', { mailTabId: activeMail.id });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    await showMailSurface(activeMail.id);
     return;
   }
 
@@ -7278,6 +7658,7 @@ function normalizeSettingsDraft(raw = {}) {
     agent_mode_v1_enabled: !!src.agent_mode_v1_enabled,
     trustcommons_download_url: String(src.trustcommons_download_url || '').trim(),
     trustcommons_app_bundle_id: String(src.trustcommons_app_bundle_id || '').trim(),
+    mail_sync_enabled: !!src.mail_sync_enabled,
     history_enabled: Object.prototype.hasOwnProperty.call(src, 'history_enabled') ? !!src.history_enabled : true,
     history_max_entries: historyMaxEntries,
   };
@@ -7438,6 +7819,7 @@ function renderSettingsForm() {
   if (ragModelNode) ragModelNode.disabled = !ragUsesLmstudio;
   if (ragFetchBtn) ragFetchBtn.disabled = !ragUsesLmstudio;
   renderSyncEligibility();
+  renderMailSettingsStatus();
   renderAppDataProtectionStatus();
   renderSettingsAbstractionStatus();
   renderSettingsRagStatus();
@@ -7528,6 +7910,28 @@ function renderOrchestratorWebKeyStatus() {
   renderSettingsConfiguredState();
 }
 
+function renderMailSettingsStatus() {
+  const node = e('settings-mail-status');
+  if (!node) return;
+  const status = state.mailStatus || null;
+  const draft = normalizeSettingsDraft(state.settingsDraft || {});
+  if (!draft.mail_sync_enabled) {
+    node.textContent = 'Mail sync is disabled.';
+    return;
+  }
+  if (!status || status.ok === false) {
+    node.textContent = (status && status.message) || 'Unavailable';
+    return;
+  }
+  if (String(status.error_code || '') === 'permission_denied') {
+    node.textContent = 'Mail access blocked by macOS privacy settings. Grant Full Disk Access.';
+    return;
+  }
+  node.textContent = status.available
+    ? `Local Mail store found${status.files_scanned ? ` · ${status.files_scanned} file(s) indexed` : ''}`
+    : (status.message || 'Local Mail store not found.');
+}
+
 async function refreshTelegramSettingsStatus() {
   if (!api.telegramStatus) return;
   const res = await api.telegramStatus();
@@ -7565,6 +7969,14 @@ async function refreshOrchestratorWebKeyStatus() {
   const res = await api.orchestratorWebKeyStatus();
   state.orchestratorWebKeyConfigured = !!(res && res.ok && res.key_configured);
   renderOrchestratorWebKeyStatus();
+}
+
+async function refreshMailStatus() {
+  if (!api.mailStatus) return;
+  const res = await api.mailStatus();
+  state.mailStatus = res || null;
+  renderMailSettingsStatus();
+  return res;
 }
 
 async function refreshSettingsLmstudioModelOptions() {
@@ -7625,6 +8037,7 @@ async function loadSettingsData() {
   try { await refreshOrchestratorUsersList(); } catch (_) {}
   try { await refreshLmstudioTokenStatus(); } catch (_) {}
   try { await refreshOrchestratorWebKeyStatus(); } catch (_) {}
+  try { await refreshMailStatus(); } catch (_) {}
   try { await refreshAbstractionStatus(); } catch (_) {}
   try { await refreshRagStatus(); } catch (_) {}
   try { await refreshAppDataProtectionStatus(); } catch (_) {}
@@ -7697,6 +8110,7 @@ async function saveSettingsDraft() {
   await refreshTelegramSettingsStatus();
   await refreshLmstudioTokenStatus();
   await refreshOrchestratorWebKeyStatus();
+  await refreshMailStatus();
   await refreshAbstractionStatus();
   await refreshRagStatus();
   await refreshTrustCommonsStatus();
@@ -8802,6 +9216,28 @@ function bindControls() {
     state.settingsSaveState = '';
     renderSettingsStatusLine();
     runBrowserImport('safari', 'settings-status-line');
+  });
+
+  e('settings-mail-import-btn')?.addEventListener('click', async () => {
+    if (!state.activeSrId) {
+      state.settingsSaveState = 'Select a reference before importing mail.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const res = await api.srImportMailFiles(state.activeSrId, []);
+    if (!res || !res.ok) {
+      if (!(res && res.canceled)) {
+        state.settingsSaveState = (res && res.message) || 'Unable to import mail files.';
+        renderSettingsStatusLine();
+      }
+      return;
+    }
+    state.references = res.references || await api.srList();
+    state.settingsSaveState = `${Array.isArray(res.imported_threads) ? res.imported_threads.length : 0} mail thread(s) imported.`;
+    renderSettingsStatusLine();
+    renderReferences();
+    renderWorkspaceTabs();
+    await refreshMailStatus();
   });
 
   e('settings-cancel-btn')?.addEventListener('click', () => {

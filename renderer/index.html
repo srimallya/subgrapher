@@ -153,6 +153,14 @@
           </div>
           <div id="skills-body" class="skills-body"></div>
         </section>
+
+        <section id="mail-panel" class="mail-panel hidden">
+          <div class="mail-header">
+            <strong id="mail-title">Mail</strong>
+            <span id="mail-status" class="muted">No mail linked</span>
+          </div>
+          <div id="mail-body" class="mail-body"></div>
+        </section>
       </div>
 
       <div id="memory-rail" class="memory-rail hidden">
@@ -425,6 +433,28 @@
         <div class="settings-inline-actions">
           <button id="settings-import-chrome-btn">Import from Chrome</button>
           <button id="settings-import-safari-btn">Import from Safari</button>
+        </div>
+        </div>
+      </details>
+
+      <details class="settings-section settings-accordion" data-settings-section="mail">
+        <summary>Mail</summary>
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-2">
+          <label class="settings-field settings-boolean-field">
+            <span>Mail Sync</span>
+            <span class="settings-toggle-card">
+              <input id="settings-mail-sync-enabled" data-setting="mail_sync_enabled" type="checkbox" />
+              <span>Search local Apple Mail from a reference mail tab.</span>
+            </span>
+          </label>
+          <div class="settings-field">
+            <span>Import Mail Files</span>
+            <div class="settings-inline-actions">
+              <button id="settings-mail-import-btn">+ Import</button>
+            </div>
+            <div id="settings-mail-status" class="muted small">Unavailable</div>
+          </div>
         </div>
         </div>
       </details>
