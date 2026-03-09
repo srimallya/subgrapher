@@ -1326,6 +1326,32 @@ function getActiveFilesTab(ref) {
   return preferred || filesTabs[0];
 }
 
+function getNormalizedFilesViewState(tab) {
+  const raw = (tab && tab.files_view_state && typeof tab.files_view_state === 'object')
+    ? tab.files_view_state
+    : {};
+  const scope = String(raw.scope || 'all').trim().toLowerCase();
+  if (scope === 'mount') {
+    return {
+      scope: 'mount',
+      mount_id: String(raw.mount_id || '').trim(),
+      file_id: '',
+    };
+  }
+  if (scope === 'context_file') {
+    return {
+      scope: 'context_file',
+      mount_id: '',
+      file_id: String(raw.file_id || '').trim(),
+    };
+  }
+  return {
+    scope: 'all',
+    mount_id: '',
+    file_id: '',
+  };
+}
+
 function getActiveSkillsTab(ref) {
   if (!ref || !Array.isArray(ref.tabs)) return null;
   const skillsTabs = ref.tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'skills');
@@ -4174,12 +4200,30 @@ function renderFilesPanel() {
     return;
   }
 
+  const activeFilesTab = getActiveFilesTab(ref);
+  const filesViewState = getNormalizedFilesViewState(activeFilesTab);
   const mounts = Array.isArray(ref.folder_mounts) ? ref.folder_mounts : [];
   const files = Array.isArray(ref.context_files) ? ref.context_files : [];
-  status.textContent = `${mounts.length} mount(s) · ${files.length} file(s)`;
+  let visibleMounts = mounts;
+  let visibleFiles = files;
+  let mountHeading = 'Mounted Folders';
+  let filesHeading = 'Indexed Context Files';
 
-  const mountMarkup = mounts.length
-    ? mounts.map((mount) => {
+  if (filesViewState.scope === 'mount' && filesViewState.mount_id) {
+    visibleMounts = mounts.filter((mount) => String((mount && mount.id) || '').trim() === filesViewState.mount_id);
+    visibleFiles = files.filter((file) => String((file && file.mount_id) || '').trim() === filesViewState.mount_id);
+    mountHeading = 'Mounted Folder';
+    filesHeading = 'Indexed Files';
+  } else if (filesViewState.scope === 'context_file' && filesViewState.file_id) {
+    visibleMounts = [];
+    visibleFiles = files.filter((file) => String((file && file.id) || '').trim() === filesViewState.file_id);
+    filesHeading = 'Added Context';
+  }
+
+  status.textContent = `${visibleMounts.length} mount(s) · ${visibleFiles.length} file(s)`;
+
+  const mountMarkup = visibleMounts.length
+    ? visibleMounts.map((mount) => {
       const pathText = escapeHtml(String((mount && mount.absolute_path) || ''));
       const count = Number((mount && mount.file_count) || 0);
       const skipped = Number((mount && mount.skipped_count) || 0);
@@ -4211,10 +4255,14 @@ function renderFilesPanel() {
         </div>
       `;
     }).join('')
-    : '<div class="muted small">No folder mounts yet. Use workspace + and choose + folder.</div>';
+    : (
+      filesViewState.scope === 'mount'
+        ? '<div class="muted small">This mounted folder is no longer available.</div>'
+        : '<div class="muted small">No folder mounts yet. Use workspace + and choose + folder.</div>'
+    );
 
-  const contextMarkup = files.length
-    ? files.slice(0, 240).map((file) => {
+  const contextMarkup = visibleFiles.length
+    ? visibleFiles.slice(0, 240).map((file) => {
       const fileId = String((file && file.id) || '').trim();
       const name = escapeHtml(String((file && file.relative_path) || (file && file.original_name) || 'context.txt'));
       const summary = escapeHtml(String((file && file.summary) || ''));
@@ -4231,18 +4279,28 @@ function renderFilesPanel() {
         </div>
       `;
     }).join('')
-    : '<div class="muted small">No indexed context files.</div>';
+    : (
+      filesViewState.scope === 'context_file'
+        ? '<div class="muted small">This added context file is no longer available.</div>'
+        : '<div class="muted small">No indexed context files.</div>'
+    );
 
-  body.innerHTML = `
-    <div class="files-block">
-      <h4>Mounted Folders</h4>
-      ${mountMarkup}
-    </div>
-    <div class="files-block">
-      <h4>Indexed Context Files</h4>
-      ${contextMarkup}
-    </div>
-  `;
+  body.innerHTML = [
+    visibleMounts.length > 0 || filesViewState.scope !== 'context_file'
+      ? `
+        <div class="files-block">
+          <h4>${mountHeading}</h4>
+          ${mountMarkup}
+        </div>
+      `
+      : '',
+    `
+      <div class="files-block">
+        <h4>${filesHeading}</h4>
+        ${contextMarkup}
+      </div>
+    `,
+  ].join('');
 
   body.querySelectorAll('button[data-files-reindex]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -4255,6 +4313,11 @@ function renderFilesPanel() {
         return;
       }
       state.references = res.references || await api.srList();
+      const filesTabId = String((res && res.files_tab && res.files_tab.id) || '').trim();
+      if (filesTabId) {
+        state.activeSurface = makeActiveSurface('files', { filesTabId });
+        rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      }
       renderReferences();
       renderWorkspaceTabs();
       renderContextFiles();
@@ -4280,6 +4343,11 @@ function renderFilesPanel() {
         return;
       }
       state.references = res.references || await api.srList();
+      const removedTabIds = Array.isArray(res && res.removed_tab_ids) ? res.removed_tab_ids.map((id) => String(id || '').trim()) : [];
+      if (state.activeSurface.kind === 'files' && removedTabIds.includes(String(state.activeSurface.filesTabId || '').trim())) {
+        state.activeSurface = makeActiveSurface('web');
+        rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      }
       renderReferences();
       renderWorkspaceTabs();
       renderContextFiles();
@@ -4307,6 +4375,11 @@ function renderFilesPanel() {
         return;
       }
       state.references = res.references || await api.srList();
+      const removedTabIds = Array.isArray(res && res.removed_tab_ids) ? res.removed_tab_ids.map((id) => String(id || '').trim()) : [];
+      if (state.activeSurface.kind === 'files' && removedTabIds.includes(String(state.activeSurface.filesTabId || '').trim())) {
+        state.activeSurface = makeActiveSurface('web');
+        rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      }
       renderReferences();
       renderWorkspaceTabs();
       renderContextFiles();
@@ -5438,10 +5511,16 @@ async function importExternalContextFile(filePath) {
     return;
   }
   state.references = res.references || await api.srList();
+  const filesTabId = String((res && res.files_tab && res.files_tab.id) || '').trim();
+  if (filesTabId) {
+    state.activeSurface = makeActiveSurface('files', { filesTabId });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+  }
   renderReferences();
   renderWorkspaceTabs();
   renderContextFiles();
   renderFilesPanel();
+  await syncActiveSurface();
   void noteReferenceRankingInteraction('context_file_add', { srId: state.activeSrId, browserTitle: filePath });
 }
 
@@ -5502,10 +5581,16 @@ async function mountFolderToActiveReference() {
     return;
   }
   state.references = res.references || state.references;
+  const filesTabId = String((res && res.files_tab && res.files_tab.id) || '').trim();
+  if (filesTabId) {
+    state.activeSurface = makeActiveSurface('files', { filesTabId });
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+  }
   renderReferences();
   renderWorkspaceTabs();
   renderContextFiles();
   renderFilesPanel();
+  await syncActiveSurface();
 }
 
 async function setZenMode(enabled, options = {}) {

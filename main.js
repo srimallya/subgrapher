@@ -10675,14 +10675,19 @@ function insertWebTabAdjacent(ref, webTab, insertAfterTabId = '') {
 }
 
 function createFilesTab(seed = {}) {
+  const filesViewState = (seed.files_view_state && typeof seed.files_view_state === 'object')
+    ? seed.files_view_state
+    : {};
   return {
     id: String(seed.id || makeId('tab')),
     tab_kind: 'files',
     url: 'about:blank',
     title: String(seed.title || 'Files').slice(0, 120),
-    files_view_state: (seed.files_view_state && typeof seed.files_view_state === 'object')
-      ? seed.files_view_state
-      : {},
+    files_view_state: {
+      scope: String(filesViewState.scope || 'all').trim().toLowerCase() || 'all',
+      mount_id: String(filesViewState.mount_id || '').trim(),
+      file_id: String(filesViewState.file_id || '').trim(),
+    },
     snapshot_at: nowTs(),
     last_active: nowTs(),
     updated_at: Number(seed.updated_at || nowTs()),
@@ -10701,37 +10706,83 @@ function createSkillsTab(seed = {}) {
   };
 }
 
-function ensureSingleFilesTab(ref) {
+function normalizeFilesViewState(input = {}) {
+  const raw = (input && typeof input === 'object') ? input : {};
+  const scope = String(raw.scope || 'all').trim().toLowerCase();
+  if (scope === 'mount') {
+    return {
+      scope: 'mount',
+      mount_id: String(raw.mount_id || '').trim(),
+      file_id: '',
+    };
+  }
+  if (scope === 'context_file') {
+    return {
+      scope: 'context_file',
+      mount_id: '',
+      file_id: String(raw.file_id || '').trim(),
+    };
+  }
+  return {
+    scope: 'all',
+    mount_id: '',
+    file_id: '',
+  };
+}
+
+function filesViewStateKey(input = {}) {
+  const state = normalizeFilesViewState(input);
+  if (state.scope === 'mount') return `mount:${state.mount_id}`;
+  if (state.scope === 'context_file') return `context_file:${state.file_id}`;
+  return 'all';
+}
+
+function ensureFilesTab(ref, seed = {}) {
   if (!ref || typeof ref !== 'object') {
-    return { tab: null, created: false, deduped: false };
+    return { tab: null, created: false, deduped: false, updated: false };
   }
 
   ref.tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
-  const firstFilesTab = ref.tabs.find((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'files') || null;
-  if (!firstFilesTab) {
-    const created = createFilesTab({});
-    ref.tabs.push(created);
-    return { tab: created, created: true, deduped: false };
+  const normalizedState = normalizeFilesViewState(seed.files_view_state || {});
+  const scopeKey = filesViewStateKey(normalizedState);
+  const existing = ref.tabs.find((tab) => {
+    if (String((tab && tab.tab_kind) || '').trim().toLowerCase() !== 'files') return false;
+    return filesViewStateKey((tab && tab.files_view_state) || {}) === scopeKey;
+  }) || null;
+  if (existing) {
+    const nextTitle = String(seed.title || existing.title || 'Files').slice(0, 120);
+    const prevState = JSON.stringify(normalizeFilesViewState((existing && existing.files_view_state) || {}));
+    const nextState = JSON.stringify(normalizedState);
+    const updated = String(existing.title || '') !== nextTitle || prevState !== nextState;
+    existing.title = nextTitle;
+    existing.files_view_state = normalizedState;
+    if (updated) existing.updated_at = nowTs();
+    return { tab: existing, created: false, deduped: true, updated };
   }
 
-  let kept = false;
-  let deduped = false;
+  const created = createFilesTab({
+    ...seed,
+    files_view_state: normalizedState,
+  });
+  ref.tabs.push(created);
+  return { tab: created, created: true, deduped: false, updated: false };
+}
+
+function removeFilesTabsByScope(ref, predicate) {
+  if (!ref || typeof ref !== 'object' || typeof predicate !== 'function') return [];
+  ref.tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
+  const removed = [];
   ref.tabs = ref.tabs.filter((tab) => {
-    const kind = String((tab && tab.tab_kind) || '').trim().toLowerCase();
-    if (kind !== 'files') return true;
-    if (!kept && String((tab && tab.id) || '') === String(firstFilesTab.id || '')) {
-      kept = true;
-      return true;
-    }
-    deduped = true;
+    if (String((tab && tab.tab_kind) || '').trim().toLowerCase() !== 'files') return true;
+    const state = normalizeFilesViewState((tab && tab.files_view_state) || {});
+    if (!predicate(state, tab)) return true;
+    removed.push(String((tab && tab.id) || '').trim());
     return false;
   });
-  firstFilesTab.title = String(firstFilesTab.title || 'Files').slice(0, 120);
-  firstFilesTab.files_view_state = (firstFilesTab.files_view_state && typeof firstFilesTab.files_view_state === 'object')
-    ? firstFilesTab.files_view_state
-    : {};
-
-  return { tab: firstFilesTab, created: false, deduped };
+  if (removed.length > 0 && removed.includes(String(ref.active_tab_id || '').trim())) {
+    ref.active_tab_id = ref.tabs[0] ? ref.tabs[0].id : null;
+  }
+  return removed;
 }
 
 function ensureSingleSkillsTab(ref) {
@@ -11599,10 +11650,13 @@ function getReferences() {
     }
     const hasMounts = Array.isArray(ref && ref.folder_mounts) && ref.folder_mounts.length > 0;
     if (hasMounts) {
-      const filesTabRes = ensureSingleFilesTab(ref);
-      if (filesTabRes && (filesTabRes.created || filesTabRes.deduped)) {
-        changed = true;
-      }
+      ref.folder_mounts.forEach((mount) => {
+        const filesTabRes = ensureFilesTab(ref, {
+          title: path.basename(String((mount && mount.absolute_path) || '')) || 'Folder',
+          files_view_state: { scope: 'mount', mount_id: String((mount && mount.id) || '').trim() },
+        });
+        if (filesTabRes && (filesTabRes.created || filesTabRes.updated)) changed = true;
+      });
     }
     const hasSkillsTab = Array.isArray(ref && ref.tabs)
       ? ref.tabs.some((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'skills')
@@ -12481,7 +12535,7 @@ async function ingestCrawlerPagesIntoReference(srId, pages = [], job = {}) {
 
   let filesTabRes = { tab: null, created: false };
   if (imported.length > 0) {
-    filesTabRes = ensureSingleFilesTab(ref);
+    filesTabRes = ensureFilesTab(ref, { title: 'Files', files_view_state: { scope: 'all' } });
     ref.artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
     const summaryArtifact = createArtifact({
       title: `crawl-summary-${new Date(nowTs()).toISOString().slice(0, 10)}.md`,
@@ -16501,12 +16555,12 @@ ipcMain.handle('browser:srAddTab', (_event, payload) => {
   }
 
   if (tabKind === 'files') {
-    const filesRes = ensureSingleFilesTab(refs[idx]);
+    const filesRes = ensureFilesTab(refs[idx], tab);
     if (filesRes && filesRes.tab) {
       refs[idx].active_tab_id = filesRes.tab.id;
       refs[idx].updated_at = nowTs();
       setReferences(refs);
-      return { ok: true, tab: filesRes.tab, reference: refs[idx], references: refs, deduped: !filesRes.created };
+      return { ok: true, tab: filesRes.tab, reference: refs[idx], references: refs, deduped: filesRes.deduped };
     }
     return { ok: false, message: 'Unable to create files tab.' };
   }
@@ -16810,7 +16864,21 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
     refs[idx].context_files = Array.isArray(refs[idx].context_files) ? refs[idx].context_files : [];
     const already = refs[idx].context_files.find((file) => String((file && file.content_hash) || '') === hash);
     if (already) {
-      return { ok: true, file: already, deduped: true, references: refs };
+      const existingTab = ensureFilesTab(refs[idx], {
+        title: path.basename(absolutePath) || String((already && already.original_name) || 'Context File'),
+        files_view_state: { scope: 'context_file', file_id: String((already && already.id) || '').trim() },
+      });
+      refs[idx].active_tab_id = existingTab && existingTab.tab ? existingTab.tab.id : refs[idx].active_tab_id;
+      refs[idx].updated_at = nowTs();
+      setReferences(refs);
+      return {
+        ok: true,
+        file: already,
+        deduped: true,
+        files_tab: existingTab && existingTab.tab ? existingTab.tab : null,
+        files_tab_created: !!(existingTab && existingTab.created),
+        references: refs,
+      };
     }
 
     const fileId = makeId('ctx');
@@ -16846,8 +16914,12 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
       updated_at: nowTs(),
     };
     refs[idx].context_files.push(item);
-    const filesTabRes = ensureSingleFilesTab(refs[idx]);
+    const filesTabRes = ensureFilesTab(refs[idx], {
+      title: path.basename(absolutePath) || 'Context File',
+      files_view_state: { scope: 'context_file', file_id: fileId },
+    });
     markReferenceAbstractionStale(refs[idx], 'Local file added.');
+    refs[idx].active_tab_id = filesTabRes && filesTabRes.tab ? filesTabRes.tab.id : refs[idx].active_tab_id;
     refs[idx].updated_at = nowTs();
     setReferences(refs);
     queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
@@ -17022,11 +17094,20 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
     return normalized === resolvedTarget;
   });
   if (existingMount) {
+    const existingTab = ensureFilesTab(refs[idx], {
+      title: path.basename(resolvedTarget) || 'Folder',
+      files_view_state: { scope: 'mount', mount_id: String(existingMount.id || '').trim() },
+    });
+    refs[idx].active_tab_id = existingTab && existingTab.tab ? existingTab.tab.id : refs[idx].active_tab_id;
+    refs[idx].updated_at = nowTs();
+    setReferences(refs);
     return {
       ok: true,
       deduped: true,
       message: 'Folder is already mounted in this reference.',
       mount: existingMount,
+      files_tab: existingTab && existingTab.tab ? existingTab.tab : null,
+      files_tab_created: !!(existingTab && existingTab.created),
       references: refs,
       reference: refs[idx],
     };
@@ -17082,9 +17163,13 @@ ipcMain.handle('browser:srMountFolder', async (_event, payload) => {
     imported.push(item);
   });
 
-  const filesTabRes = ensureSingleFilesTab(refs[idx]);
+  const filesTabRes = ensureFilesTab(refs[idx], {
+    title: path.basename(ingest.root_path || resolvedTarget || '') || 'Folder',
+    files_view_state: { scope: 'mount', mount_id: mountId },
+  });
 
   markReferenceAbstractionStale(refs[idx], 'Folder mount indexed.');
+  refs[idx].active_tab_id = filesTabRes && filesTabRes.tab ? filesTabRes.tab.id : refs[idx].active_tab_id;
   refs[idx].updated_at = nowTs();
   setReferences(refs);
   queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
@@ -17161,8 +17246,12 @@ ipcMain.handle('browser:srReindexFolderMount', async (_event, payload) => {
     : {};
   mount.truncated = ingest.truncated;
 
-  const filesTabRes = ensureSingleFilesTab(refs[idx]);
+  const filesTabRes = ensureFilesTab(refs[idx], {
+    title: path.basename(targetFolder || '') || 'Folder',
+    files_view_state: { scope: 'mount', mount_id: mountId },
+  });
   markReferenceAbstractionStale(refs[idx], 'Folder mount reindexed.');
+  refs[idx].active_tab_id = filesTabRes && filesTabRes.tab ? filesTabRes.tab.id : refs[idx].active_tab_id;
   refs[idx].updated_at = nowTs();
   setReferences(refs);
   queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
@@ -17197,7 +17286,7 @@ ipcMain.handle('browser:srUnmountFolder', async (_event, payload) => {
   }
 
   refs[idx].context_files = refs[idx].context_files.filter((file) => String((file && file.mount_id) || '') !== mountId);
-  const filesTabRes = ensureSingleFilesTab(refs[idx]);
+  const removed_tab_ids = removeFilesTabsByScope(refs[idx], (state) => state.scope === 'mount' && state.mount_id === mountId);
   markReferenceAbstractionStale(refs[idx], 'Folder mount removed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
@@ -17205,8 +17294,7 @@ ipcMain.handle('browser:srUnmountFolder', async (_event, payload) => {
 
   return {
     ok: true,
-    files_tab: filesTabRes && filesTabRes.tab ? filesTabRes.tab : null,
-    files_tab_created: !!(filesTabRes && filesTabRes.created),
+    removed_tab_ids,
     reference: refs[idx],
     references: refs,
   };
@@ -17298,12 +17386,13 @@ ipcMain.handle('browser:srRemoveContextFile', async (_event, payload) => {
   if (next.length === prev.length) return { ok: false, message: 'Context file not found.' };
 
   refs[idx].context_files = next;
+  const removed_tab_ids = removeFilesTabsByScope(refs[idx], (state) => state.scope === 'context_file' && state.file_id === fileId);
   markReferenceAbstractionStale(refs[idx], 'Context file removed.');
   refs[idx].updated_at = nowTs();
   setReferences(refs);
   queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
 
-  return { ok: true, reference: refs[idx], references: refs };
+  return { ok: true, removed_tab_ids, reference: refs[idx], references: refs };
 });
 
 ipcMain.handle('browser:srGetProgram', (_event, payload) => {
