@@ -5,6 +5,18 @@ function normalizeWhitespace(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function normalizeTextBody(value = '') {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/g, ''))
+    .join('\n')
+    .trim();
+}
+
 function decodeQuotedPrintable(value = '') {
   return String(value || '')
     .replace(/=\r?\n/g, '')
@@ -93,10 +105,12 @@ function decodeBody(bodyRaw = '', encoding = '') {
 }
 
 function stripHtml(value = '') {
-  return normalizeWhitespace(
+  return normalizeTextBody(
     String(value || '')
       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])>/gi, '\n')
+      .replace(/<li[^>]*>/gi, '- ')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/gi, ' ')
       .replace(/&amp;/gi, '&')
@@ -154,9 +168,9 @@ function parseRawEmailText(raw = '', sourcePath = '') {
   const headers = parseHeaderBlock(headersRaw);
   const contentType = getHeader(headers, 'content-type') || 'text/plain';
   const parsed = parseMimePart(`${headersRaw}\n\n${bodyRaw}`);
-  const textBody = normalizeWhitespace(parsed.textParts.join('\n\n'));
+  const textBody = normalizeTextBody(parsed.textParts.join('\n\n'));
   const htmlBody = parsed.htmlParts.join('\n');
-  const snippet = (textBody || stripHtml(htmlBody)).slice(0, 320);
+  const snippet = normalizeWhitespace(textBody || stripHtml(htmlBody)).slice(0, 320);
   const subject = decodeMimeWords(getHeader(headers, 'subject') || path.basename(sourcePath || 'Mail'));
   const sourceKey = crypto.createHash('sha1').update(`${sourcePath}:${getHeader(headers, 'message-id')}:${subject}`).digest('hex');
   const references = [
@@ -184,6 +198,7 @@ function parseRawEmailText(raw = '', sourcePath = '') {
 
 module.exports = {
   decodeMimeWords,
+  normalizeTextBody,
   normalizeWhitespace,
   parseRawEmailText,
 };

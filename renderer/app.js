@@ -4744,6 +4744,59 @@ async function loadMailSourcePreview(srId, source) {
 
 function renderMailPreviewMarkup(preview) {
   if (!preview) return '<div class="muted small">Select a thread above to preview it.</div>';
+  const formatAddressLine = (label, values) => {
+    const items = Array.isArray(values) ? values.map((item) => String(item || '').trim()).filter(Boolean) : [];
+    if (!items.length) return '';
+    return `
+      <div class="mail-meta-line">
+        <span class="mail-meta-label">${escapeHtml(label)}</span>
+        <span>${escapeHtml(items.join(', '))}</span>
+      </div>
+    `;
+  };
+  const formatMailBodyForDisplay = (value) => {
+    const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    if (!text) return '<div class="muted small">No readable body content.</div>';
+    const lines = text.split('\n');
+    const out = [];
+    let paragraph = [];
+    let quote = [];
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      out.push(`<p>${escapeHtml(paragraph.join(' '))}</p>`);
+      paragraph = [];
+    };
+    const flushQuote = () => {
+      if (!quote.length) return;
+      out.push(`<blockquote class="mail-quote-block">${escapeHtml(quote.join('\n'))}</blockquote>`);
+      quote = [];
+    };
+    lines.forEach((rawLine) => {
+      const line = String(rawLine || '');
+      const trimmed = line.trim();
+      const isQuoteBoundary = /^On .+ wrote:$/i.test(trimmed);
+      const isQuoted = /^>+/.test(trimmed);
+      if (!trimmed) {
+        flushParagraph();
+        flushQuote();
+        return;
+      }
+      if (isQuoteBoundary || isQuoted) {
+        flushParagraph();
+        quote.push(trimmed);
+        return;
+      }
+      if (/^(from|to|cc|bcc|date|subject):/i.test(trimmed) && quote.length) {
+        quote.push(trimmed);
+        return;
+      }
+      flushQuote();
+      paragraph.push(trimmed);
+    });
+    flushParagraph();
+    flushQuote();
+    return out.join('');
+  };
   const attachmentsMarkup = Array.isArray(preview.attachments) && preview.attachments.length
     ? `
       <div class="mail-attachment-list">
@@ -4757,7 +4810,6 @@ function renderMailPreviewMarkup(preview) {
     `
     : '';
   const meta = [
-    String((preview && preview.from) || '').trim(),
     String((preview && preview.account_name) || '').trim(),
     String((preview && preview.mailbox_name) || '').trim(),
     String((preview && preview.sent_at) || '').trim(),
@@ -4767,8 +4819,11 @@ function renderMailPreviewMarkup(preview) {
       <div class="mail-message-head">
         <div class="mail-row-title">${escapeHtml(String((preview && preview.subject) || 'Message'))}</div>
         <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
+        ${formatAddressLine('From', [String((preview && preview.from) || '').trim()])}
+        ${formatAddressLine('To', preview && preview.to)}
+        ${formatAddressLine('Cc', preview && preview.cc)}
       </div>
-      <div class="mail-message-body">${escapeHtml(String((preview && preview.body_text) || (preview && preview.snippet) || ''))}</div>
+      <div class="mail-message-body">${formatMailBodyForDisplay((preview && preview.body_text) || (preview && preview.snippet) || '')}</div>
       ${attachmentsMarkup}
     </div>
   `;

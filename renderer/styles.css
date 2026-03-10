@@ -2627,6 +2627,30 @@ body.chat-collapsed #chat-panel-resizer {
   line-height: 1.5;
 }
 
+.mail-message-body p {
+  margin: 0 0 10px;
+}
+
+.mail-meta-line {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mail-meta-label {
+  flex: 0 0 28px;
+  color: var(--text);
+}
+
+.mail-quote-block {
+  margin: 12px 0;
+  padding: 8px 12px;
+  border-left: 2px solid #5f584d;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
 .mail-attachment-list {
   margin-top: 8px;
   display: flex;

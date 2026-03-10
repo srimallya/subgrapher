@@ -148,7 +148,7 @@ function threadIdForAccount(accountId = '', threadKey = '') {
   return crypto.createHash('sha1').update(`${String(accountId || '')}:${String(threadKey || '')}`).digest('hex');
 }
 
-function buildParsedMessage(account = {}, uid = 0, rawSource = '') {
+function buildParsedMessage(account = {}, uid = 0, rawSource = '', mailboxName = '') {
   const parsed = parseRawEmailText(rawSource, `imap://${account.id}/${uid}`);
   const threadKey = String(
     parsed.references[parsed.references.length - 1]
@@ -162,7 +162,7 @@ function buildParsedMessage(account = {}, uid = 0, rawSource = '') {
     uid: Math.round(Number(uid || 0)),
     thread_key: threadKey,
     thread_id: threadIdForAccount(account.id, threadKey),
-    mailbox: String(account.mailbox || 'INBOX').trim() || 'INBOX',
+    mailbox: String(mailboxName || account.mailbox || 'INBOX').trim() || 'INBOX',
     message_id_header: String(parsed.message_id_header || '').trim(),
     in_reply_to: String(parsed.in_reply_to || '').trim(),
     subject: String(parsed.subject || '').trim(),
@@ -189,6 +189,48 @@ function buildParsedMessage(account = {}, uid = 0, rawSource = '') {
     created_at: nowTs(),
     updated_at: nowTs(),
   };
+}
+
+function normalizeMailboxName(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function getMailboxCandidates(primaryMailbox = '') {
+  const ordered = [];
+  const seen = new Set();
+  const push = (value) => {
+    const mailbox = String(value || '').trim();
+    if (!mailbox) return;
+    const key = normalizeMailboxName(mailbox);
+    if (seen.has(key)) return;
+    seen.add(key);
+    ordered.push(mailbox);
+  };
+  push(primaryMailbox || 'INBOX');
+  [
+    'INBOX',
+    'Sent',
+    'Sent Messages',
+    'Sent Mail',
+    'Sent Items',
+    'INBOX.Sent',
+    'INBOX.Sent Messages',
+    '[Gmail]/Sent Mail',
+  ].forEach(push);
+  return ordered;
+}
+
+function parseRecipients(value = '') {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    return {
+      to: Array.isArray(parsed.to) ? parsed.to : [],
+      cc: Array.isArray(parsed.cc) ? parsed.cc : [],
+      bcc: Array.isArray(parsed.bcc) ? parsed.bcc : [],
+    };
+  } catch (_) {
+    return { to: [], cc: [], bcc: [] };
+  }
 }
 
 function selectRows(db, sql, bind = []) {
@@ -426,27 +468,45 @@ function createMailStore(options = {}) {
     try {
       await client.connect();
       await client.login(account.username, pwdRes.secret);
-      await client.selectMailbox(account.mailbox);
-      const allUids = await client.uidSearchAll();
-      const targetUids = allUids.slice(-account.sync_limit);
-      const seenUids = new Set(allUids.map((item) => Math.round(Number(item || 0))).filter(Boolean));
-      await withDatabase(async (db) => {
-        const existingRows = selectRows(db, 'SELECT uid FROM messages WHERE account_id = ?', [account.id]);
-        existingRows.forEach((row) => {
-          const uid = Math.round(Number(row.uid || 0));
-          if (uid && !seenUids.has(uid)) {
-            const delStmt = db.prepare('DELETE FROM messages WHERE account_id = ? AND uid = ?');
-            delStmt.bind([account.id, uid]);
-            delStmt.step();
-            delStmt.free();
+      let openedMailboxCount = 0;
+      for (const mailboxName of getMailboxCandidates(account.mailbox)) {
+        try {
+          await client.selectMailbox(mailboxName);
+        } catch (_) {
+          continue;
+        }
+        openedMailboxCount += 1;
+        const allUids = await client.uidSearchAll();
+        const numericUids = allUids.map((item) => Math.round(Number(item || 0))).filter(Boolean);
+        const targetUids = numericUids.slice(-account.sync_limit);
+        const seenUids = new Set(numericUids);
+        await withDatabase(async (db) => {
+          const existingRows = selectRows(
+            db,
+            'SELECT uid FROM messages WHERE account_id = ? AND LOWER(mailbox) = LOWER(?)',
+            [account.id, mailboxName]
+          );
+          existingRows.forEach((row) => {
+            const uid = Math.round(Number(row.uid || 0));
+            if (uid && !seenUids.has(uid)) {
+              const delStmt = db.prepare('DELETE FROM messages WHERE account_id = ? AND uid = ? AND LOWER(mailbox) = LOWER(?)');
+              delStmt.bind([account.id, uid, mailboxName]);
+              delStmt.step();
+              delStmt.free();
+            }
+          });
+          for (const uid of targetUids) {
+            const rawSource = await client.fetchRawMessage(uid);
+            const message = buildParsedMessage(account, uid, rawSource, mailboxName);
+            upsertMessage(db, message);
+            syncedCount += 1;
           }
         });
-        for (const uid of targetUids) {
-          const rawSource = await client.fetchRawMessage(uid);
-          const message = buildParsedMessage(account, uid, rawSource);
-          upsertMessage(db, message);
-          syncedCount += 1;
-        }
+      }
+      if (!openedMailboxCount) {
+        throw new Error(`Unable to open mailbox "${account.mailbox}" or any sent mailbox for this account.`);
+      }
+      await withDatabase(async (db) => {
         upsertAccount(db, {
           ...account,
           last_sync_at: nowTs(),
@@ -513,6 +573,7 @@ function createMailStore(options = {}) {
           account_label: String(rows[0].account_label || '').trim(),
           mailbox: String(rows[0].mailbox || '').trim(),
           messages: rows.map((row) => ({
+            recipients: parseRecipients(row.recipients),
             id: `${String(row.account_id || '').trim()}:${String(row.uid || '').trim()}`,
             source_path: '',
             source_key: '',
@@ -523,9 +584,9 @@ function createMailStore(options = {}) {
             in_reply_to: String(row.in_reply_to || '').trim(),
             references: [],
             from: String(row.sender || '').trim(),
-            to: [],
-            cc: [],
-            bcc: [],
+            to: parseRecipients(row.recipients).to,
+            cc: parseRecipients(row.recipients).cc,
+            bcc: parseRecipients(row.recipients).bcc,
             subject: String(row.subject || '').trim(),
             sent_at: String(row.sent_at || '').trim(),
             body_text: String(row.body_text || '').trim(),
