@@ -44,6 +44,7 @@ const state = {
   diffQueueByRef: new Map(),
   selectedProvider: 'openai',
   selectedModel: '',
+  providerModelsRequestSeq: 0,
   providerKeysState: { providers: [] },
   providerKeyStatusByProvider: {},
   providerKeyModal: {
@@ -1278,11 +1279,14 @@ function renderModelDropdown(models, options = {}) {
   const select = e('provider-model-select');
   if (!select) return;
   const list = Array.isArray(models) ? models.filter(Boolean) : [];
+  const preserveOnEmpty = options.preserveOnEmpty !== false;
   const previous = options.forceModel ? '' : getSelectedModel();
   const chosen = String(options.forceModel || previous || list[0] || '').trim();
 
   if (list.length === 0) {
-    const fallbackModel = String(options.forceModel || previous || state.selectedModel || '').trim();
+    const fallbackModel = preserveOnEmpty
+      ? String(options.forceModel || previous || state.selectedModel || '').trim()
+      : '';
     if (fallbackModel) {
       select.innerHTML = `<option value="${escapeHtml(fallbackModel)}">${escapeHtml(fallbackModel)} (saved)</option>`;
       select.value = fallbackModel;
@@ -1309,16 +1313,25 @@ async function fetchModelsForProvider(provider, options = {}) {
   if (!PROVIDERS.includes(targetProvider)) return null;
   const targetKeyId = normalizeProviderKeyId(options.keyId || options.key_id || '');
   const statusId = options.statusId || 'provider-status';
+  const applyToMain = options.applyToMain !== false;
+  const mainRequestSeq = applyToMain ? (state.providerModelsRequestSeq += 1) : 0;
   const previousModel = String(state.selectedModel || '').trim();
   const keyLabel = targetKeyId ? getProviderKeyLabel(targetProvider, targetKeyId) : '';
   setStatusText(statusId, `Fetching models from ${targetProvider}${keyLabel ? ` (${keyLabel})` : ''}...`);
   const res = await api.providerListModels(targetProvider, targetKeyId);
+  const isStaleMainResponse = applyToMain
+    && (
+      mainRequestSeq !== state.providerModelsRequestSeq
+      || getSelectedProvider() !== targetProvider
+    );
+  if (isStaleMainResponse) {
+    return Array.isArray(res && res.models) ? res.models : null;
+  }
   if (!res || !res.ok) {
     setStatusText(statusId, (res && res.message) ? res.message : `Unable to fetch models for ${targetProvider}.`);
     return null;
   }
   const models = Array.isArray(res.models) ? res.models : [];
-  const applyToMain = options.applyToMain !== false;
   if (applyToMain) {
     renderModelDropdown(models, { forceModel: options.forceModel || '' });
   }
@@ -10552,7 +10565,9 @@ function bindControls() {
   e('provider-select')?.addEventListener('change', async (event) => {
     const provider = String(event.target && event.target.value ? event.target.value : 'openai').trim().toLowerCase();
     state.selectedProvider = provider;
-    await persistLuminoSelection(provider, state.selectedModel || '');
+    state.selectedModel = '';
+    renderModelDropdown([], { forceModel: '', preserveOnEmpty: false });
+    await persistLuminoSelection(provider, '');
     await fetchModelsForProvider(provider, { statusId: 'provider-status', persistSelection: true });
     await refreshProviderStatus();
     refreshAgentModeAvailability();
