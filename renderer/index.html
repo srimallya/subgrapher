@@ -16,6 +16,7 @@
       </div>
       <nav class="primary-nav" aria-label="Primary">
         <button id="workspace-open-btn" class="top-btn active">Workspace</button>
+        <button id="mail-open-btn" class="top-btn">Mail</button>
         <button id="hyperweb-open-btn" class="top-btn">Hyperweb</button>
         <button id="private-shares-open-btn" class="top-btn">Private Shares</button>
         <button id="history-open-btn" class="top-btn">History</button>
@@ -903,6 +904,25 @@
           </div>
         </div>
       </section>
+    </div>
+  </section>
+
+  <section id="global-mail-page" class="hidden">
+    <div class="history-toolbar">
+      <div class="page-heading">
+        <h1>Mail</h1>
+        <div id="global-mail-status-line" class="muted small">Loading mail...</div>
+      </div>
+      <div class="history-toolbar-actions">
+        <button id="global-mail-back-btn">Back to Workspace</button>
+      </div>
+    </div>
+    <div class="mail-page-shell">
+      <div class="mail-header">
+        <strong id="global-mail-title">Mail</strong>
+        <span id="global-mail-status" class="muted">No mail linked</span>
+      </div>
+      <div id="global-mail-body" class="mail-body"></div>
     </div>
   </section>
 

@@ -198,6 +198,7 @@ const RAG_TOP_K_DEFAULT = 8;
 const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
 const TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC = 8;
 const HISTORY_DEFAULT_MAX_ENTRIES = 5000;
+const GLOBAL_MAIL_VIEW_ID = '__global_mail__';
 let passiveNoticeTimer = null;
 
 function e(id) {
@@ -5389,6 +5390,381 @@ async function renderMailPanel() {
   });
 }
 
+async function renderGlobalMailPage() {
+  const body = e('global-mail-body');
+  const status = e('global-mail-status');
+  const statusLine = e('global-mail-status-line');
+  if (!body || !status || !statusLine) return;
+  const viewId = GLOBAL_MAIL_VIEW_ID;
+  const attachRef = getActiveReference();
+  const searchState = getMailSearchState(viewId);
+  const nav = getMailNavState(viewId);
+  const query = searchState.query;
+  let results = searchState.results;
+  const selectedSources = searchState.selected;
+  const previewState = getMailPreviewState(viewId);
+  const composer = getMailComposerState(viewId);
+  const mailStatus = state.mailStatus || await api.mailStatus();
+  state.mailStatus = mailStatus || null;
+  const accountOptions = Array.isArray(state.mailAccounts) ? state.mailAccounts : [];
+  const activeAccountId = nav.account_id || String(((accountOptions[0] || {}).id) || '').trim();
+  if (!nav.account_id && activeAccountId) setMailNavState(viewId, { account_id: activeAccountId });
+  const activeMailboxes = state.mailboxesByAccount.get(activeAccountId) || [];
+  if (!Array.isArray(results) || results.length === 0) {
+    const res = await api.mailSearchLocalThreads(query, 80, true, '', activeAccountId, nav.mailbox_path || '', nav.smart_view || '');
+    results = (res && Array.isArray(res.items)) ? res.items : [];
+    state.mailSearchResultsByRef.set(viewId, results);
+  }
+  status.textContent = String((mailStatus && mailStatus.message) || 'Mail');
+  statusLine.textContent = attachRef
+    ? `Attach target: ${String((attachRef && attachRef.title) || 'Current workspace')}`
+    : 'No active workspace selected for thread attach.';
+
+  const navItems = [
+    { key: 'inbox', label: 'Inbox', type: 'smart' },
+    { key: 'unread', label: 'Unread', type: 'smart' },
+    { key: 'sent', label: 'Sent', type: 'smart' },
+    { key: 'drafts', label: 'Drafts', type: 'smart' },
+    { key: 'archive', label: 'Archive', type: 'smart' },
+    { key: 'trash', label: 'Trash', type: 'smart' },
+    ...activeMailboxes.map((mailbox) => ({
+      key: String((mailbox && mailbox.path) || '').trim(),
+      label: String((mailbox && mailbox.name) || (mailbox && mailbox.path) || 'Mailbox'),
+      type: 'mailbox',
+    })),
+  ];
+  const threadListMarkup = results.length
+    ? results.map((item) => {
+      const threadId = String((item && item.id) || '').trim();
+      const isActive = previewState && String((previewState && previewState.thread_id) || '') === threadId;
+      const isSelected = selectedSources.has(threadId);
+      const meta = [
+        String((item && item.account_label) || '').trim(),
+        String((item && item.mailbox_role) || (item && item.mailbox) || '').trim(),
+        String((item && item.from) || '').trim(),
+        formatAgo((item && item.last_message_at) || 0),
+      ].filter(Boolean).join(' · ');
+      return `
+        <div class="mail-list-row ${isActive ? 'active' : ''}">
+          <button type="button" class="mail-list-row-main" data-global-mail-thread-preview="${escapeHtml(threadId)}">
+            <div class="mail-row-title">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
+            <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
+            <div class="mail-row-sub">${escapeHtml(String((item && item.snippet) || ''))}</div>
+          </button>
+          <div class="mail-row-side">
+            ${Number((item && item.unread_count) || 0) > 0 ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
+            <button type="button" class="mail-row-select-btn ${isSelected ? 'active' : ''}" data-global-mail-thread-select="${escapeHtml(threadId)}">
+              ${isSelected ? 'Selected' : 'Select'}
+            </button>
+          </div>
+        </div>
+      `;
+    }).join('')
+    : '<div class="muted small">No synced threads yet. Add an account in Settings and run sync.</div>';
+
+  let contentMarkup = '<div class="muted small">Select a thread to preview it.</div>';
+  if (previewState && previewState.thread && Array.isArray(previewState.thread.messages)) {
+    contentMarkup = previewState.thread.messages.map((message) => renderMailPreviewMarkup(message)).join('');
+  }
+
+  const composeMarkup = composer && composer.open ? `
+    <div class="mail-block mail-compose-block">
+      <h4>${escapeHtml(composer.mode === 'reply' ? 'Reply' : 'Compose')}</h4>
+      <div class="mail-compose-grid">
+        <label class="settings-field">Account
+          <select id="global-mail-compose-account">
+            ${accountOptions.map((account) => `
+              <option value="${escapeHtml(String((account && account.id) || ''))}" ${String((account && account.id) || '') === String(composer.account_id || '') ? 'selected' : ''}>
+                ${escapeHtml(String((account && account.label) || (account && account.email) || 'Mailbox'))}
+              </option>
+            `).join('')}
+          </select>
+        </label>
+        <label class="settings-field">To
+          <input id="global-mail-compose-to" type="text" value="${escapeHtml(String(composer.to || ''))}" />
+        </label>
+        <label class="settings-field">Cc
+          <input id="global-mail-compose-cc" type="text" value="${escapeHtml(String(composer.cc || ''))}" />
+        </label>
+        <label class="settings-field">Bcc
+          <input id="global-mail-compose-bcc" type="text" value="${escapeHtml(String(composer.bcc || ''))}" />
+        </label>
+        <label class="settings-field mail-compose-subject">Subject
+          <input id="global-mail-compose-subject" type="text" value="${escapeHtml(String(composer.subject || ''))}" />
+        </label>
+        <label class="settings-field mail-compose-body">Body
+          <textarea id="global-mail-compose-body">${escapeHtml(String(composer.body_text || ''))}</textarea>
+        </label>
+      </div>
+      <div class="mail-attachment-list mail-compose-attachments">
+        ${(Array.isArray(composer.attachments) ? composer.attachments : []).map((attachment) => `
+          <div class="mail-attachment">
+            <span>${escapeHtml(String((attachment && attachment.file_name) || 'attachment'))}</span>
+            <button type="button" class="mail-attachment-remove" data-global-mail-compose-remove-attachment="${escapeHtml(String((attachment && attachment.source_path) || '').trim())}">Remove</button>
+          </div>
+        `).join('') || '<div class="muted small">No attachments added.</div>'}
+      </div>
+      <div class="settings-inline-actions">
+        <button id="global-mail-compose-attach-btn">Add Attachment</button>
+        <button id="global-mail-compose-save-draft-btn">Save Draft</button>
+        <button id="global-mail-compose-send-btn">Send</button>
+        <button id="global-mail-compose-cancel-btn">Close</button>
+      </div>
+    </div>
+  ` : '';
+
+  body.innerHTML = `
+    <div class="mail-layout">
+      <div class="mail-sidebar mail-block">
+        <div class="mail-sidebar-section">
+          <label class="settings-field">Account
+            <select id="global-mail-account-select">
+              ${accountOptions.map((account) => `
+                <option value="${escapeHtml(String((account && account.id) || ''))}" ${String((account && account.id) || '') === activeAccountId ? 'selected' : ''}>
+                  ${escapeHtml(String((account && account.label) || (account && account.email) || 'Mailbox'))}
+                </option>
+              `).join('')}
+            </select>
+          </label>
+        </div>
+        <div class="mail-sidebar-section">
+          <div class="mail-sidebar-title">Folders</div>
+          <div class="mail-folder-list">
+            ${navItems.map((item) => {
+              const isActive = item.type === 'mailbox'
+                ? String(nav.mailbox_path || '') === String(item.key || '')
+                : String(nav.smart_view || 'inbox') === String(item.key || '');
+              return `<button type="button" class="mail-folder-item ${isActive ? 'active' : ''}" data-global-mail-folder-type="${escapeHtml(item.type)}" data-global-mail-folder-key="${escapeHtml(String(item.key || ''))}">${escapeHtml(String(item.label || 'Folder'))}</button>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="mail-main">
+        <div class="mail-toolbar">
+          <input id="global-mail-search-input" type="text" value="${escapeHtml(query)}" placeholder="Search your Mail accounts" />
+          <button id="global-mail-search-btn">Search</button>
+          <button id="global-mail-refresh-btn">Refresh</button>
+          <button id="global-mail-attach-btn" ${attachRef ? '' : 'disabled'}>Add Selected To Workspace</button>
+          <button id="global-mail-compose-open-btn">Compose</button>
+          ${previewState && previewState.thread ? '<button id="global-mail-reply-btn">Reply</button>' : ''}
+          ${previewState && previewState.thread && previewState.thread.capabilities && previewState.thread.capabilities.supports_archive ? '<button id="global-mail-archive-btn">Archive</button>' : ''}
+          ${previewState && previewState.thread ? '<button id="global-mail-toggle-read-btn">Read/Unread</button>' : ''}
+          ${previewState && previewState.thread ? '<button id="global-mail-delete-btn">Trash</button>' : ''}
+        </div>
+        ${composeMarkup}
+        <div class="mail-block mail-list-block">
+          <h4>Threads</h4>
+          <div class="mail-list-scroll">${threadListMarkup}</div>
+        </div>
+        <div class="mail-block mail-content-block mail-thread-view">
+          <h4>Content</h4>
+          <div class="mail-content-scroll">${contentMarkup}</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  e('global-mail-search-btn')?.addEventListener('click', async () => {
+    const nextQuery = (e('global-mail-search-input') && e('global-mail-search-input').value) || '';
+    await runMailSearch(viewId, nextQuery);
+    await renderGlobalMailPage();
+  });
+  e('global-mail-search-input')?.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    const nextQuery = (e('global-mail-search-input') && e('global-mail-search-input').value) || '';
+    await runMailSearch(viewId, nextQuery);
+    await renderGlobalMailPage();
+  });
+  e('global-mail-account-select')?.addEventListener('change', async (event) => {
+    setMailNavState(viewId, { account_id: String((event.target && event.target.value) || '').trim(), mailbox_path: '', smart_view: 'inbox' });
+    state.mailSearchResultsByRef.delete(viewId);
+    setMailPreviewState(viewId, null);
+    await renderGlobalMailPage();
+  });
+  body.querySelectorAll('button[data-global-mail-folder-key]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const type = String(node.getAttribute('data-global-mail-folder-type') || '').trim();
+      const key = String(node.getAttribute('data-global-mail-folder-key') || '').trim();
+      setMailNavState(viewId, {
+        mailbox_path: type === 'mailbox' ? key : '',
+        smart_view: type === 'smart' ? key : '',
+      });
+      state.mailSearchResultsByRef.delete(viewId);
+      setMailPreviewState(viewId, null);
+      await renderGlobalMailPage();
+    });
+  });
+  e('global-mail-refresh-btn')?.addEventListener('click', async () => {
+    if (!activeAccountId) return;
+    const res = await api.mailSyncAccount(activeAccountId);
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to sync mailbox.');
+      return;
+    }
+    if (Array.isArray(res.accounts)) state.mailAccounts = res.accounts;
+    if (Array.isArray(res.mailboxes)) state.mailboxesByAccount.set(activeAccountId, res.mailboxes);
+    await runMailSearch(viewId, query);
+    await renderGlobalMailPage();
+  });
+  e('global-mail-attach-btn')?.addEventListener('click', async () => {
+    if (!attachRef || !state.activeSrId) {
+      showPassiveNotification('Select a workspace first.');
+      return;
+    }
+    const chosenThreadIds = results.map((item) => String((item && item.id) || '').trim()).filter((threadId) => selectedSources.has(threadId));
+    if (!chosenThreadIds.length) {
+      showPassiveNotification('Select at least one mail thread to add.');
+      return;
+    }
+    const res = await api.srAttachMailThreadsFromStore(state.activeSrId, chosenThreadIds);
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to attach mail threads.');
+      return;
+    }
+    state.references = res.references || await api.srList();
+    state.mailSelectedSourceIdsByRef.set(viewId, new Set());
+    showPassiveNotification('Mail thread attached to workspace.');
+  });
+  e('global-mail-compose-open-btn')?.addEventListener('click', async () => {
+    setMailComposerState(viewId, { ...getMailComposerState(viewId), open: true, mode: 'compose', account_id: activeAccountId, attachments: [], draft_key: '' });
+    await renderGlobalMailPage();
+  });
+  e('global-mail-reply-btn')?.addEventListener('click', async () => {
+    setMailComposerState(viewId, buildReplyDraftFromPreview(previewState));
+    await renderGlobalMailPage();
+  });
+  e('global-mail-compose-cancel-btn')?.addEventListener('click', async () => {
+    closeMailComposer(viewId);
+    await renderGlobalMailPage();
+  });
+  e('global-mail-compose-attach-btn')?.addEventListener('click', async () => {
+    const pick = await api.mailPickAttachments();
+    if (!pick || !pick.ok || !Array.isArray(pick.attachments)) return;
+    const current = getMailComposerState(viewId);
+    setMailComposerState(viewId, { attachments: current.attachments.concat(pick.attachments) });
+    await renderGlobalMailPage();
+  });
+  e('global-mail-compose-save-draft-btn')?.addEventListener('click', async () => {
+    const accountId = String((e('global-mail-compose-account') && e('global-mail-compose-account').value) || '').trim();
+    const current = getMailComposerState(viewId);
+    const res = await api.mailSaveDraft(accountId, {
+      to: String((e('global-mail-compose-to') && e('global-mail-compose-to').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      cc: String((e('global-mail-compose-cc') && e('global-mail-compose-cc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      bcc: String((e('global-mail-compose-bcc') && e('global-mail-compose-bcc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      subject: String((e('global-mail-compose-subject') && e('global-mail-compose-subject').value) || '').trim(),
+      body_text: String((e('global-mail-compose-body') && e('global-mail-compose-body').value) || ''),
+      in_reply_to: String(current.in_reply_to || '').trim(),
+      references: Array.isArray(current.references) ? current.references : [],
+      attachments: Array.isArray(current.attachments) ? current.attachments : [],
+      draft_key: String(current.draft_key || '').trim(),
+    });
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to save draft.');
+      return;
+    }
+    setMailComposerState(viewId, { draft_key: String((res && res.draft_key) || current.draft_key || '').trim() });
+    showPassiveNotification('Draft saved.');
+  });
+  e('global-mail-compose-send-btn')?.addEventListener('click', async () => {
+    const accountId = String((e('global-mail-compose-account') && e('global-mail-compose-account').value) || '').trim();
+    const current = getMailComposerState(viewId);
+    const res = await api.mailSendMessage(accountId, {
+      to: String((e('global-mail-compose-to') && e('global-mail-compose-to').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      cc: String((e('global-mail-compose-cc') && e('global-mail-compose-cc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      bcc: String((e('global-mail-compose-bcc') && e('global-mail-compose-bcc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      subject: String((e('global-mail-compose-subject') && e('global-mail-compose-subject').value) || '').trim(),
+      body_text: String((e('global-mail-compose-body') && e('global-mail-compose-body').value) || ''),
+      in_reply_to: String(current.in_reply_to || '').trim(),
+      references: Array.isArray(current.references) ? current.references : [],
+      attachments: Array.isArray(current.attachments) ? current.attachments : [],
+    });
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to send mail.');
+      return;
+    }
+    state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
+    closeMailComposer(viewId);
+    await runMailSearch(viewId, query);
+    await renderGlobalMailPage();
+  });
+  body.querySelectorAll('button[data-global-mail-compose-remove-attachment]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const target = String(node.getAttribute('data-global-mail-compose-remove-attachment') || '').trim();
+      const current = getMailComposerState(viewId);
+      setMailComposerState(viewId, {
+        attachments: (Array.isArray(current.attachments) ? current.attachments : []).filter((item) => String((item && item.source_path) || '').trim() !== target),
+      });
+      await renderGlobalMailPage();
+    });
+  });
+  e('global-mail-toggle-read-btn')?.addEventListener('click', async () => {
+    const thread = previewState && previewState.thread ? previewState.thread : null;
+    if (!thread) return;
+    const unread = Array.isArray(thread.messages) ? thread.messages.some((message) => !!message.is_unread) : false;
+    const res = await api.mailUpdateThreadState(String(thread.id || '').trim(), { is_unread: !unread });
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to update thread state.');
+      return;
+    }
+    await runMailSearch(viewId, query);
+    const previewRes = await api.mailPreviewSource(String(thread.id || '').trim());
+    if (previewRes && previewRes.ok && previewRes.thread) setMailPreviewState(viewId, { thread_id: String(thread.id || '').trim(), thread: previewRes.thread });
+    await renderGlobalMailPage();
+  });
+  e('global-mail-archive-btn')?.addEventListener('click', async () => {
+    const thread = previewState && previewState.thread ? previewState.thread : null;
+    if (!thread) return;
+    const res = await api.mailMoveThread(String(thread.id || '').trim(), 'archive');
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to archive thread.');
+      return;
+    }
+    setMailPreviewState(viewId, null);
+    await runMailSearch(viewId, query);
+    await renderGlobalMailPage();
+  });
+  e('global-mail-delete-btn')?.addEventListener('click', async () => {
+    const thread = previewState && previewState.thread ? previewState.thread : null;
+    if (!thread) return;
+    const confirmed = window.confirm('Move this thread to trash?');
+    if (!confirmed) return;
+    const res = await api.mailDeleteThread(String(thread.id || '').trim());
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to move thread to trash.');
+      return;
+    }
+    setMailPreviewState(viewId, null);
+    await runMailSearch(viewId, query);
+    await renderGlobalMailPage();
+  });
+  body.querySelectorAll('button[data-global-mail-thread-preview]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const threadId = String(node.getAttribute('data-global-mail-thread-preview') || '').trim();
+      if (!threadId) return;
+      const res = await api.mailPreviewSource(threadId);
+      if (!res || !res.ok || !res.thread) return;
+      setMailPreviewState(viewId, { thread_id: threadId, thread: res.thread });
+      await renderGlobalMailPage();
+    });
+  });
+  body.querySelectorAll('button[data-global-mail-thread-select]').forEach((node) => {
+    node.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const threadId = String(node.getAttribute('data-global-mail-thread-select') || '').trim();
+      setMailSelectedSource(viewId, threadId, !selectedSources.has(threadId));
+      await renderGlobalMailPage();
+    });
+  });
+}
+
+async function openMailPage() {
+  await setAppView('mail');
+  await refreshMailStatus();
+  await refreshMailAccounts();
+  await renderGlobalMailPage();
+}
+
 async function showMailSurface(tabId) {
   const ref = getActiveReference();
   if (!ref) return;
@@ -6476,6 +6852,7 @@ async function toggleZenMode() {
 function updateTopbarViewButtons() {
   const active = String(state.appView || 'workspace').trim().toLowerCase();
   e('workspace-open-btn')?.classList.toggle('active', active === 'workspace');
+  e('mail-open-btn')?.classList.toggle('active', active === 'mail');
   e('hyperweb-open-btn')?.classList.toggle('active', active === 'hyperweb');
   e('private-shares-open-btn')?.classList.toggle('active', active === 'private-shares');
   e('settings-open-btn')?.classList.toggle('active', active === 'settings');
@@ -6484,15 +6861,17 @@ function updateTopbarViewButtons() {
 
 async function setAppView(viewName) {
   const target = String(viewName || 'workspace').trim().toLowerCase();
-  state.appView = (target === 'hyperweb' || target === 'private-shares' || target === 'settings' || target === 'history')
+  state.appView = (target === 'mail' || target === 'hyperweb' || target === 'private-shares' || target === 'settings' || target === 'history')
     ? target
     : 'workspace';
   const root = e('app-root');
+  const mail = e('global-mail-page');
   const hyperweb = e('hyperweb-page');
   const privateShares = e('private-shares-page');
   const settings = e('settings-page');
   const history = e('history-page');
   if (root) root.classList.toggle('hidden', state.appView !== 'workspace');
+  if (mail) mail.classList.toggle('hidden', state.appView !== 'mail');
   if (hyperweb) hyperweb.classList.toggle('hidden', state.appView !== 'hyperweb');
   if (privateShares) privateShares.classList.toggle('hidden', state.appView !== 'private-shares');
   if (settings) settings.classList.toggle('hidden', state.appView !== 'settings');
@@ -6500,7 +6879,7 @@ async function setAppView(viewName) {
   document.body.classList.remove('mobile-left-open', 'mobile-right-open');
   closeTopbarMenu();
   updateTopbarViewButtons();
-  if (state.appView === 'hyperweb' || state.appView === 'private-shares' || state.appView === 'settings') {
+  if (state.appView === 'hyperweb' || state.appView === 'private-shares' || state.appView === 'settings' || state.appView === 'mail') {
     await api.historyPreviewHide();
     await api.hide();
     return;
@@ -9669,6 +10048,10 @@ function bindControls() {
     await setAppView('workspace');
   });
 
+  e('mail-open-btn')?.addEventListener('click', async () => {
+    await openMailPage();
+  });
+
   e('hyperweb-open-btn')?.addEventListener('click', async () => {
     await openHyperwebPage();
   });
@@ -9698,6 +10081,10 @@ function bindControls() {
   });
 
   e('history-close-btn')?.addEventListener('click', async () => {
+    await setAppView('workspace');
+  });
+
+  e('global-mail-back-btn')?.addEventListener('click', async () => {
     await setAppView('workspace');
   });
 
@@ -9823,6 +10210,7 @@ function bindControls() {
     renderSettingsStatusLine();
     await refreshMailStatus();
     if (state.appView === 'workspace') await renderMailPanel();
+    if (state.appView === 'mail') await renderGlobalMailPage();
   });
 
   e('settings-mail-accounts-list')?.addEventListener('click', async (event) => {
@@ -9837,6 +10225,7 @@ function bindControls() {
       renderSettingsStatusLine();
       await refreshMailStatus();
       if (state.appView === 'workspace') await renderMailPanel();
+      if (state.appView === 'mail') await renderGlobalMailPage();
       return;
     }
     const deleteBtn = event.target.closest('[data-mail-delete-account]');

@@ -2517,6 +2517,11 @@ body.chat-collapsed #chat-panel-resizer {
   background: #1f1f1f;
 }
 
+.mail-page-shell {
+  padding: 0 16px 16px;
+  min-height: 0;
+}
+
 .mail-toolbar {
   flex-wrap: wrap;
 }
