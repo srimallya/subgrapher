@@ -17848,9 +17848,13 @@ ipcMain.handle('browser:mailListMailboxes', async (_event, payload) => ({
 }));
 
 ipcMain.handle('browser:mailSaveAccount', async (_event, payload) => {
-  const res = await getMailStore().saveAccount(payload || {});
-  if (!res || !res.ok) return res;
-  return { ok: true, account: res.account, accounts: await getMailStore().listAccounts() };
+  try {
+    const res = await getMailStore().saveAccount(payload || {});
+    if (!res || !res.ok) return res;
+    return { ok: true, account: res.account, accounts: await getMailStore().listAccounts() };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to save mailbox account.') };
+  }
 });
 
 ipcMain.handle('browser:mailStartGoogleOAuth', async (_event, payload) => {

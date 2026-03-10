@@ -178,6 +178,13 @@ function ensureSchema(db) {
   db.run('CREATE INDEX IF NOT EXISTS idx_messages_mailbox ON messages(account_id, mailbox)');
   ensureColumn(db, 'accounts', 'account_type', "account_type TEXT NOT NULL DEFAULT 'manual_imap_smtp'");
   ensureColumn(db, 'accounts', 'provider', "provider TEXT NOT NULL DEFAULT 'generic'");
+  ensureColumn(db, 'accounts', 'smtp_host', "smtp_host TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'accounts', 'smtp_port', 'smtp_port INTEGER NOT NULL DEFAULT 465');
+  ensureColumn(db, 'accounts', 'smtp_username', "smtp_username TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'accounts', 'smtp_password_ref', "smtp_password_ref TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'accounts', 'smtp_use_tls', 'smtp_use_tls INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'accounts', 'smtp_starttls', 'smtp_starttls INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'accounts', 'send_enabled', 'send_enabled INTEGER NOT NULL DEFAULT 1');
   ensureColumn(db, 'accounts', 'oauth_access_token_ref', "oauth_access_token_ref TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'accounts', 'oauth_refresh_token_ref', "oauth_refresh_token_ref TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'accounts', 'oauth_client_id_ref', "oauth_client_id_ref TEXT NOT NULL DEFAULT ''");

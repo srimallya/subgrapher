@@ -10192,8 +10192,8 @@ function bindControls() {
       renderSettingsStatusLine();
       await refreshMailAccounts();
       await refreshMailStatus();
-    } catch (_) {
-      state.settingsSaveState = 'Unable to save mailbox account.';
+    } catch (err) {
+      state.settingsSaveState = String((err && err.message) || 'Unable to save mailbox account.');
       renderSettingsStatusLine();
     } finally {
       if (saveBtn) {
