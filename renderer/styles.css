@@ -222,6 +222,7 @@ summary:focus-visible {
 #hyperweb-page,
 #settings-page,
 #history-page,
+#global-mail-page,
 #private-shares-page {
   height: calc(100% - var(--topbar-height));
 }
@@ -1377,6 +1378,7 @@ summary:focus-visible {
 #hyperweb-page,
 #settings-page,
 #history-page,
+#global-mail-page,
 #private-shares-page {
   display: flex;
   flex-direction: column;
@@ -1389,6 +1391,11 @@ summary:focus-visible {
 #history-page > * {
   width: min(100%, 1440px);
   margin: 0 auto;
+}
+
+#global-mail-page > * {
+  width: 100%;
+  margin: 0;
 }
 
 #settings-page > * {
@@ -2518,7 +2525,12 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 .mail-page-shell {
+  flex: 1 1 auto;
+  width: 100%;
+  margin: 0;
   padding: 0 16px 16px;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
 }
 
@@ -2532,12 +2544,16 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 .mail-body {
+  flex: 1 1 auto;
   overflow: hidden;
   padding: 12px;
+  display: flex;
+  min-height: 0;
 }
 
 .mail-layout {
   height: 100%;
+  width: 100%;
   display: flex;
   gap: 12px;
   min-height: 0;

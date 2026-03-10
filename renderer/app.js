@@ -4904,12 +4904,17 @@ function buildMailNavItems(mailboxes = []) {
     type: 'smart',
   }));
   const seen = new Set(smartItems.map((item) => `smart:${item.key}`));
+  const seenMailboxRoles = new Set();
   const mailboxItems = [];
   (Array.isArray(mailboxes) ? mailboxes : []).forEach((mailbox) => {
     const role = String((mailbox && mailbox.special_use) || '').trim().toLowerCase();
     const path = String((mailbox && mailbox.path) || '').trim();
     if (!path) return;
     if (role && MAIL_SMART_FOLDER_LABELS[role] && role !== 'junk') return;
+    if (role === 'junk') {
+      if (seenMailboxRoles.has(role)) return;
+      seenMailboxRoles.add(role);
+    }
     if (!role && path.toLowerCase() === 'inbox') return;
     const key = `mailbox:${path.toLowerCase()}`;
     if (seen.has(key)) return;
@@ -5833,6 +5838,8 @@ async function showMailSurface(tabId) {
   e('skills-panel')?.classList.add('hidden');
   const panel = e('mail-panel');
   if (panel) panel.classList.remove('hidden');
+  await refreshMailAccounts();
+  await refreshMailStatus();
   await renderMailPanel();
   await syncUrlBarForActiveSurface();
   await api.markerSetContext({ srId: state.activeSrId, artifactId: null });
