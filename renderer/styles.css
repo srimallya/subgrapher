@@ -2560,6 +2560,10 @@ body.chat-collapsed #chat-panel-resizer {
   min-height: 0;
 }
 
+.mail-main-compose {
+  min-height: 0;
+}
+
 .mail-sidebar-section {
   display: flex;
   flex-direction: column;
@@ -2602,11 +2606,17 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 .mail-list-block {
-  flex: 0 0 260px;
+  flex: 0 0 300px;
 }
 
 .mail-content-block {
   flex: 1 1 320px;
+}
+
+.mail-composer-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
 }
 
 .mail-list-scroll,
@@ -2633,6 +2643,7 @@ body.chat-collapsed #chat-panel-resizer {
   align-items: center;
   gap: 8px;
   padding: 10px 12px 10px 0;
+  flex: 0 0 auto;
 }
 
 .mail-row-count {
@@ -2750,10 +2761,23 @@ body.chat-collapsed #chat-panel-resizer {
   flex: 0 0 auto;
 }
 
+.mail-compose-block-full {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .mail-compose-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.mail-compose-block-full .mail-compose-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
 .mail-compose-subject,
@@ -2761,9 +2785,22 @@ body.chat-collapsed #chat-panel-resizer {
   grid-column: 1 / -1;
 }
 
+.mail-compose-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .mail-compose-body textarea {
   min-height: 180px;
   resize: vertical;
+}
+
+.mail-compose-block-full .mail-compose-body textarea {
+  flex: 1 1 auto;
+  min-height: 280px;
+  height: 100%;
+  resize: none;
 }
 
 .mail-compose-attachments {
