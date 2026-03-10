@@ -125,6 +125,7 @@ const state = {
   mailSearchQueryByRef: new Map(),
   mailSearchResultsByRef: new Map(),
   mailSelectedSourceIdsByRef: new Map(),
+  mailSelectedViewByRef: new Map(),
   mailPreviewByRef: new Map(),
   mailComposerByRef: new Map(),
   mailNavByRef: new Map(),
@@ -4763,6 +4764,52 @@ function setMailSelectedSource(srId, sourceId, checked) {
   state.mailSelectedSourceIdsByRef.set(refId, current);
 }
 
+function isMailSelectedViewEnabled(srId) {
+  return !!state.mailSelectedViewByRef.get(resolveMailStateId(srId));
+}
+
+function setMailSelectedView(srId, enabled) {
+  const refId = resolveMailStateId(srId);
+  if (!refId) return;
+  if (enabled) state.mailSelectedViewByRef.set(refId, true);
+  else state.mailSelectedViewByRef.delete(refId);
+}
+
+function clearMailSelection(srId) {
+  const refId = resolveMailStateId(srId);
+  state.mailSelectedSourceIdsByRef.set(refId, new Set());
+  state.mailSelectedViewByRef.delete(refId);
+}
+
+function getSelectedMailThreadIds(srId, results = []) {
+  const selected = getMailSearchState(srId).selected;
+  const availableIds = new Set((Array.isArray(results) ? results : []).map((item) => String((item && item.id) || '').trim()).filter(Boolean));
+  return Array.from(selected).filter((threadId) => availableIds.has(threadId));
+}
+
+async function deleteMailThreads(threadIds = []) {
+  const ids = Array.isArray(threadIds) ? threadIds.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  if (!ids.length) return { ok: false, deletedCount: 0, failed: [] };
+  const failed = [];
+  let deletedCount = 0;
+  for (const threadId of ids) {
+    const res = await api.mailDeleteThread(threadId);
+    if (!res || !res.ok) {
+      failed.push({
+        threadId,
+        message: (res && res.message) || 'Unable to move thread to trash.',
+      });
+      continue;
+    }
+    deletedCount += 1;
+  }
+  return {
+    ok: failed.length === 0,
+    deletedCount,
+    failed,
+  };
+}
+
 function getMailPreviewState(srId) {
   return state.mailPreviewByRef.get(resolveMailStateId(srId)) || null;
 }
@@ -5094,7 +5141,7 @@ async function renderMailPanel() {
   const query = searchState.query;
   let results = searchState.results;
   const selectedSources = searchState.selected;
-  const previewState = getMailPreviewState(state.activeSrId);
+  let previewState = getMailPreviewState(state.activeSrId);
   const composer = getMailComposerState(state.activeSrId);
   const mailStatus = state.mailStatus || await api.mailStatus();
   state.mailStatus = mailStatus || null;
@@ -5108,10 +5155,21 @@ async function renderMailPanel() {
     state.mailSearchResultsByRef.set(String(state.activeSrId || '').trim(), results);
   }
 
+  const selectedThreadIds = getSelectedMailThreadIds(state.activeSrId, results);
+  const selectedThreadIdSet = new Set(selectedThreadIds);
+  const selectionMode = selectedThreadIds.length > 0 && isMailSelectedViewEnabled(state.activeSrId);
+  const visibleResults = selectionMode
+    ? results.filter((item) => selectedThreadIdSet.has(String((item && item.id) || '').trim()))
+    : results;
+  if (previewState && previewState.thread_id && selectionMode && !selectedThreadIdSet.has(String(previewState.thread_id || '').trim())) {
+    setMailPreviewState(state.activeSrId, null);
+    previewState = null;
+  }
+
   status.textContent = `${attachedThreads.length} attached thread(s) · ${escapeHtml(String((mailStatus && mailStatus.message) || ''))}`;
   const navItems = buildMailNavItems(activeMailboxes);
-  const threadListMarkup = results.length
-    ? results.map((item) => {
+  const threadListMarkup = visibleResults.length
+    ? visibleResults.map((item) => {
       const threadId = String((item && item.id) || '').trim();
       const isActive = previewState && String((previewState && previewState.thread_id) || '') === threadId;
       const isSelected = selectedSources.has(threadId);
@@ -5131,13 +5189,15 @@ async function renderMailPanel() {
           <div class="mail-row-side">
             ${Number((item && item.unread_count) || 0) > 0 ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
             <button type="button" class="mail-row-select-btn ${isSelected ? 'active' : ''}" data-mail-thread-select="${escapeHtml(threadId)}">
-              ${isSelected ? 'Selected' : 'Select'}
+              ${selectionMode ? 'Remove' : (isSelected ? 'Selected' : 'Select')}
             </button>
           </div>
         </div>
       `;
     }).join('')
-    : '<div class="muted small">No synced threads yet. Add a mailbox in Settings and run sync.</div>';
+    : (selectionMode
+      ? '<div class="muted small">No selected threads left. Use Back to return to the full list.</div>'
+      : '<div class="muted small">No synced threads yet. Add a mailbox in Settings and run sync.</div>');
 
   let contentMarkup = '<div class="muted small">Select a thread above to preview it.</div>';
   if (previewState && previewState.thread && Array.isArray(previewState.thread.messages)) {
@@ -5238,12 +5298,14 @@ async function renderMailPanel() {
       <input id="mail-search-input" type="text" value="${escapeHtml(query)}" placeholder="Search your Mail accounts" />
       <button id="mail-search-btn">Search</button>
       <button id="mail-refresh-btn">Refresh</button>
-      <button id="mail-attach-btn">Add Selected</button>
+      ${selectionMode ? '<button id="mail-back-btn">Back</button>' : ''}
+      ${selectedThreadIds.length > 0 && !selectionMode ? '<button id="mail-attach-btn">Add Selected</button>' : ''}
+      ${selectionMode ? '<button id="mail-confirm-attach-btn">Attach Selected</button>' : ''}
       <button id="mail-compose-open-btn">Compose</button>
       ${previewState && previewState.thread ? '<button id="mail-reply-btn">Reply</button>' : ''}
       ${previewState && previewState.thread && previewState.thread.capabilities && previewState.thread.capabilities.supports_archive ? '<button id="mail-archive-btn">Archive</button>' : ''}
       ${previewState && previewState.thread ? '<button id="mail-toggle-read-btn">Read/Unread</button>' : ''}
-      ${previewState && previewState.thread ? '<button id="mail-delete-btn">Trash</button>' : ''}
+      ${(selectionMode || (previewState && previewState.thread)) ? '<button id="mail-delete-btn">Trash</button>' : ''}
     </div>
     ${composer && composer.open ? `
       <div class="mail-composer-view">
@@ -5251,7 +5313,7 @@ async function renderMailPanel() {
       </div>
     ` : `
       <div class="mail-block mail-list-block">
-        <h4>Threads</h4>
+        <h4>${selectionMode ? 'Selected Threads' : 'Threads'}${selectedThreadIds.length > 0 ? ` <span class="muted small">${selectedThreadIds.length} selected</span>` : ''}</h4>
         <div class="mail-list-scroll">
           ${threadListMarkup}
         </div>
@@ -5269,6 +5331,8 @@ async function renderMailPanel() {
 
   e('mail-search-btn')?.addEventListener('click', async () => {
     const nextQuery = (e('mail-search-input') && e('mail-search-input').value) || '';
+    clearMailSelection(state.activeSrId);
+    setMailPreviewState(state.activeSrId, null);
     await runMailSearch(state.activeSrId, nextQuery);
     await persistMailTabState({ query: String(nextQuery || '').trim() });
     await renderMailPanel();
@@ -5277,6 +5341,8 @@ async function renderMailPanel() {
     if (event.key !== 'Enter') return;
     event.preventDefault();
     const nextQuery = (e('mail-search-input') && e('mail-search-input').value) || '';
+    clearMailSelection(state.activeSrId);
+    setMailPreviewState(state.activeSrId, null);
     await runMailSearch(state.activeSrId, nextQuery);
     await persistMailTabState({ query: String(nextQuery || '').trim() });
     await renderMailPanel();
@@ -5287,6 +5353,7 @@ async function renderMailPanel() {
       mailbox_path: '',
       smart_view: 'inbox',
     });
+    clearMailSelection(state.activeSrId);
     state.mailSearchResultsByRef.delete(String(state.activeSrId || '').trim());
     setMailPreviewState(state.activeSrId, null);
     await persistMailTabState({ account_id: String((event.target && event.target.value) || '').trim(), mailbox_path: '', smart_view: 'inbox' });
@@ -5300,6 +5367,7 @@ async function renderMailPanel() {
         mailbox_path: type === 'mailbox' ? key : '',
         smart_view: type === 'smart' ? key : '',
       });
+      clearMailSelection(state.activeSrId);
       state.mailSearchResultsByRef.delete(String(state.activeSrId || '').trim());
       setMailPreviewState(state.activeSrId, null);
       await persistMailTabState({
@@ -5309,12 +5377,25 @@ async function renderMailPanel() {
       await renderMailPanel();
     });
   });
+  e('mail-back-btn')?.addEventListener('click', async () => {
+    setMailSelectedView(state.activeSrId, false);
+    setMailPreviewState(state.activeSrId, null);
+    await renderMailPanel();
+  });
   e('mail-attach-btn')?.addEventListener('click', async () => {
-    const chosenThreadIds = results
-      .map((item) => String((item && item.id) || '').trim())
-      .filter((threadId) => selectedSources.has(threadId));
+    const chosenThreadIds = getSelectedMailThreadIds(state.activeSrId, results);
     if (!chosenThreadIds.length) {
       showPassiveNotification('Select at least one mail thread to add.');
+      return;
+    }
+    setMailSelectedView(state.activeSrId, true);
+    setMailPreviewState(state.activeSrId, null);
+    await renderMailPanel();
+  });
+  e('mail-confirm-attach-btn')?.addEventListener('click', async () => {
+    const chosenThreadIds = getSelectedMailThreadIds(state.activeSrId, results);
+    if (!chosenThreadIds.length) {
+      showPassiveNotification('Select at least one mail thread to attach.');
       return;
     }
     const res = await api.srAttachMailThreadsFromStore(state.activeSrId, chosenThreadIds);
@@ -5327,11 +5408,12 @@ async function renderMailPanel() {
       state.activeSurface = makeActiveSurface('mail', { mailTabId: String(res.tab.id || '').trim() });
       rememberSurfaceForReference(state.activeSrId, state.activeSurface);
     }
-    state.mailSelectedSourceIdsByRef.set(String(state.activeSrId || '').trim(), new Set());
+    clearMailSelection(state.activeSrId);
     setMailPreviewState(state.activeSrId, null);
     renderReferences();
     renderWorkspaceTabs();
     await renderMailPanel();
+    showPassiveNotification(`${chosenThreadIds.length} mail thread(s) added to this reference.`);
   });
   e('mail-refresh-btn')?.addEventListener('click', async () => {
     if (!activeAccountId) return;
@@ -5342,6 +5424,8 @@ async function renderMailPanel() {
     }
     if (Array.isArray(res.accounts)) state.mailAccounts = res.accounts;
     if (Array.isArray(res.mailboxes)) state.mailboxesByAccount.set(activeAccountId, res.mailboxes);
+    clearMailSelection(state.activeSrId);
+    setMailPreviewState(state.activeSrId, null);
     await runMailSearch(state.activeSrId, query);
     await renderMailPanel();
   });
@@ -5458,17 +5542,41 @@ async function renderMailPanel() {
   });
   e('mail-delete-btn')?.addEventListener('click', async () => {
     const thread = previewState && previewState.thread ? previewState.thread : null;
-    if (!thread) return;
-    const confirmed = window.confirm('Move this thread to trash?');
-    if (!confirmed) return;
-    const res = await api.mailDeleteThread(String(thread.id || '').trim());
-    if (!res || !res.ok) {
-      window.alert((res && res.message) || 'Unable to move thread to trash.');
+    const selectedThreadIds = getSelectedMailThreadIds(state.activeSrId, results);
+    const threadIds = selectedThreadIds.length
+      ? selectedThreadIds
+      : (thread && thread.id ? [String(thread.id || '').trim()] : []);
+    if (!threadIds.length) {
+      showPassiveNotification('Select or open a mail thread first.');
       return;
     }
+    const confirmed = window.confirm(
+      threadIds.length === 1
+        ? 'Move this thread to trash?'
+        : `Move ${threadIds.length} selected threads to trash?`
+    );
+    if (!confirmed) return;
+    const deleteRes = await deleteMailThreads(threadIds);
+    if (!deleteRes.ok) {
+      clearMailSelection(state.activeSrId);
+      setMailPreviewState(state.activeSrId, null);
+      await runMailSearch(state.activeSrId, query);
+      await renderMailPanel();
+      const summary = deleteRes.deletedCount > 0
+        ? `${deleteRes.deletedCount} thread(s) moved to trash, ${deleteRes.failed.length} failed.`
+        : ((deleteRes.failed[0] && deleteRes.failed[0].message) || 'Unable to move thread to trash.');
+      window.alert(summary);
+      return;
+    }
+    clearMailSelection(state.activeSrId);
     setMailPreviewState(state.activeSrId, null);
     await runMailSearch(state.activeSrId, query);
     await renderMailPanel();
+    showPassiveNotification(
+      threadIds.length === 1
+        ? 'Mail thread moved to trash.'
+        : `${threadIds.length} mail thread(s) moved to trash.`
+    );
   });
   body.querySelectorAll('button[data-mail-thread-preview]').forEach((node) => {
     node.addEventListener('click', async () => {
@@ -5485,7 +5593,15 @@ async function renderMailPanel() {
       event.stopPropagation();
       const threadId = String(node.getAttribute('data-mail-thread-select') || '').trim();
       if (!threadId || !state.activeSrId) return;
-      setMailSelectedSource(state.activeSrId, threadId, !selectedSources.has(threadId));
+      const nextChecked = !selectedSources.has(threadId);
+      setMailSelectedSource(state.activeSrId, threadId, nextChecked);
+      const nextSelected = getSelectedMailThreadIds(state.activeSrId, results);
+      if (!nextSelected.length) {
+        setMailSelectedView(state.activeSrId, false);
+      }
+      if (selectionMode && !nextChecked) {
+        setMailPreviewState(state.activeSrId, null);
+      }
       await renderMailPanel();
     });
   });
