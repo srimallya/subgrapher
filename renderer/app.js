@@ -36,6 +36,7 @@ const state = {
     stale: false,
     objectUrl: '',
     iframeEl: null,
+    sourceContent: '',
   },
   suppressArtifactInput: false,
   artifactMarkerSelectionTimer: null,
@@ -3975,7 +3976,7 @@ function getArtifactViewMode(artifactId, artifactType) {
   if (normalizedType !== 'html') return ARTIFACT_VIEW_MODE_CODE;
   const key = String(artifactId || '').trim();
   const raw = key ? String((state.artifactViewModeByArtifact && state.artifactViewModeByArtifact[key]) || '') : '';
-  return raw === ARTIFACT_VIEW_MODE_PREVIEW ? ARTIFACT_VIEW_MODE_PREVIEW : ARTIFACT_VIEW_MODE_CODE;
+  return raw === ARTIFACT_VIEW_MODE_CODE ? ARTIFACT_VIEW_MODE_CODE : ARTIFACT_VIEW_MODE_PREVIEW;
 }
 
 function setArtifactViewMode(artifactId, nextMode) {
@@ -3991,7 +3992,17 @@ function setArtifactViewMode(artifactId, nextMode) {
 function renderHtmlRuntimePlaceholder(message) {
   const host = e('artifact-html-runtime-host');
   if (!host) return;
-  host.innerHTML = `<div class="artifact-html-placeholder">${escapeHtml(String(message || '').trim() || 'Press Start to run HTML artifact.')}</div>`;
+  host.innerHTML = `<div class="artifact-html-placeholder">${escapeHtml(String(message || '').trim() || 'Preview unavailable. Click Refresh to rerender.')}</div>`;
+}
+
+function resetHtmlArtifactCodeViews(ref = getActiveReference()) {
+  const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
+  artifacts.forEach((artifact) => {
+    if (normalizeArtifactType(artifact && artifact.type) !== 'html') return;
+    const artifactId = String((artifact && artifact.id) || '').trim();
+    if (!artifactId) return;
+    setArtifactViewMode(artifactId, ARTIFACT_VIEW_MODE_PREVIEW);
+  });
 }
 
 function getActiveHtmlRuntimeIframe() {
@@ -4044,7 +4055,7 @@ function stopHtmlArtifactRuntime(options = {}) {
   const runtime = (state.htmlArtifactRuntime && typeof state.htmlArtifactRuntime === 'object')
     ? state.htmlArtifactRuntime
     : {
-      artifactId: '', running: false, stale: false, objectUrl: '', iframeEl: null,
+      artifactId: '', running: false, stale: false, objectUrl: '', iframeEl: null, sourceContent: '',
     };
   if (runtime.objectUrl) {
     try {
@@ -4061,6 +4072,7 @@ function stopHtmlArtifactRuntime(options = {}) {
     stale: false,
     objectUrl: '',
     iframeEl: null,
+    sourceContent: '',
   };
 }
 
@@ -4073,15 +4085,13 @@ function updateArtifactRuntimeControls(artifact) {
   const runtime = (state.htmlArtifactRuntime && typeof state.htmlArtifactRuntime === 'object')
     ? state.htmlArtifactRuntime
     : {
-      artifactId: '', running: false, stale: false, objectUrl: '', iframeEl: null,
+      artifactId: '', running: false, stale: false, objectUrl: '', iframeEl: null, sourceContent: '',
     };
   const runtimeForArtifact = isHtml && runtime.running && String(runtime.artifactId || '') === artifactId;
 
   const chip = e('artifact-type-chip');
   const codeBtn = e('artifact-mode-code-btn');
-  const previewBtn = e('artifact-mode-preview-btn');
-  const startBtn = e('artifact-run-start-btn');
-  const stopBtn = e('artifact-run-stop-btn');
+  const refreshBtn = e('artifact-run-refresh-btn');
   const runtimeStatus = e('artifact-runtime-status');
   const textPane = e('artifact-text-pane');
   const previewPane = e('artifact-html-preview-pane');
@@ -4095,28 +4105,17 @@ function updateArtifactRuntimeControls(artifact) {
     codeBtn.classList.toggle('active', isHtml && mode === ARTIFACT_VIEW_MODE_CODE);
     codeBtn.disabled = !isHtml;
   }
-  if (previewBtn) {
-    previewBtn.classList.toggle('hidden', !isHtml);
-    previewBtn.classList.toggle('active', isHtml && mode === ARTIFACT_VIEW_MODE_PREVIEW);
-    previewBtn.disabled = !isHtml;
-  }
-  if (startBtn) {
-    startBtn.classList.toggle('hidden', !isHtml);
-    startBtn.disabled = !isHtml || (runtimeForArtifact && !runtime.stale);
-  }
-  if (stopBtn) {
-    stopBtn.classList.toggle('hidden', !isHtml);
-    stopBtn.disabled = !isHtml || !runtimeForArtifact;
+  if (refreshBtn) {
+    refreshBtn.classList.toggle('hidden', !isHtml);
+    refreshBtn.disabled = !isHtml;
   }
   if (runtimeStatus) {
     if (!isHtml) {
       runtimeStatus.textContent = 'Markdown artifact';
     } else if (!runtimeForArtifact) {
-      runtimeStatus.textContent = 'HTML runtime stopped';
-    } else if (runtime.stale) {
-      runtimeStatus.textContent = 'HTML runtime running (stale, restart required; click preview if keys do not respond)';
+      runtimeStatus.textContent = 'HTML preview loading';
     } else {
-      runtimeStatus.textContent = 'HTML runtime running (click preview if keys do not respond)';
+      runtimeStatus.textContent = 'HTML preview live';
     }
   }
 
@@ -4155,12 +4154,39 @@ function startHtmlArtifactRuntime(artifact, htmlContent) {
     stale: false,
     objectUrl: url,
     iframeEl: iframe,
+    sourceContent: source,
   };
   focusActiveHtmlRuntime('runtime-start');
   return true;
 }
 
-function startActiveHtmlArtifactRuntime() {
+function ensureHtmlArtifactRuntime(artifact, htmlContent, options = {}) {
+  const safeArtifact = (artifact && typeof artifact === 'object') ? artifact : {};
+  const artifactId = String((safeArtifact && safeArtifact.id) || '').trim();
+  if (!artifactId || normalizeArtifactType(safeArtifact.type) !== 'html') return false;
+  const source = String(htmlContent || safeArtifact.content || '');
+  const runtime = (state.htmlArtifactRuntime && typeof state.htmlArtifactRuntime === 'object')
+    ? state.htmlArtifactRuntime
+    : null;
+  const shouldRestart = !!(
+    options.force
+    || !runtime
+    || !runtime.running
+    || String(runtime.artifactId || '') !== artifactId
+    || String(runtime.sourceContent || '') !== source
+  );
+  if (shouldRestart) {
+    if (!startHtmlArtifactRuntime(safeArtifact, source)) {
+      showPassiveNotification('Unable to refresh HTML preview.');
+      return false;
+    }
+  }
+  updateArtifactRuntimeControls(safeArtifact);
+  if (options.focus) focusActiveHtmlRuntime(options.focusReason || 'runtime-sync');
+  return true;
+}
+
+function refreshActiveHtmlArtifactRuntime() {
   const ref = getActiveReference();
   if (!ref || state.activeSurface.kind !== 'artifact') return;
   const artifactId = String(state.activeSurface.artifactId || '').trim();
@@ -4168,30 +4194,12 @@ function startActiveHtmlArtifactRuntime() {
   if (!artifact || normalizeArtifactType(artifact.type) !== 'html') return;
   const input = e('artifact-input');
   const source = String((input && typeof input.value === 'string') ? input.value : (artifact.content || ''));
-  if (!startHtmlArtifactRuntime(artifact, source)) {
-    showPassiveNotification('Unable to start HTML runtime.');
-    return;
-  }
-  updateArtifactRuntimeControls(artifact);
-  focusActiveHtmlRuntime('runtime-start-button');
-}
-
-function stopActiveHtmlArtifactRuntime() {
-  const ref = getActiveReference();
-  const artifactId = String((state.activeSurface && state.activeSurface.artifactId) || '').trim();
-  stopHtmlArtifactRuntime({ preserveArtifactId: true });
-  if (!ref || !artifactId) return;
-  const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
-  if (artifact) {
-    if (getArtifactViewMode(artifactId, artifact.type) === ARTIFACT_VIEW_MODE_PREVIEW) {
-      renderHtmlRuntimePlaceholder('Press Start to run HTML artifact.');
-    }
-    updateArtifactRuntimeControls(artifact);
-  }
+  ensureHtmlArtifactRuntime(artifact, source, { force: true, focus: true, focusReason: 'runtime-refresh-button' });
 }
 
 async function showWebSurface(tab) {
   if (!tab) return;
+  resetHtmlArtifactCodeViews();
   stopHtmlArtifactRuntime();
   hideNonWebSurfaces();
   e('browser-placeholder')?.classList.add('hidden');
@@ -4305,17 +4313,7 @@ async function showArtifactSurface(artifactId) {
     state.artifactActiveArtifactId = String(artifact.id || '').trim();
     applyArtifactModeLayout();
     renderActiveArtifactImage();
-    const runningForSameArtifact = !!(
-      state.htmlArtifactRuntime
-      && state.htmlArtifactRuntime.running
-      && String(state.htmlArtifactRuntime.artifactId || '') === String(artifact.id || '')
-    );
-    if (!runningForSameArtifact) {
-      stopHtmlArtifactRuntime({ preserveArtifactId: true });
-      if (getArtifactViewMode(artifact.id, artifactType) === ARTIFACT_VIEW_MODE_PREVIEW) {
-        renderHtmlRuntimePlaceholder('Press Start to run HTML artifact.');
-      }
-    }
+    ensureHtmlArtifactRuntime(artifact, String(artifact.content || ''), { focus: getArtifactViewMode(artifact.id, artifactType) !== ARTIFACT_VIEW_MODE_CODE, focusReason: 'show-artifact-surface' });
   }
   updateArtifactRuntimeControls(artifact);
   renderArtifactHighlightLayer();
@@ -4533,6 +4531,7 @@ function renderFilesPanel() {
 async function showFilesSurface(tabId) {
   const ref = getActiveReference();
   if (!ref) return;
+  resetHtmlArtifactCodeViews(ref);
   stopHtmlArtifactRuntime();
   const tab = (Array.isArray(ref.tabs) ? ref.tabs : []).find((item) => String((item && item.id) || '') === String(tabId || ''));
   if (!tab || String((tab && tab.tab_kind) || '').trim().toLowerCase() !== 'files') return;
@@ -4695,6 +4694,7 @@ async function renderSkillsPanel() {
 async function showSkillsSurface(tabId) {
   const ref = getActiveReference();
   if (!ref) return;
+  resetHtmlArtifactCodeViews(ref);
   stopHtmlArtifactRuntime();
   const tab = (Array.isArray(ref.tabs) ? ref.tabs : []).find((item) => String((item && item.id) || '') === String(tabId || ''));
   if (!tab || String((tab && tab.tab_kind) || '').trim().toLowerCase() !== 'skills') return;
@@ -5768,6 +5768,7 @@ async function openMailPage() {
 async function showMailSurface(tabId) {
   const ref = getActiveReference();
   if (!ref) return;
+  resetHtmlArtifactCodeViews(ref);
   stopHtmlArtifactRuntime();
   const tab = (Array.isArray(ref.tabs) ? ref.tabs : []).find((item) => String((item && item.id) || '') === String(tabId || ''));
   if (!tab || String((tab && tab.tab_kind) || '').trim().toLowerCase() !== 'mail') return;
@@ -5791,11 +5792,13 @@ async function syncActiveSurface() {
     || state.appView === 'settings'
     || state.appView === 'history'
   ) {
+    resetHtmlArtifactCodeViews();
     stopHtmlArtifactRuntime();
     await api.hide();
     return;
   }
   if (hasBlockingOverlay()) {
+    resetHtmlArtifactCodeViews();
     stopHtmlArtifactRuntime();
     await api.hide();
     return;
@@ -5803,6 +5806,7 @@ async function syncActiveSurface() {
 
   const ref = getActiveReference();
   if (!ref) {
+    resetHtmlArtifactCodeViews();
     stopHtmlArtifactRuntime();
     await api.hide();
     await syncUrlBarForActiveSurface();
@@ -9820,12 +9824,6 @@ function bindControls() {
       const artifactType = normalizeArtifactType(artifact.type);
       if (artifactType === 'markdown') {
         void refreshArtifactVisualState(nextContent, artifact.id);
-      } else if (
-        state.htmlArtifactRuntime
-        && state.htmlArtifactRuntime.running
-        && String(state.htmlArtifactRuntime.artifactId || '') === String(artifact.id || '')
-      ) {
-        state.htmlArtifactRuntime.stale = true;
       }
       const res = await api.srUpsertArtifact(state.activeSrId, {
         ...artifact,
@@ -9840,7 +9838,13 @@ function bindControls() {
         const updatedRef = getActiveReference();
         const updatedArtifact = (Array.isArray(updatedRef && updatedRef.artifacts) ? updatedRef.artifacts : [])
           .find((item) => String((item && item.id) || '') === String(artifact.id || ''));
-        if (updatedArtifact) updateArtifactRuntimeControls(updatedArtifact);
+        if (updatedArtifact) {
+          if (artifactType === 'html') {
+            ensureHtmlArtifactRuntime(updatedArtifact, nextContent, { focus: getArtifactViewMode(updatedArtifact.id, updatedArtifact.type) !== ARTIFACT_VIEW_MODE_CODE, focusReason: 'artifact-save' });
+          } else {
+            updateArtifactRuntimeControls(updatedArtifact);
+          }
+        }
         void noteReferenceRankingInteraction('artifact_edit', { srId: state.activeSrId });
       } else if (status) {
         status.textContent = 'Save failed';
@@ -9895,42 +9899,22 @@ function bindControls() {
     if (!ref || state.activeSurface.kind !== 'artifact') return;
     const artifactId = String(state.activeSurface.artifactId || '').trim();
     if (!artifactId) return;
-    setArtifactViewMode(artifactId, ARTIFACT_VIEW_MODE_CODE);
+    const currentMode = getArtifactViewMode(artifactId, 'html');
+    setArtifactViewMode(
+      artifactId,
+      currentMode === ARTIFACT_VIEW_MODE_CODE ? ARTIFACT_VIEW_MODE_PREVIEW : ARTIFACT_VIEW_MODE_CODE,
+    );
     const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
-    if (artifact) updateArtifactRuntimeControls(artifact);
-  });
-
-  e('artifact-mode-preview-btn')?.addEventListener('click', () => {
-    const ref = getActiveReference();
-    if (!ref || state.activeSurface.kind !== 'artifact') return;
-    const artifactId = String(state.activeSurface.artifactId || '').trim();
-    if (!artifactId) return;
-    setArtifactViewMode(artifactId, ARTIFACT_VIEW_MODE_PREVIEW);
-    const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
-    if (!artifact) return;
-    if (
-      normalizeArtifactType(artifact.type) === 'html'
-      && (!state.htmlArtifactRuntime || !state.htmlArtifactRuntime.running || String(state.htmlArtifactRuntime.artifactId || '') !== artifactId)
-    ) {
-      renderHtmlRuntimePlaceholder('Press Start to run HTML artifact.');
-    }
-    updateArtifactRuntimeControls(artifact);
-    if (
-      normalizeArtifactType(artifact.type) === 'html'
-      && state.htmlArtifactRuntime
-      && state.htmlArtifactRuntime.running
-      && String(state.htmlArtifactRuntime.artifactId || '') === artifactId
-    ) {
-      focusActiveHtmlRuntime('preview-mode');
+    if (artifact) {
+      updateArtifactRuntimeControls(artifact);
+      if (getArtifactViewMode(artifactId, artifact.type) !== ARTIFACT_VIEW_MODE_CODE) {
+        focusActiveHtmlRuntime('code-toggle-preview');
+      }
     }
   });
 
-  e('artifact-run-start-btn')?.addEventListener('click', () => {
-    startActiveHtmlArtifactRuntime();
-  });
-
-  e('artifact-run-stop-btn')?.addEventListener('click', () => {
-    stopActiveHtmlArtifactRuntime();
+  e('artifact-run-refresh-btn')?.addEventListener('click', () => {
+    refreshActiveHtmlArtifactRuntime();
   });
 
   e('chat-send-btn')?.addEventListener('click', () => {

@@ -28,17 +28,17 @@ Where:
 - Existing markdown image preview behavior is preserved.
 
 ### HTML artifacts
-- Explicit lifecycle:
-  - `Start` creates sandboxed iframe runtime from artifact HTML.
-  - `Stop` tears down runtime and clears iframe state.
+- Preview-first lifecycle:
+  - Opening an HTML artifact mounts the sandboxed iframe runtime automatically.
+  - `Code` is a secondary toggle for editing source.
+  - `Refresh` rerenders the current HTML on demand.
 - Full workspace sizing:
   - Preview uses the full artifact workspace area (no centered fixed black viewport).
 - Interaction:
   - Click-to-focus and native keyboard/mouse handling inside iframe.
 - Edit behavior while running:
-  - Saved edits mark runtime stale.
-  - User must `Stop` then `Start` to apply changes deterministically.
-- `Code` / `Preview` toggle is available for HTML artifacts.
+  - Saved edits rerender the active HTML preview automatically.
+  - Leaving the artifact surface resets `Code` back to preview silently.
 
 ## Security Model (HTML Runtime)
 Iframe sandbox policy:

@@ -23,7 +23,7 @@ This implementation delivers:
 - Native Electron `BrowserView` runtime for web tabs (including marker mode and URL history capture).
 - Unified artifact runtime:
   - artifact types: `markdown` and `html`
-  - `html` artifacts support `Code` / `Preview` plus explicit `Start` / `Stop` lifecycle
+  - `html` artifacts run in preview by default, with `Code` as a secondary toggle and `Refresh` for manual rerender
   - iframe sandbox: `allow-scripts allow-forms allow-pointer-lock allow-downloads` (no same-origin grant)
 - Legacy visualization migration:
   - old `viz` tab payloads are auto-mapped into markdown artifacts on load
