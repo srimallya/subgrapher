@@ -71,6 +71,17 @@ function parseAddressList(value = '') {
     .filter(Boolean);
 }
 
+function normalizeMessageId(value = '') {
+  return normalizeWhitespace(String(value || '').replace(/[<>]/g, '')).toLowerCase();
+}
+
+function normalizeParticipantList(values = []) {
+  return (Array.isArray(values) ? values : [])
+    .map((item) => normalizeWhitespace(item).toLowerCase())
+    .filter(Boolean)
+    .sort();
+}
+
 function splitHeadersAndBody(raw = '') {
   const text = String(raw || '');
   const marker = text.match(/\r?\n\r?\n/);
@@ -196,7 +207,30 @@ function parseRawEmailText(raw = '', sourcePath = '') {
   };
 }
 
+function computeMailConversationKey(parsed = {}, accountEmail = '') {
+  const references = Array.isArray(parsed.references)
+    ? parsed.references.map((item) => normalizeMessageId(item)).filter(Boolean)
+    : [];
+  const inReplyTo = normalizeMessageId(parsed.in_reply_to);
+  const messageId = normalizeMessageId(parsed.message_id_header);
+  const canonicalRef = references[0] || inReplyTo || messageId;
+  if (canonicalRef) return canonicalRef;
+
+  const subject = normalizeWhitespace(parsed.subject || '')
+    .replace(/^(?:re|fw|fwd)\s*:\s*/i, '')
+    .toLowerCase();
+  const participants = Array.from(new Set([
+    ...normalizeParticipantList([parsed.from]),
+    ...normalizeParticipantList(parsed.to),
+    ...normalizeParticipantList(parsed.cc),
+    normalizeWhitespace(accountEmail).toLowerCase(),
+  ].filter(Boolean)));
+
+  return normalizeWhitespace([subject, participants.join('|')].filter(Boolean).join(':'));
+}
+
 module.exports = {
+  computeMailConversationKey,
   decodeMimeWords,
   normalizeTextBody,
   normalizeWhitespace,

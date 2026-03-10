@@ -389,11 +389,55 @@ function buildSearchableText(parsed = {}) {
   ].join(' ')).toLowerCase();
 }
 
-function buildParsedMessage(account = {}, mailbox = {}, uid = 0, rawSource = '', flags = []) {
-  const parsed = parseRawEmailText(rawSource, `imap://${account.id}/${uid}`);
-  const threadKey = String(
+function normalizeConversationId(value = '') {
+  return normalizeWhitespace(String(value || '').replace(/[<>]/g, '')).toLowerCase();
+}
+
+function resolveThreadKeyFromDatabase(db, account = {}, parsed = {}, rawSource = '') {
+  const fallback = String(
     computeMailConversationKey(parsed, String(account.email || '').trim().toLowerCase())
   ).trim() || crypto.createHash('sha1').update(rawSource).digest('hex');
+  if (!db) return fallback;
+  const accountId = String(account.id || '').trim();
+  if (!accountId) return fallback;
+
+  const references = Array.isArray(parsed.references)
+    ? parsed.references.map((item) => normalizeConversationId(item)).filter(Boolean)
+    : [];
+  const inReplyTo = normalizeConversationId(parsed.in_reply_to);
+  const messageId = normalizeConversationId(parsed.message_id_header);
+  const candidateIds = Array.from(new Set([
+    ...references,
+    inReplyTo,
+    messageId,
+  ].filter(Boolean)));
+
+  for (const candidateId of candidateIds) {
+    const rows = selectRows(
+      db,
+      'SELECT thread_key FROM messages WHERE account_id = ? AND LOWER(message_id_header) = ? LIMIT 1',
+      [accountId, candidateId]
+    );
+    const threadKey = String((rows[0] && rows[0].thread_key) || '').trim();
+    if (threadKey) return threadKey;
+  }
+
+  if (messageId) {
+    const childRows = selectRows(
+      db,
+      'SELECT thread_key FROM messages WHERE account_id = ? AND LOWER(in_reply_to) = ? LIMIT 1',
+      [accountId, messageId]
+    );
+    const childThreadKey = String((childRows[0] && childRows[0].thread_key) || '').trim();
+    if (childThreadKey) return childThreadKey;
+  }
+
+  return fallback;
+}
+
+function buildParsedMessage(account = {}, mailbox = {}, uid = 0, rawSource = '', flags = [], db = null) {
+  const parsed = parseRawEmailText(rawSource, `imap://${account.id}/${uid}`);
+  const threadKey = resolveThreadKeyFromDatabase(db, account, parsed, rawSource);
   const mailboxName = String((mailbox && (mailbox.path || mailbox.name)) || account.mailbox || 'INBOX').trim() || 'INBOX';
   const mailboxRole = inferMailboxRole(mailboxName, mailbox.special_use);
   const sentTs = parseDateTs(parsed.sent_at);
@@ -1039,8 +1083,8 @@ function createMailStore(options = {}) {
         });
         for (const uid of targetUids) {
           const fetched = await client.fetchRawMessage(uid);
-          const message = buildParsedMessage(account, mailbox, uid, fetched.raw_source, fetched.flags || []);
           await withDatabase(async (db) => {
+            const message = buildParsedMessage(account, mailbox, uid, fetched.raw_source, fetched.flags || [], db);
             upsertMessage(db, message);
             upsertMailbox(db, {
               ...mailbox,
