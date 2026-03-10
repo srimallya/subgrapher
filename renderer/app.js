@@ -8842,6 +8842,19 @@ async function refreshMailAccounts() {
   renderMailSettingsStatus();
 }
 
+function resetMailAccountForm() {
+  ['settings-mail-account-label', 'settings-mail-account-email', 'settings-mail-account-host', 'settings-mail-account-username', 'settings-mail-account-password', 'settings-mail-account-smtp-host', 'settings-mail-account-smtp-username', 'settings-mail-account-smtp-password'].forEach((id) => {
+    if (e(id)) e(id).value = '';
+  });
+  if (e('settings-mail-account-provider')) e('settings-mail-account-provider').value = 'generic';
+  if (e('settings-mail-account-port')) e('settings-mail-account-port').value = '993';
+  if (e('settings-mail-account-smtp-port')) e('settings-mail-account-smtp-port').value = '465';
+  if (e('settings-mail-account-mailbox')) e('settings-mail-account-mailbox').value = 'INBOX';
+  if (e('settings-mail-account-tls')) e('settings-mail-account-tls').checked = true;
+  if (e('settings-mail-account-smtp-tls')) e('settings-mail-account-smtp-tls').checked = true;
+  if (e('settings-mail-account-smtp-starttls')) e('settings-mail-account-smtp-starttls').checked = false;
+}
+
 async function refreshAppDataProtectionStatus() {
   if (!api.appDataProtectionStatus) return;
   const res = await api.appDataProtectionStatus();
@@ -10155,16 +10168,7 @@ function bindControls() {
       renderSettingsStatusLine();
       return;
     }
-    ['settings-mail-account-label', 'settings-mail-account-email', 'settings-mail-account-host', 'settings-mail-account-username', 'settings-mail-account-password', 'settings-mail-account-smtp-host', 'settings-mail-account-smtp-username', 'settings-mail-account-smtp-password'].forEach((id) => {
-      if (e(id)) e(id).value = '';
-    });
-    if (e('settings-mail-account-provider')) e('settings-mail-account-provider').value = 'generic';
-    if (e('settings-mail-account-port')) e('settings-mail-account-port').value = '993';
-    if (e('settings-mail-account-smtp-port')) e('settings-mail-account-smtp-port').value = '465';
-    if (e('settings-mail-account-mailbox')) e('settings-mail-account-mailbox').value = 'INBOX';
-    if (e('settings-mail-account-tls')) e('settings-mail-account-tls').checked = true;
-    if (e('settings-mail-account-smtp-tls')) e('settings-mail-account-smtp-tls').checked = true;
-    if (e('settings-mail-account-smtp-starttls')) e('settings-mail-account-smtp-starttls').checked = false;
+    resetMailAccountForm();
     state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
     state.settingsSaveState = 'Mailbox saved.';
     await refreshMailAccounts();
@@ -10239,6 +10243,7 @@ function bindControls() {
       }
       state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : [];
       state.mailboxesByAccount.delete(accountId);
+      resetMailAccountForm();
       state.settingsSaveState = 'Mailbox deleted.';
       renderSettingsStatusLine();
       await refreshMailStatus();
