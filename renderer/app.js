@@ -4837,6 +4837,10 @@ function resolveMailStateId(srId) {
   return raw;
 }
 
+function normalizeMailUiWhitespace(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
 function decodeMailText(value = '') {
   let text = String(value || '');
   const replacements = [
@@ -4875,7 +4879,7 @@ function normalizeMailSnippet(value = '') {
     kept.push(line);
     if (kept.join(' ').length >= 220) break;
   }
-  return normalizeWhitespace(kept.join(' '))
+  return normalizeMailUiWhitespace(kept.join(' '))
     .replace(/\s*https?:\/\/\S+/gi, '')
     .trim()
     .slice(0, 220);
