@@ -48,6 +48,7 @@ This implementation delivers:
 - Mail runtime:
   - read-only IMAP mailbox sync into a local Subgrapher mail database
   - mailbox accounts are configured in `Settings -> Mail`
+  - incompatible legacy `mail_store.sqlite` files are discarded on startup; the app rebuilds the local mail store with the current schema and requires a fresh sync
   - synced mail is searched from the reference `mail` tab, not through Apple Mail automation
   - sync currently indexes the configured mailbox plus common sent-mail folders so inbound and outbound messages can appear in the same thread
   - mail tab layout is stable and fixed: search/actions on top, thread list in the middle, content preview below

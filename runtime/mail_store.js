@@ -6,7 +6,7 @@ const { ImapClient } = require('./mail_imap');
 const { computeMailConversationKey, normalizeWhitespace, parseRawEmailText } = require('./mail_parser');
 const { buildRawMessage, sendMailViaSmtp } = require('./mail_smtp');
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MAILBOX_ROLES = ['inbox', 'sent', 'drafts', 'archive', 'trash', 'junk'];
 let sqlModulePromise = null;
 const dbTaskByPath = new Map();
@@ -83,6 +83,106 @@ function ensureColumn(db, table, columnName, columnSql) {
   db.run(`ALTER TABLE ${table} ADD COLUMN ${columnSql}`);
 }
 
+function tableExists(db, table) {
+  const rows = selectRows(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1", [String(table || '').trim()]);
+  return rows.length > 0;
+}
+
+function readSchemaVersion(db) {
+  if (!tableExists(db, 'meta')) return 0;
+  const rows = selectRows(db, "SELECT value FROM meta WHERE key = 'schema_version' LIMIT 1");
+  const raw = Number((rows[0] && rows[0].value) || 0);
+  return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : 0;
+}
+
+function getPrimaryKeyColumns(db, table) {
+  return selectRows(db, `PRAGMA table_info(${table})`)
+    .filter((row) => Number(row.pk || 0) > 0)
+    .sort((a, b) => Number(a.pk || 0) - Number(b.pk || 0))
+    .map((row) => String(row.name || '').trim());
+}
+
+function shouldResetDatabase(db) {
+  const schemaVersion = readSchemaVersion(db);
+  if (schemaVersion > 0 && schemaVersion < SCHEMA_VERSION) return true;
+  if (tableExists(db, 'messages')) {
+    const primaryKey = getPrimaryKeyColumns(db, 'messages');
+    const expected = ['account_id', 'uid', 'mailbox'];
+    if (primaryKey.length && (primaryKey.length !== expected.length || expected.some((name, index) => primaryKey[index] !== name))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function createMessagesTable(db, tableName = 'messages') {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS ${tableName} (
+      account_id TEXT NOT NULL,
+      uid INTEGER NOT NULL,
+      thread_id TEXT NOT NULL,
+      thread_key TEXT NOT NULL,
+      mailbox TEXT NOT NULL,
+      mailbox_id TEXT NOT NULL DEFAULT '',
+      mailbox_role TEXT NOT NULL DEFAULT '',
+      message_id_header TEXT NOT NULL,
+      in_reply_to TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      recipients TEXT NOT NULL,
+      sent_at TEXT NOT NULL,
+      sent_ts INTEGER NOT NULL DEFAULT 0,
+      snippet TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      body_html TEXT NOT NULL DEFAULT '',
+      raw_source TEXT NOT NULL,
+      attachment_count INTEGER NOT NULL DEFAULT 0,
+      searchable_text TEXT NOT NULL,
+      flags_json TEXT NOT NULL DEFAULT '[]',
+      is_unread INTEGER NOT NULL DEFAULT 1,
+      is_flagged INTEGER NOT NULL DEFAULT 0,
+      is_draft INTEGER NOT NULL DEFAULT 0,
+      is_trashed INTEGER NOT NULL DEFAULT 0,
+      is_archived INTEGER NOT NULL DEFAULT 0,
+      draft_key TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, uid, mailbox),
+      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    );
+  `);
+}
+
+function recreateMessagesTableIfNeeded(db) {
+  const primaryKey = getPrimaryKeyColumns(db, 'messages');
+  const expected = ['account_id', 'uid', 'mailbox'];
+  if (primaryKey.length === expected.length && expected.every((name, index) => primaryKey[index] === name)) return;
+
+  db.run('DROP INDEX IF EXISTS idx_messages_thread');
+  db.run('DROP INDEX IF EXISTS idx_messages_account');
+  db.run('DROP INDEX IF EXISTS idx_messages_sent');
+  db.run('DROP INDEX IF EXISTS idx_messages_mailbox');
+  db.run('DROP INDEX IF EXISTS idx_messages_account_uid_mailbox_unique');
+
+  db.run('ALTER TABLE messages RENAME TO messages_legacy');
+  createMessagesTable(db, 'messages');
+  db.run(`
+    INSERT INTO messages (
+      account_id, uid, thread_id, thread_key, mailbox, mailbox_id, mailbox_role, message_id_header,
+      in_reply_to, subject, sender, recipients, sent_at, sent_ts, snippet, body_text, body_html, raw_source,
+      attachment_count, searchable_text, flags_json, is_unread, is_flagged, is_draft, is_trashed, is_archived,
+      draft_key, created_at, updated_at
+    )
+    SELECT
+      account_id, uid, thread_id, thread_key, mailbox, mailbox_id, mailbox_role, message_id_header,
+      in_reply_to, subject, sender, recipients, sent_at, sent_ts, snippet, body_text, body_html, raw_source,
+      attachment_count, searchable_text, flags_json, is_unread, is_flagged, is_draft, is_trashed, is_archived,
+      draft_key, created_at, updated_at
+    FROM messages_legacy
+  `);
+  db.run('DROP TABLE messages_legacy');
+}
+
 function ensureSchema(db) {
   db.run('PRAGMA foreign_keys = ON');
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
@@ -137,41 +237,7 @@ function ensureSchema(db) {
       FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
     );
   `);
-  db.run(`
-    CREATE TABLE IF NOT EXISTS messages (
-      account_id TEXT NOT NULL,
-      uid INTEGER NOT NULL,
-      thread_id TEXT NOT NULL,
-      thread_key TEXT NOT NULL,
-      mailbox TEXT NOT NULL,
-      mailbox_id TEXT NOT NULL DEFAULT '',
-      mailbox_role TEXT NOT NULL DEFAULT '',
-      message_id_header TEXT NOT NULL,
-      in_reply_to TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      sender TEXT NOT NULL,
-      recipients TEXT NOT NULL,
-      sent_at TEXT NOT NULL,
-      sent_ts INTEGER NOT NULL DEFAULT 0,
-      snippet TEXT NOT NULL,
-      body_text TEXT NOT NULL,
-      body_html TEXT NOT NULL DEFAULT '',
-      raw_source TEXT NOT NULL,
-      attachment_count INTEGER NOT NULL DEFAULT 0,
-      searchable_text TEXT NOT NULL,
-      flags_json TEXT NOT NULL DEFAULT '[]',
-      is_unread INTEGER NOT NULL DEFAULT 1,
-      is_flagged INTEGER NOT NULL DEFAULT 0,
-      is_draft INTEGER NOT NULL DEFAULT 0,
-      is_trashed INTEGER NOT NULL DEFAULT 0,
-      is_archived INTEGER NOT NULL DEFAULT 0,
-      draft_key TEXT NOT NULL DEFAULT '',
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (account_id, uid, mailbox),
-      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-    );
-  `);
+  createMessagesTable(db);
   db.run('CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id)');
   db.run('CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account_id)');
   db.run('CREATE INDEX IF NOT EXISTS idx_messages_sent ON messages(sent_ts DESC)');
@@ -201,6 +267,8 @@ function ensureSchema(db) {
   ensureColumn(db, 'messages', 'is_trashed', 'is_trashed INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'messages', 'is_archived', 'is_archived INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'messages', 'draft_key', "draft_key TEXT NOT NULL DEFAULT ''");
+  recreateMessagesTableIfNeeded(db);
+  db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_account_path_unique ON mailboxes(account_id, path)');
   upsertMeta(db, 'schema_version', String(SCHEMA_VERSION));
 }
 
@@ -769,8 +837,13 @@ function createMailStore(options = {}) {
 
   async function withDatabase(taskFn) {
     return withDbLock(dbPath, async () => {
-      const db = await openDatabase(dbPath);
+      let db = await openDatabase(dbPath);
       try {
+        if (shouldResetDatabase(db)) {
+          db.close();
+          if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+          db = await openDatabase(dbPath);
+        }
         ensureSchema(db);
         const result = await taskFn(db);
         saveDatabase(db, dbPath);

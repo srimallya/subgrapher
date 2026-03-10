@@ -137,6 +137,7 @@ Migration is idempotent and safe to run repeatedly.
   - thread list
   - content preview
 - Search runs against Subgrapher's local mail database, not a live mail client process.
+- Legacy local mail databases are not migrated forward; when the mail schema changes, Subgrapher resets `mail_store.sqlite` and rebuilds it from a fresh sync.
 - Adding mail to a reference snapshots selected synced threads into that reference.
 - Mail preview should preserve human-readable structure:
   - paragraph spacing
