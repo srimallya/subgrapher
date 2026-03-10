@@ -45,7 +45,9 @@ const { createOrchestratorSessionStore } = require('./runtime/orchestrator_sessi
 const { createOrchestratorUsersStore } = require('./runtime/orchestrator_users_store');
 const { createOrchestratorPreferencesStore } = require('./runtime/orchestrator_preferences_store');
 const { LUMINO_HTML_ARTIFACT_STYLE_GUIDE } = require('./runtime/lumino_html_artifact_style_guide');
-const { buildLocalMailIndex, parseEmailFile, searchLocalMail } = require('./runtime/mail_local');
+const { parseEmailFile } = require('./runtime/mail_local');
+const { parseRawEmailText } = require('./runtime/mail_parser');
+const { createMailStore } = require('./runtime/mail_store');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -264,6 +266,7 @@ const abstractionRefreshInFlight = new Map(); // refId -> { promise, controller 
 const pythonSandboxManagers = new Map();
 let pythonRuntimeResolver = null;
 let secureSecretStore = null;
+let mailStore = null;
 let telegramService = null;
 let orchestratorJobsStore = null;
 let orchestratorScheduler = null;
@@ -5074,6 +5077,18 @@ function getSecureSecretStore() {
     });
   }
   return secureSecretStore;
+}
+
+function getMailStore() {
+  if (!mailStore) {
+    mailStore = createMailStore({
+      userDataPath: app.getPath('userData'),
+      getSecretByRef: getSecretValueByRef,
+      setSecret: setSecretValueByRef,
+      clearSecret: clearSecretValueByRef,
+    });
+  }
+  return mailStore;
 }
 
 function getSecretValueByRef(ref) {
@@ -11018,6 +11033,9 @@ function buildMailThreadFromParsedMessages(parsedMessages = [], options = {}) {
       id: makeId('mailmsg'),
       source_path: item.source_path,
       source_key: item.source_key,
+      mail_message_id: String(item.mail_message_id || '').trim(),
+      account_name: String(item.account_name || '').trim(),
+      mailbox_name: String(item.mailbox_name || '').trim(),
       message_id_header: item.message_id_header,
       in_reply_to: item.in_reply_to,
       references: item.references,
@@ -11327,6 +11345,9 @@ function sanitizeMailMessage(item = {}) {
     id: String(item.id || makeId('mailmsg')).trim() || makeId('mailmsg'),
     source_path: String(item.source_path || '').slice(0, 2000),
     source_key: String(item.source_key || '').slice(0, 120),
+    mail_message_id: String(item.mail_message_id || '').slice(0, 80),
+    account_name: String(item.account_name || '').slice(0, 240),
+    mailbox_name: String(item.mailbox_name || '').slice(0, 240),
     message_id_header: String(item.message_id_header || '').slice(0, 240),
     in_reply_to: String(item.in_reply_to || '').slice(0, 240),
     references: Array.isArray(item.references) ? item.references.map((entry) => String(entry || '').slice(0, 240)).filter(Boolean).slice(0, 80) : [],
@@ -17712,26 +17733,83 @@ ipcMain.handle('browser:srRemoveContextFile', async (_event, payload) => {
   return { ok: true, removed_tab_ids, reference: refs[idx], references: refs };
 });
 
+function mailAttachmentIdentityKey(message = {}, attachment = {}) {
+  const sourceIdentity = String(
+    message.source_path
+    || message.message_id_header
+    || `${message.account_name || ''}:${message.mailbox_name || ''}:${message.mail_message_id || ''}`
+  ).trim();
+  return `${sourceIdentity}:${String((attachment && attachment.file_name) || '').trim()}`;
+}
+
+function parseMailSourceItem(source = {}) {
+  const sourcePath = String((source && source.source_path) || '').trim();
+  const rawSource = String((source && source.raw_source) || '');
+
+  let parsed = null;
+  if (rawSource) {
+    parsed = parseRawEmailText(rawSource, sourcePath);
+    parsed.mail_message_id = String((source && source.mail_message_id) || '').trim();
+    parsed.account_name = String((source && source.account_name) || '').trim();
+    parsed.mailbox_name = String((source && source.mailbox_name) || '').trim();
+    return parsed;
+  }
+
+  if (!sourcePath || !fs.existsSync(sourcePath)) return null;
+  parsed = parseEmailFile(sourcePath);
+  parsed.mail_message_id = '';
+  parsed.account_name = '';
+  parsed.mailbox_name = '';
+  return parsed;
+}
+
+function previewMailSourceItem(source = {}) {
+  const parsed = parseMailSourceItem(source);
+  if (!parsed) return null;
+  return sanitizeMailMessage({
+    source_path: parsed.source_path,
+    source_key: parsed.source_key,
+    mail_message_id: parsed.mail_message_id,
+    account_name: parsed.account_name,
+    mailbox_name: parsed.mailbox_name,
+    message_id_header: parsed.message_id_header,
+    in_reply_to: parsed.in_reply_to,
+    references: parsed.references,
+    from: parsed.from,
+    to: parsed.to,
+    cc: parsed.cc,
+    bcc: parsed.bcc,
+    subject: parsed.subject,
+    sent_at: parsed.sent_at,
+    body_text: parsed.body_text,
+    body_html: parsed.body_html,
+    snippet: parsed.snippet,
+    attachments: Array.isArray(parsed.attachments) ? parsed.attachments.map((attachment) => ({
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      size_bytes: Buffer.isBuffer(attachment.data) ? attachment.data.length : Number(attachment.size_bytes || 0),
+      source_path: parsed.source_path,
+      imported_context_file_id: '',
+    })) : [],
+  });
+}
+
 ipcMain.handle('browser:mailStatus', async () => {
   const settings = readSettings();
-  const rootPath = path.join(os.homedir(), 'Library', 'Mail');
-  const available = fs.existsSync(rootPath);
-  const index = settings.mail_sync_enabled ? buildLocalMailIndex({ rootPath }) : null;
+  const accounts = settings.mail_sync_enabled ? await getMailStore().listAccounts() : [];
   return {
     ok: true,
     enabled: !!settings.mail_sync_enabled,
-    available,
-    root_path: rootPath,
-    indexed_at: Number((index && index.indexed_at) || 0),
-    files_scanned: Number((index && index.files_scanned) || 0),
-    error_code: String((index && index.error_code) || ''),
-    message: !available
-      ? 'Local Apple Mail store not found.'
-      : (
-        !settings.mail_sync_enabled
-          ? 'Mail sync is disabled.'
-          : String((index && index.error) || '')
-      ),
+    available: true,
+    root_path: '',
+    indexed_at: Math.max(0, ...accounts.map((item) => Number(item.last_sync_at || 0))),
+    files_scanned: 0,
+    error_code: '',
+    accounts,
+    preferred_accounts: accounts,
+    message: !settings.mail_sync_enabled
+      ? 'Mail sync is disabled.'
+      : `${accounts.length} mailbox account(s) configured.`,
   };
 });
 
@@ -17740,23 +17818,52 @@ ipcMain.handle('browser:mailSearchLocalThreads', async (_event, payload) => {
   if (!settings.mail_sync_enabled) {
     return { ok: true, items: [], total: 0, disabled: true, message: 'Mail sync is disabled in settings.' };
   }
-  const rootPath = path.join(os.homedir(), 'Library', 'Mail');
-  const res = searchLocalMail({
-    rootPath,
+  const res = await getMailStore().searchThreads({
     query: String((payload && payload.query) || '').trim(),
     limit: Number((payload && payload.limit) || 40),
-    force: !!(payload && payload.force_refresh),
   });
   return {
     ...res,
-    available: fs.existsSync(rootPath),
+    available: true,
     disabled: false,
-    message: String((res && res.error) || ''),
+    message: '',
   };
 });
 
-ipcMain.handle('browser:openMailPrivacySettings', () => {
-  return openMailPrivacySettings();
+ipcMain.handle('browser:mailPreviewSource', async (_event, payload) => {
+  try {
+    const threadId = String((payload && payload.threadId) || '').trim();
+    if (!threadId) return { ok: false, message: 'threadId is required.' };
+    return getMailStore().getThread(threadId);
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to load thread.') };
+  }
+});
+
+ipcMain.handle('browser:openMailPrivacySettings', () => ({ ok: false, message: 'Mail privacy settings are not used for IMAP sync.' }));
+
+ipcMain.handle('browser:mailListAccounts', async () => {
+  return { ok: true, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailSaveAccount', async (_event, payload) => {
+  const res = await getMailStore().saveAccount(payload || {});
+  if (!res || !res.ok) return res;
+  return { ok: true, account: res.account, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailDeleteAccount', async (_event, payload) => {
+  const res = await getMailStore().deleteAccount(String((payload && payload.accountId) || '').trim());
+  if (!res || !res.ok) return res;
+  return { ok: true, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailSyncAccount', async (_event, payload) => {
+  const res = await getMailStore().syncAccount(String((payload && payload.accountId) || '').trim());
+  return {
+    ...res,
+    accounts: await getMailStore().listAccounts(),
+  };
 });
 
 async function attachMailSourcesToReference(srId, sourceItems = [], options = {}) {
@@ -17772,16 +17879,15 @@ async function attachMailSourcesToReference(srId, sourceItems = [], options = {}
 
   const parsedByThread = new Map();
   sourceItems.forEach((source) => {
-    const sourcePath = String((source && source.source_path) || '').trim();
-    if (!sourcePath || !fs.existsSync(sourcePath)) return;
     try {
-      const parsed = parseEmailFile(sourcePath);
+      const parsed = parseMailSourceItem(source);
+      if (!parsed) return;
       const key = String(
         parsed.references[parsed.references.length - 1]
         || parsed.in_reply_to
         || parsed.message_id_header
         || `${parsed.subject}:${parsed.from}`
-      ).trim() || crypto.createHash('sha1').update(sourcePath).digest('hex');
+      ).trim() || crypto.createHash('sha1').update(JSON.stringify(source || {})).digest('hex');
       const bucket = parsedByThread.get(key) || [];
       bucket.push(parsed);
       parsedByThread.set(key, bucket);
@@ -17848,7 +17954,7 @@ function syncAppleMailThreadsInReference(ref, srId) {
       changed = true;
       return;
     }
-    if (String(current.source_kind || '') !== 'apple_mail_local') {
+    if (!['apple_mail_local', 'apple_mail_live'].includes(String(current.source_kind || ''))) {
       nextThreads.push(current);
       return;
     }
@@ -17856,7 +17962,7 @@ function syncAppleMailThreadsInReference(ref, srId) {
     const importedAttachmentMap = new Map();
     (Array.isArray(current.messages) ? current.messages : []).forEach((message) => {
       (Array.isArray(message.attachments) ? message.attachments : []).forEach((attachment) => {
-        const key = `${String((message && message.source_path) || '')}:${String((attachment && attachment.file_name) || '')}`;
+        const key = mailAttachmentIdentityKey(message, attachment);
         importedAttachmentMap.set(key, String((attachment && attachment.imported_context_file_id) || '').trim());
       });
     });
@@ -17864,11 +17970,24 @@ function syncAppleMailThreadsInReference(ref, srId) {
     const reparsed = [];
     (Array.isArray(current.messages) ? current.messages : []).forEach((message) => {
       const sourcePath = String((message && message.source_path) || '').trim();
-      if (!sourcePath || !fs.existsSync(sourcePath)) {
-        changed = true;
-        return;
-      }
       try {
+        if (String(current.source_kind || '') === 'apple_mail_live') {
+          const parsed = parseMailSourceItem({
+            mail_message_id: message.mail_message_id,
+            account_name: message.account_name,
+            mailbox_name: message.mailbox_name,
+          });
+          if (!parsed) {
+            changed = true;
+            return;
+          }
+          reparsed.push(parsed);
+          return;
+        }
+        if (!sourcePath || !fs.existsSync(sourcePath)) {
+          changed = true;
+          return;
+        }
         reparsed.push(parseEmailFile(sourcePath));
       } catch (_) {
         changed = true;
@@ -17882,7 +18001,7 @@ function syncAppleMailThreadsInReference(ref, srId) {
 
     const rebuilt = buildMailThreadFromParsedMessages(reparsed, {
       id: current.id,
-      source_kind: 'apple_mail_local',
+      source_kind: current.source_kind,
       source_thread_key: current.source_thread_key,
     });
     if (!rebuilt) {
@@ -17891,7 +18010,7 @@ function syncAppleMailThreadsInReference(ref, srId) {
     }
     rebuilt.messages.forEach((message) => {
       message.attachments = (Array.isArray(message.attachments) ? message.attachments : []).map((attachment) => {
-        const key = `${String((message && message.source_path) || '')}:${String((attachment && attachment.file_name) || '')}`;
+        const key = mailAttachmentIdentityKey(message, attachment);
         return {
           ...attachment,
           imported_context_file_id: importedAttachmentMap.get(key) || '',
@@ -17966,6 +18085,26 @@ ipcMain.handle('browser:srAttachMailThreads', async (_event, payload) => {
   const sourceItems = Array.isArray(payload && payload.sources) ? payload.sources : [];
   return attachMailSourcesToReference(srId, sourceItems, {
     source_kind: String((payload && payload.source_kind) || 'apple_mail_local'),
+  });
+});
+
+ipcMain.handle('browser:srAttachMailThreadsFromStore', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const threadIds = Array.isArray(payload && payload.thread_ids) ? payload.thread_ids : [];
+  const exportedThreads = await getMailStore().exportThreads(threadIds);
+  const sources = [];
+  exportedThreads.forEach((thread) => {
+    (Array.isArray(thread && thread.messages) ? thread.messages : []).forEach((message) => {
+      sources.push({
+        raw_source: String((message && message.raw_source) || ''),
+        account_name: String((message && message.account_name) || '').trim(),
+        mailbox_name: String((message && message.mailbox_name) || '').trim(),
+        mail_message_id: String((message && message.mail_message_id) || '').trim(),
+      });
+    });
+  });
+  return attachMailSourcesToReference(srId, sources, {
+    source_kind: 'imap_sync',
   });
 });
 

@@ -1941,6 +1941,30 @@ summary:focus-visible {
   gap: 10px;
 }
 
+.settings-mail-accounts-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.settings-mail-account-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #1f1f1f;
+}
+
+.settings-mail-account-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .settings-provider-keys-list {
   margin-top: 12px;
 }
@@ -2503,13 +2527,40 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 .mail-body {
-  overflow: auto;
+  overflow: hidden;
   padding: 12px;
+}
+
+.mail-layout {
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 0;
 }
 
+.mail-list-block,
+.mail-content-block {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.mail-list-block {
+  flex: 0 0 260px;
+}
+
+.mail-content-block {
+  flex: 1 1 320px;
+}
+
+.mail-list-scroll,
+.mail-content-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+
+.mail-list-row,
 .mail-row,
 .mail-thread-item {
   width: 100%;
@@ -2518,9 +2569,37 @@ body.chat-collapsed #chat-panel-resizer {
   text-align: left;
 }
 
+.mail-list-row {
+  align-items: stretch;
+}
+
+.mail-list-row.active,
 .mail-thread-item.active {
   border-color: #5b5b5b;
   background: #2a2a2a;
+}
+
+.mail-list-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.mail-row-select-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 10px 12px 10px 0;
+}
+
+.mail-row-select-btn.active {
+  background: #2b2721;
+  border-color: #5f584d;
+  color: var(--text);
 }
 
 .mail-row-main,

@@ -118,9 +118,11 @@ const state = {
   settingsValidationErrors: {},
   settingsDiagnostics: null,
   mailStatus: null,
+  mailAccounts: [],
   mailSearchQueryByRef: new Map(),
   mailSearchResultsByRef: new Map(),
   mailSelectedSourceIdsByRef: new Map(),
+  mailPreviewByRef: new Map(),
   appDataProtectionStatus: null,
   settingsSaveState: '',
   telegramRuntimeStatus: null,
@@ -4713,12 +4715,72 @@ function setMailSelectedSource(srId, sourceId, checked) {
   state.mailSelectedSourceIdsByRef.set(refId, current);
 }
 
+function getMailPreviewState(srId) {
+  return state.mailPreviewByRef.get(String(srId || '').trim()) || null;
+}
+
+function setMailPreviewState(srId, next) {
+  const refId = String(srId || '').trim();
+  if (!refId) return;
+  if (!next) {
+    state.mailPreviewByRef.delete(refId);
+    return;
+  }
+  state.mailPreviewByRef.set(refId, next);
+}
+
+async function loadMailSourcePreview(srId, source) {
+  const res = await api.mailPreviewSource(source || {});
+  if (!res || !res.ok) return null;
+  const preview = res.preview || null;
+  if (!preview) return null;
+  setMailPreviewState(srId, {
+    kind: 'search',
+    source_id: String((source && source.source_id) || '').trim(),
+    preview,
+  });
+  return preview;
+}
+
+function renderMailPreviewMarkup(preview) {
+  if (!preview) return '<div class="muted small">Select a thread above to preview it.</div>';
+  const attachmentsMarkup = Array.isArray(preview.attachments) && preview.attachments.length
+    ? `
+      <div class="mail-attachment-list">
+        ${preview.attachments.map((attachment) => `
+          <div class="mail-attachment">
+            <span>${escapeHtml(String((attachment && attachment.file_name) || 'attachment'))}</span>
+            <span class="muted small">${escapeHtml(String((attachment && attachment.mime_type) || 'file'))}</span>
+          </div>
+        `).join('')}
+      </div>
+    `
+    : '';
+  const meta = [
+    String((preview && preview.from) || '').trim(),
+    String((preview && preview.account_name) || '').trim(),
+    String((preview && preview.mailbox_name) || '').trim(),
+    String((preview && preview.sent_at) || '').trim(),
+  ].filter(Boolean).join(' · ');
+  return `
+    <div class="mail-message">
+      <div class="mail-message-head">
+        <div class="mail-row-title">${escapeHtml(String((preview && preview.subject) || 'Message'))}</div>
+        <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
+      </div>
+      <div class="mail-message-body">${escapeHtml(String((preview && preview.body_text) || (preview && preview.snippet) || ''))}</div>
+      ${attachmentsMarkup}
+    </div>
+  `;
+}
+
 async function runMailSearch(srId, query) {
   const refId = String(srId || '').trim();
   state.mailSearchQueryByRef.set(refId, String(query || '').trim());
   const res = await api.mailSearchLocalThreads(String(query || '').trim(), 40, true);
   state.mailSearchResultsByRef.set(refId, (res && Array.isArray(res.items)) ? res.items : []);
   state.mailStatus = await api.mailStatus();
+  setMailPreviewState(srId, null);
   return res;
 }
 
@@ -4734,73 +4796,51 @@ async function renderMailPanel() {
   }
 
   const listRes = await api.srListMailThreads(state.activeSrId);
-  const threads = (listRes && listRes.ok && Array.isArray(listRes.threads)) ? listRes.threads : [];
-  const mailTab = getActiveMailTab(ref);
-  const selectedThreadId = String(
-    (mailTab && mailTab.mail_view_state && mailTab.mail_view_state.selected_thread_id)
-    || ((threads[0] && threads[0].id) || '')
-  ).trim();
-  const selectedThread = threads.find((item) => String((item && item.id) || '') === selectedThreadId) || threads[0] || null;
+  const attachedThreads = (listRes && listRes.ok && Array.isArray(listRes.threads)) ? listRes.threads : [];
   const searchState = getMailSearchState(state.activeSrId);
   const query = searchState.query;
-  const results = searchState.results;
+  let results = searchState.results;
   const selectedSources = searchState.selected;
+  const previewState = getMailPreviewState(state.activeSrId);
   const mailStatus = state.mailStatus || await api.mailStatus();
   state.mailStatus = mailStatus || null;
-  const permissionBlocked = String((mailStatus && mailStatus.error_code) || '') === 'permission_denied';
+  if (!Array.isArray(results) || results.length === 0) {
+    const res = await api.mailSearchLocalThreads(query, 80, true);
+    results = (res && Array.isArray(res.items)) ? res.items : [];
+    state.mailSearchResultsByRef.set(String(state.activeSrId || '').trim(), results);
+  }
 
-  status.textContent = `${threads.length} attached thread(s)`;
-  const resultsMarkup = results.length
+  status.textContent = `${attachedThreads.length} attached thread(s)`;
+  const threadListMarkup = results.length
     ? results.map((item) => {
-      const sourceId = String((item && item.source_id) || '').trim();
+      const threadId = String((item && item.id) || '').trim();
+      const isActive = previewState && String((previewState && previewState.thread_id) || '') === threadId;
+      const isSelected = selectedSources.has(threadId);
+      const meta = [
+        String((item && item.account_label) || '').trim(),
+        String((item && item.mailbox) || '').trim(),
+        String((item && item.from) || '').trim(),
+        formatAgo((item && item.last_message_at) || 0),
+      ].filter(Boolean).join(' · ');
       return `
-        <label class="mail-row">
-          <input type="checkbox" data-mail-source-id="${escapeHtml(sourceId)}" ${selectedSources.has(sourceId) ? 'checked' : ''} />
-          <div class="mail-row-main">
+        <div class="mail-list-row ${isActive ? 'active' : ''}">
+          <button type="button" class="mail-list-row-main" data-mail-thread-preview="${escapeHtml(threadId)}">
             <div class="mail-row-title">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
-            <div class="mail-row-sub muted small">${escapeHtml(String((item && item.from) || ''))} · ${escapeHtml(String((item && item.sent_at) || ''))}</div>
+            <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
             <div class="mail-row-sub">${escapeHtml(String((item && item.snippet) || ''))}</div>
-          </div>
-        </label>
+          </button>
+          <button type="button" class="mail-row-select-btn ${isSelected ? 'active' : ''}" data-mail-thread-select="${escapeHtml(threadId)}">
+            ${isSelected ? 'Selected' : 'Select'}
+          </button>
+        </div>
       `;
     }).join('')
-    : `<div class="muted small">${
-      permissionBlocked
-        ? 'Mail access is blocked by macOS. Open Privacy settings and grant Full Disk Access to the app running Subgrapher.'
-        : (query ? 'No local mail results.' : 'Search local Apple Mail to attach threads.')
-    }</div>`;
+    : '<div class="muted small">No synced threads yet. Add a mailbox in Settings and run sync.</div>';
 
-  const attachedMarkup = threads.length
-    ? threads.map((thread) => `
-      <button class="mail-thread-item ${String((thread && thread.id) || '') === String((selectedThread && selectedThread.id) || '') ? 'active' : ''}" data-mail-thread-id="${escapeHtml(String((thread && thread.id) || ''))}">
-        <div class="mail-row-title">${escapeHtml(String((thread && thread.subject) || 'Untitled thread'))}</div>
-        <div class="mail-row-sub muted small">${escapeHtml(String((thread && thread.message_count) || 0))} message(s) · ${escapeHtml(String((thread && thread.attachment_count) || 0))} attachment(s)</div>
-        <div class="mail-row-sub">${escapeHtml(String((thread && thread.snippet) || ''))}</div>
-      </button>
-    `).join('')
-    : '<div class="muted small">No attached mail threads yet.</div>';
-
-  const threadMarkup = selectedThread
-    ? (Array.isArray(selectedThread.messages) ? selectedThread.messages : []).map((message) => `
-      <div class="mail-message">
-        <div class="mail-message-head">
-          <div class="mail-row-title">${escapeHtml(String((message && message.subject) || 'Message'))}</div>
-          <div class="mail-row-sub muted small">${escapeHtml(String((message && message.from) || ''))} · ${escapeHtml(String((message && message.sent_at) || ''))}</div>
-        </div>
-        <div class="mail-message-body">${escapeHtml(String((message && message.body_text) || (message && message.snippet) || ''))}</div>
-        ${Array.isArray(message && message.attachments) && message.attachments.length ? `
-          <div class="mail-attachment-list">
-            ${message.attachments.map((attachment) => `
-              <div class="mail-attachment">
-                <span>${escapeHtml(String((attachment && attachment.file_name) || 'attachment'))}</span>
-                <span class="muted small">${escapeHtml(String((attachment && attachment.imported_context_file_id) || 'stored'))}</span>
-              </div>
-            `).join('')}
-          </div>
-        ` : ''}
-      </div>
-    `).join('')
-    : '<div class="muted small">Select an attached thread to view it.</div>';
+  let contentMarkup = '<div class="muted small">Select a thread above to preview it.</div>';
+  if (previewState && previewState.thread && Array.isArray(previewState.thread.messages)) {
+    contentMarkup = previewState.thread.messages.map((message) => renderMailPreviewMarkup(message)).join('');
+  }
 
   const persistMailTabState = async (patch = {}) => {
     const liveRef = getActiveReference();
@@ -4816,25 +4856,25 @@ async function renderMailPanel() {
   };
 
   body.innerHTML = `
+    <div class="mail-layout">
     <div class="mail-toolbar">
-      <input id="mail-search-input" type="text" value="${escapeHtml(query)}" placeholder="Search local Apple Mail" />
+      <input id="mail-search-input" type="text" value="${escapeHtml(query)}" placeholder="Search your Mail accounts" />
       <button id="mail-search-btn">Search</button>
       <button id="mail-attach-btn">Add Selected</button>
-      <button id="mail-import-btn">Import Files</button>
-      ${permissionBlocked ? '<button id="mail-open-privacy-btn">Grant Access</button>' : ''}
       <span class="muted small">${escapeHtml(String((mailStatus && mailStatus.message) || ''))}</span>
     </div>
-    <div class="mail-block">
-      <h4>Search Results</h4>
-      ${resultsMarkup}
+    <div class="mail-block mail-list-block">
+      <h4>Threads</h4>
+      <div class="mail-list-scroll">
+        ${threadListMarkup}
+      </div>
     </div>
-    <div class="mail-block">
-      <h4>Attached Threads</h4>
-      ${attachedMarkup}
+    <div class="mail-block mail-content-block mail-thread-view">
+      <h4>Content</h4>
+      <div class="mail-content-scroll">
+        ${contentMarkup}
+      </div>
     </div>
-    <div class="mail-block mail-thread-view">
-      <h4>Thread</h4>
-      ${threadMarkup}
     </div>
   `;
 
@@ -4852,31 +4892,15 @@ async function renderMailPanel() {
     await persistMailTabState({ query: String(nextQuery || '').trim() });
     await renderMailPanel();
   });
-  e('mail-import-btn')?.addEventListener('click', async () => {
-    const res = await api.srImportMailFiles(state.activeSrId, []);
-    if (!res || !res.ok) {
-      if (!(res && res.canceled)) window.alert((res && res.message) || 'Unable to import mail files.');
-      return;
-    }
-    state.references = res.references || await api.srList();
-    if (res.tab && res.tab.id) {
-      state.activeSurface = makeActiveSurface('mail', { mailTabId: String(res.tab.id || '').trim() });
-      rememberSurfaceForReference(state.activeSrId, state.activeSurface);
-    }
-    renderReferences();
-    renderWorkspaceTabs();
-    await renderMailPanel();
-  });
-  e('mail-open-privacy-btn')?.addEventListener('click', async () => {
-    await api.openMailPrivacySettings();
-  });
   e('mail-attach-btn')?.addEventListener('click', async () => {
-    const chosen = results.filter((item) => selectedSources.has(String((item && item.source_id) || '').trim()));
-    if (!chosen.length) {
+    const chosenThreadIds = results
+      .map((item) => String((item && item.id) || '').trim())
+      .filter((threadId) => selectedSources.has(threadId));
+    if (!chosenThreadIds.length) {
       showPassiveNotification('Select at least one mail thread to add.');
       return;
     }
-    const res = await api.srAttachMailThreads(state.activeSrId, chosen, 'apple_mail_local');
+    const res = await api.srAttachMailThreadsFromStore(state.activeSrId, chosenThreadIds);
     if (!res || !res.ok) {
       window.alert((res && res.message) || 'Unable to attach mail threads.');
       return;
@@ -4887,20 +4911,27 @@ async function renderMailPanel() {
       rememberSurfaceForReference(state.activeSrId, state.activeSurface);
     }
     state.mailSelectedSourceIdsByRef.set(String(state.activeSrId || '').trim(), new Set());
+    setMailPreviewState(state.activeSrId, null);
     renderReferences();
     renderWorkspaceTabs();
     await renderMailPanel();
   });
-  body.querySelectorAll('input[data-mail-source-id]').forEach((node) => {
-    node.addEventListener('change', () => {
-      setMailSelectedSource(state.activeSrId, node.getAttribute('data-mail-source-id'), !!node.checked);
+  body.querySelectorAll('button[data-mail-thread-preview]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const threadId = String(node.getAttribute('data-mail-thread-preview') || '').trim();
+      if (!threadId || !state.activeSrId) return;
+      const res = await api.mailPreviewSource(threadId);
+      if (!res || !res.ok || !res.thread) return;
+      setMailPreviewState(state.activeSrId, { thread_id: threadId, thread: res.thread });
+      await renderMailPanel();
     });
   });
-  body.querySelectorAll('button[data-mail-thread-id]').forEach((node) => {
-    node.addEventListener('click', async () => {
-      const threadId = String(node.getAttribute('data-mail-thread-id') || '').trim();
+  body.querySelectorAll('button[data-mail-thread-select]').forEach((node) => {
+    node.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const threadId = String(node.getAttribute('data-mail-thread-select') || '').trim();
       if (!threadId || !state.activeSrId) return;
-      await persistMailTabState({ selected_thread_id: threadId, query });
+      setMailSelectedSource(state.activeSrId, threadId, !selectedSources.has(threadId));
       await renderMailPanel();
     });
   });
@@ -7820,6 +7851,7 @@ function renderSettingsForm() {
   if (ragFetchBtn) ragFetchBtn.disabled = !ragUsesLmstudio;
   renderSyncEligibility();
   renderMailSettingsStatus();
+  renderMailAccountsList();
   renderAppDataProtectionStatus();
   renderSettingsAbstractionStatus();
   renderSettingsRagStatus();
@@ -7923,13 +7955,34 @@ function renderMailSettingsStatus() {
     node.textContent = (status && status.message) || 'Unavailable';
     return;
   }
-  if (String(status.error_code || '') === 'permission_denied') {
-    node.textContent = 'Mail access blocked by macOS privacy settings. Grant Full Disk Access.';
+  node.textContent = `${Array.isArray(state.mailAccounts) ? state.mailAccounts.length : 0} mailbox account(s) configured.`;
+}
+
+function renderMailAccountsList() {
+  const node = e('settings-mail-accounts-list');
+  if (!node) return;
+  const accounts = Array.isArray(state.mailAccounts) ? state.mailAccounts : [];
+  if (!accounts.length) {
+    node.innerHTML = '<div class="muted small">No mailbox accounts configured.</div>';
     return;
   }
-  node.textContent = status.available
-    ? `Local Mail store found${status.files_scanned ? ` · ${status.files_scanned} file(s) indexed` : ''}`
-    : (status.message || 'Local Mail store not found.');
+  node.innerHTML = accounts.map((account) => `
+    <div class="settings-mail-account-row">
+      <div class="settings-mail-account-meta">
+        <div class="settings-user-primary">${escapeHtml(String((account && account.label) || 'Mailbox'))}</div>
+        <div class="settings-user-secondary">
+          ${escapeHtml(String((account && account.email) || ''))} · ${escapeHtml(String((account && account.host) || ''))}:${escapeHtml(String((account && account.port) || ''))} · ${escapeHtml(String((account && account.mailbox) || 'INBOX'))}
+        </div>
+        <div class="settings-user-secondary">
+          ${escapeHtml(String((account && account.last_error) || '')) || `Last sync: ${formatAgo((account && account.last_sync_at) || 0) || 'never'}`}
+        </div>
+      </div>
+      <div class="settings-inline-actions">
+        <button data-mail-sync-account="${escapeHtml(String((account && account.id) || ''))}">Sync</button>
+        <button data-mail-delete-account="${escapeHtml(String((account && account.id) || ''))}">Delete</button>
+      </div>
+    </div>
+  `).join('');
 }
 
 async function refreshTelegramSettingsStatus() {
@@ -7937,6 +7990,14 @@ async function refreshTelegramSettingsStatus() {
   const res = await api.telegramStatus();
   state.telegramRuntimeStatus = res || null;
   renderTelegramSettingsStatus();
+}
+
+async function refreshMailAccounts() {
+  if (!api.mailListAccounts) return;
+  const res = await api.mailListAccounts();
+  state.mailAccounts = (res && res.ok && Array.isArray(res.accounts)) ? res.accounts : [];
+  renderMailAccountsList();
+  renderMailSettingsStatus();
 }
 
 async function refreshAppDataProtectionStatus() {
@@ -7976,6 +8037,7 @@ async function refreshMailStatus() {
   const res = await api.mailStatus();
   state.mailStatus = res || null;
   renderMailSettingsStatus();
+  await refreshMailAccounts();
   return res;
 }
 
@@ -9218,26 +9280,84 @@ function bindControls() {
     runBrowserImport('safari', 'settings-status-line');
   });
 
-  e('settings-mail-import-btn')?.addEventListener('click', async () => {
-    if (!state.activeSrId) {
-      state.settingsSaveState = 'Select a reference before importing mail.';
+  e('settings-mail-account-save-btn')?.addEventListener('click', async () => {
+    const payload = {
+      label: (e('settings-mail-account-label') && e('settings-mail-account-label').value) || '',
+      email: (e('settings-mail-account-email') && e('settings-mail-account-email').value) || '',
+      host: (e('settings-mail-account-host') && e('settings-mail-account-host').value) || '',
+      port: Number((e('settings-mail-account-port') && e('settings-mail-account-port').value) || 993),
+      username: (e('settings-mail-account-username') && e('settings-mail-account-username').value) || '',
+      mailbox: (e('settings-mail-account-mailbox') && e('settings-mail-account-mailbox').value) || 'INBOX',
+      password: (e('settings-mail-account-password') && e('settings-mail-account-password').value) || '',
+      use_tls: !!(e('settings-mail-account-tls') && e('settings-mail-account-tls').checked),
+    };
+    const res = await api.mailSaveAccount(payload);
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) || 'Unable to save mailbox account.';
       renderSettingsStatusLine();
       return;
     }
-    const res = await api.srImportMailFiles(state.activeSrId, []);
-    if (!res || !res.ok) {
-      if (!(res && res.canceled)) {
-        state.settingsSaveState = (res && res.message) || 'Unable to import mail files.';
-        renderSettingsStatusLine();
-      }
+    ['settings-mail-account-label', 'settings-mail-account-email', 'settings-mail-account-host', 'settings-mail-account-username', 'settings-mail-account-password'].forEach((id) => {
+      if (e(id)) e(id).value = '';
+    });
+    if (e('settings-mail-account-port')) e('settings-mail-account-port').value = '993';
+    if (e('settings-mail-account-mailbox')) e('settings-mail-account-mailbox').value = 'INBOX';
+    if (e('settings-mail-account-tls')) e('settings-mail-account-tls').checked = true;
+    state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
+    state.settingsSaveState = 'Mailbox saved.';
+    renderMailAccountsList();
+    await refreshMailStatus();
+  });
+
+  e('settings-mail-sync-all-btn')?.addEventListener('click', async () => {
+    const accounts = Array.isArray(state.mailAccounts) ? state.mailAccounts : [];
+    if (!accounts.length) {
+      state.settingsSaveState = 'Add a mailbox first.';
+      renderSettingsStatusLine();
       return;
     }
-    state.references = res.references || await api.srList();
-    state.settingsSaveState = `${Array.isArray(res.imported_threads) ? res.imported_threads.length : 0} mail thread(s) imported.`;
+    for (const account of accounts) {
+      const res = await api.mailSyncAccount(String((account && account.id) || ''));
+      if (!res || !res.ok) {
+        state.settingsSaveState = (res && res.message) || `Unable to sync ${String((account && account.label) || 'mailbox')}.`;
+        renderSettingsStatusLine();
+        await refreshMailStatus();
+        return;
+      }
+    }
+    state.settingsSaveState = 'Mailbox sync completed.';
     renderSettingsStatusLine();
-    renderReferences();
-    renderWorkspaceTabs();
     await refreshMailStatus();
+    if (state.appView === 'workspace') await renderMailPanel();
+  });
+
+  e('settings-mail-accounts-list')?.addEventListener('click', async (event) => {
+    const syncBtn = event.target.closest('[data-mail-sync-account]');
+    if (syncBtn) {
+      const accountId = String(syncBtn.getAttribute('data-mail-sync-account') || '').trim();
+      const res = await api.mailSyncAccount(accountId);
+      state.settingsSaveState = (res && res.ok)
+        ? 'Mailbox sync completed.'
+        : ((res && res.message) || 'Unable to sync mailbox.');
+      renderSettingsStatusLine();
+      await refreshMailStatus();
+      if (state.appView === 'workspace') await renderMailPanel();
+      return;
+    }
+    const deleteBtn = event.target.closest('[data-mail-delete-account]');
+    if (deleteBtn) {
+      const accountId = String(deleteBtn.getAttribute('data-mail-delete-account') || '').trim();
+      const res = await api.mailDeleteAccount(accountId);
+      if (!res || !res.ok) {
+        state.settingsSaveState = (res && res.message) || 'Unable to delete mailbox.';
+        renderSettingsStatusLine();
+        return;
+      }
+      state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : [];
+      state.settingsSaveState = 'Mailbox deleted.';
+      renderSettingsStatusLine();
+      await refreshMailStatus();
+    }
   });
 
   e('settings-cancel-btn')?.addEventListener('click', () => {
