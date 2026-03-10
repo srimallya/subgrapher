@@ -45,6 +45,9 @@ const { createOrchestratorSessionStore } = require('./runtime/orchestrator_sessi
 const { createOrchestratorUsersStore } = require('./runtime/orchestrator_users_store');
 const { createOrchestratorPreferencesStore } = require('./runtime/orchestrator_preferences_store');
 const { LUMINO_HTML_ARTIFACT_STYLE_GUIDE } = require('./runtime/lumino_html_artifact_style_guide');
+const { parseEmailFile } = require('./runtime/mail_local');
+const { computeMailConversationKey, parseRawEmailText } = require('./runtime/mail_parser');
+const { createMailStore } = require('./runtime/mail_store');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -264,6 +267,7 @@ let pathBExecutor = null;
 let orchestratorSessionStore = null;
 let orchestratorUsersStore = null;
 let orchestratorPreferencesStore = null;
+let mailStore = null;
 const pathBMetrics = {
   pathb_reuse_count: 0,
   pathb_create_count: 0,
@@ -5025,6 +5029,18 @@ function clearSecretValueByRef(ref) {
   const cleanRef = String(ref || '').trim();
   if (!cleanRef) return { ok: true, missing: true };
   return getSecureSecretStore().clearSecret(cleanRef);
+}
+
+function getMailStore() {
+  if (!mailStore) {
+    mailStore = createMailStore({
+      userDataPath: app.getPath('userData'),
+      getSecretByRef: getSecretValueByRef,
+      setSecret: setSecretValueByRef,
+      clearSecret: clearSecretValueByRef,
+    });
+  }
+  return mailStore;
 }
 
 function resolveLmstudioToken(settings = readSettings()) {
@@ -10021,6 +10037,14 @@ function normalizeSyncedReferenceTabs(rawTabs = []) {
         title: String((tab && tab.title) || 'Skills'),
       });
     }
+    if (kind === 'mail') {
+      return createMailTab({
+        id: String((tab && tab.id) || makeId('tab')),
+        title: String((tab && tab.title) || 'Mail'),
+        mail_view_state: (tab && typeof tab.mail_view_state === 'object') ? tab.mail_view_state : {},
+        updated_at: Number((tab && tab.updated_at) || nowTs()),
+      });
+    }
     const next = createWebTab({
       url: String((tab && tab.url) || ''),
       title: String((tab && tab.title) || ''),
@@ -10704,6 +10728,35 @@ function createSkillsTab(seed = {}) {
     last_active: nowTs(),
     updated_at: Number(seed.updated_at || nowTs()),
   };
+}
+
+function createMailTab(seed = {}) {
+  const mailViewState = (seed.mail_view_state && typeof seed.mail_view_state === 'object')
+    ? seed.mail_view_state
+    : {};
+  return {
+    id: String(seed.id || makeId('tab')),
+    tab_kind: 'mail',
+    url: 'about:blank',
+    title: String(seed.title || 'Mail').slice(0, 120),
+    mail_view_state: {
+      query: String(mailViewState.query || '').trim(),
+      selected_thread_id: String(mailViewState.selected_thread_id || '').trim(),
+    },
+    snapshot_at: nowTs(),
+    last_active: nowTs(),
+    updated_at: Number(seed.updated_at || nowTs()),
+  };
+}
+
+function ensureSingleMailTab(ref, seed = {}) {
+  if (!ref || typeof ref !== 'object') return null;
+  ref.tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
+  const existing = ref.tabs.find((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail') || null;
+  if (existing) return { created: false, deduped: false, tab: existing };
+  const tab = createMailTab(seed);
+  ref.tabs.push(tab);
+  return { created: true, deduped: false, tab };
 }
 
 function normalizeFilesViewState(input = {}) {
@@ -16563,6 +16616,17 @@ ipcMain.handle('browser:srAddTab', (_event, payload) => {
       return { ok: true, tab: filesRes.tab, reference: refs[idx], references: refs, deduped: filesRes.deduped };
     }
     return { ok: false, message: 'Unable to create files tab.' };
+  }
+
+  if (tabKind === 'mail') {
+    const mailRes = ensureSingleMailTab(refs[idx], tab);
+    if (mailRes && mailRes.tab) {
+      refs[idx].active_tab_id = mailRes.tab.id;
+      refs[idx].updated_at = nowTs();
+      setReferences(refs);
+      return { ok: true, tab: mailRes.tab, reference: refs[idx], references: refs, deduped: !mailRes.created };
+    }
+    return { ok: false, message: 'Unable to create mail tab.' };
   }
 
   const webCount = refs[idx].tabs.filter((item) => String((item && item.tab_kind) || 'web').trim().toLowerCase() === 'web').length;
