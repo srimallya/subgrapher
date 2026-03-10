@@ -119,11 +119,13 @@ const state = {
   settingsDiagnostics: null,
   mailStatus: null,
   mailAccounts: [],
+  mailboxesByAccount: new Map(),
   mailSearchQueryByRef: new Map(),
   mailSearchResultsByRef: new Map(),
   mailSelectedSourceIdsByRef: new Map(),
   mailPreviewByRef: new Map(),
   mailComposerByRef: new Map(),
+  mailNavByRef: new Map(),
   appDataProtectionStatus: null,
   settingsSaveState: '',
   telegramRuntimeStatus: null,
@@ -4706,6 +4708,28 @@ function getMailSearchState(srId) {
   };
 }
 
+function getMailNavState(srId) {
+  const refId = String(srId || '').trim();
+  const current = state.mailNavByRef.get(refId);
+  if (current && typeof current === 'object') return current;
+  const firstAccount = Array.isArray(state.mailAccounts) && state.mailAccounts.length ? state.mailAccounts[0] : null;
+  return {
+    account_id: String((firstAccount && firstAccount.id) || '').trim(),
+    mailbox_path: '',
+    smart_view: 'inbox',
+  };
+}
+
+function setMailNavState(srId, patch = {}) {
+  const refId = String(srId || '').trim();
+  const next = {
+    ...getMailNavState(refId),
+    ...(patch && typeof patch === 'object' ? patch : {}),
+  };
+  state.mailNavByRef.set(refId, next);
+  return next;
+}
+
 function setMailSelectedSource(srId, sourceId, checked) {
   const refId = String(srId || '').trim();
   const current = state.mailSelectedSourceIdsByRef.get(refId) instanceof Set
@@ -4736,6 +4760,8 @@ function getMailComposerState(srId) {
     body_text: '',
     in_reply_to: '',
     references: [],
+    attachments: [],
+    draft_key: '',
   };
 }
 
@@ -4868,8 +4894,17 @@ function renderMailPreviewMarkup(preview) {
 
 async function runMailSearch(srId, query) {
   const refId = String(srId || '').trim();
+  const nav = getMailNavState(refId);
   state.mailSearchQueryByRef.set(refId, String(query || '').trim());
-  const res = await api.mailSearchLocalThreads(String(query || '').trim(), 40, true);
+  const res = await api.mailSearchLocalThreads(
+    String(query || '').trim(),
+    80,
+    true,
+    '',
+    nav.account_id || '',
+    nav.mailbox_path || '',
+    nav.smart_view || '',
+  );
   state.mailSearchResultsByRef.set(refId, (res && Array.isArray(res.items)) ? res.items : []);
   state.mailStatus = await api.mailStatus();
   setMailPreviewState(srId, null);
@@ -4898,6 +4933,8 @@ function buildReplyDraftFromPreview(previewState = null) {
     body_text: quoted ? `\n\n${quoted}` : '',
     in_reply_to: String((last && last.message_id_header) || '').trim(),
     references,
+    attachments: [],
+    draft_key: '',
   };
 }
 
@@ -4911,10 +4948,26 @@ async function renderMailPanel() {
     body.innerHTML = '<div class="muted">Select a reference to manage mail.</div>';
     return;
   }
+  const activeMailTab = getActiveMailTab(ref);
+  const tabViewState = activeMailTab && activeMailTab.mail_view_state && typeof activeMailTab.mail_view_state === 'object'
+    ? activeMailTab.mail_view_state
+    : {};
+  const refKey = String(state.activeSrId || '').trim();
+  if (!state.mailSearchQueryByRef.has(refKey) && tabViewState.query) {
+    state.mailSearchQueryByRef.set(refKey, String(tabViewState.query || '').trim());
+  }
+  if (!state.mailNavByRef.has(refKey)) {
+    state.mailNavByRef.set(refKey, {
+      account_id: String(tabViewState.account_id || '').trim(),
+      mailbox_path: String(tabViewState.mailbox_path || '').trim(),
+      smart_view: String(tabViewState.smart_view || 'inbox').trim() || 'inbox',
+    });
+  }
 
   const listRes = await api.srListMailThreads(state.activeSrId);
   const attachedThreads = (listRes && listRes.ok && Array.isArray(listRes.threads)) ? listRes.threads : [];
   const searchState = getMailSearchState(state.activeSrId);
+  const nav = getMailNavState(state.activeSrId);
   const query = searchState.query;
   let results = searchState.results;
   const selectedSources = searchState.selected;
@@ -4923,13 +4976,30 @@ async function renderMailPanel() {
   const mailStatus = state.mailStatus || await api.mailStatus();
   state.mailStatus = mailStatus || null;
   const accountOptions = Array.isArray(state.mailAccounts) ? state.mailAccounts : [];
+  const activeAccountId = nav.account_id || String(((accountOptions[0] || {}).id) || '').trim();
+  if (!nav.account_id && activeAccountId) setMailNavState(state.activeSrId, { account_id: activeAccountId });
+  const activeMailboxes = state.mailboxesByAccount.get(activeAccountId) || [];
   if (!Array.isArray(results) || results.length === 0) {
-    const res = await api.mailSearchLocalThreads(query, 80, true);
+    const res = await api.mailSearchLocalThreads(query, 80, true, '', activeAccountId, nav.mailbox_path || '', nav.smart_view || '');
     results = (res && Array.isArray(res.items)) ? res.items : [];
     state.mailSearchResultsByRef.set(String(state.activeSrId || '').trim(), results);
   }
 
-  status.textContent = `${attachedThreads.length} attached thread(s)`;
+  status.textContent = `${attachedThreads.length} attached thread(s) · ${escapeHtml(String((mailStatus && mailStatus.message) || ''))}`;
+  const navItems = [
+    { key: 'inbox', label: 'Inbox', type: 'smart' },
+    { key: 'unread', label: 'Unread', type: 'smart' },
+    { key: 'sent', label: 'Sent', type: 'smart' },
+    { key: 'drafts', label: 'Drafts', type: 'smart' },
+    { key: 'archive', label: 'Archive', type: 'smart' },
+    { key: 'trash', label: 'Trash', type: 'smart' },
+    ...activeMailboxes.map((mailbox) => ({
+      key: String((mailbox && mailbox.path) || '').trim(),
+      label: String((mailbox && mailbox.name) || (mailbox && mailbox.path) || 'Mailbox'),
+      type: 'mailbox',
+      role: String((mailbox && mailbox.special_use) || '').trim(),
+    })),
+  ];
   const threadListMarkup = results.length
     ? results.map((item) => {
       const threadId = String((item && item.id) || '').trim();
@@ -4937,7 +5007,7 @@ async function renderMailPanel() {
       const isSelected = selectedSources.has(threadId);
       const meta = [
         String((item && item.account_label) || '').trim(),
-        String((item && item.mailbox) || '').trim(),
+        String((item && item.mailbox_role) || (item && item.mailbox) || '').trim(),
         String((item && item.from) || '').trim(),
         formatAgo((item && item.last_message_at) || 0),
       ].filter(Boolean).join(' · ');
@@ -4948,9 +5018,12 @@ async function renderMailPanel() {
             <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
             <div class="mail-row-sub">${escapeHtml(String((item && item.snippet) || ''))}</div>
           </button>
-          <button type="button" class="mail-row-select-btn ${isSelected ? 'active' : ''}" data-mail-thread-select="${escapeHtml(threadId)}">
-            ${isSelected ? 'Selected' : 'Select'}
-          </button>
+          <div class="mail-row-side">
+            ${Number((item && item.unread_count) || 0) > 0 ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
+            <button type="button" class="mail-row-select-btn ${isSelected ? 'active' : ''}" data-mail-thread-select="${escapeHtml(threadId)}">
+              ${isSelected ? 'Selected' : 'Select'}
+            </button>
+          </div>
         </div>
       `;
     }).join('')
@@ -4963,7 +5036,7 @@ async function renderMailPanel() {
 
   const composeMarkup = composer && composer.open ? `
     <div class="mail-block mail-compose-block">
-      <h4>${escapeHtml(composer.mode === 'reply' ? 'Reply' : 'Compose')}</h4>
+      <h4>${escapeHtml(composer.mode === 'reply' ? 'Reply' : (composer.mode === 'draft' ? 'Draft' : 'Compose'))}</h4>
       <div class="mail-compose-grid">
         <label class="settings-field">Account
           <select id="mail-compose-account">
@@ -4990,7 +5063,17 @@ async function renderMailPanel() {
           <textarea id="mail-compose-body">${escapeHtml(String(composer.body_text || ''))}</textarea>
         </label>
       </div>
+      <div class="mail-attachment-list mail-compose-attachments">
+        ${(Array.isArray(composer.attachments) ? composer.attachments : []).map((attachment) => `
+          <div class="mail-attachment">
+            <span>${escapeHtml(String((attachment && attachment.file_name) || 'attachment'))}</span>
+            <button type="button" class="mail-attachment-remove" data-mail-compose-remove-attachment="${escapeHtml(String((attachment && attachment.source_path) || '').trim())}">Remove</button>
+          </div>
+        `).join('') || '<div class="muted small">No attachments added.</div>'}
+      </div>
       <div class="settings-inline-actions">
+        <button id="mail-compose-attach-btn">Add Attachment</button>
+        <button id="mail-compose-save-draft-btn">Save Draft</button>
         <button id="mail-compose-send-btn">Send</button>
         <button id="mail-compose-cancel-btn">Close</button>
       </div>
@@ -5012,13 +5095,45 @@ async function renderMailPanel() {
 
   body.innerHTML = `
     <div class="mail-layout">
+    <div class="mail-sidebar mail-block">
+      <div class="mail-sidebar-section">
+        <label class="settings-field">Account
+          <select id="mail-account-select">
+            ${accountOptions.map((account) => `
+              <option value="${escapeHtml(String((account && account.id) || ''))}" ${String((account && account.id) || '') === activeAccountId ? 'selected' : ''}>
+                ${escapeHtml(String((account && account.label) || (account && account.email) || 'Mailbox'))}
+              </option>
+            `).join('')}
+          </select>
+        </label>
+      </div>
+      <div class="mail-sidebar-section">
+        <div class="mail-sidebar-title">Folders</div>
+        <div class="mail-folder-list">
+          ${navItems.map((item) => {
+            const isActive = item.type === 'mailbox'
+              ? String(nav.mailbox_path || '') === String(item.key || '')
+              : String(nav.smart_view || 'inbox') === String(item.key || '');
+            return `
+              <button type="button" class="mail-folder-item ${isActive ? 'active' : ''}" data-mail-folder-type="${escapeHtml(item.type)}" data-mail-folder-key="${escapeHtml(String(item.key || ''))}">
+                ${escapeHtml(String(item.label || 'Folder'))}
+              </button>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    </div>
+    <div class="mail-main">
     <div class="mail-toolbar">
       <input id="mail-search-input" type="text" value="${escapeHtml(query)}" placeholder="Search your Mail accounts" />
       <button id="mail-search-btn">Search</button>
+      <button id="mail-refresh-btn">Refresh</button>
       <button id="mail-attach-btn">Add Selected</button>
       <button id="mail-compose-open-btn">Compose</button>
       ${previewState && previewState.thread ? '<button id="mail-reply-btn">Reply</button>' : ''}
-      <span class="muted small">${escapeHtml(String((mailStatus && mailStatus.message) || ''))}</span>
+      ${previewState && previewState.thread && previewState.thread.capabilities && previewState.thread.capabilities.supports_archive ? '<button id="mail-archive-btn">Archive</button>' : ''}
+      ${previewState && previewState.thread ? '<button id="mail-toggle-read-btn">Read/Unread</button>' : ''}
+      ${previewState && previewState.thread ? '<button id="mail-delete-btn">Trash</button>' : ''}
     </div>
     ${composeMarkup}
     <div class="mail-block mail-list-block">
@@ -5032,6 +5147,7 @@ async function renderMailPanel() {
       <div class="mail-content-scroll">
         ${contentMarkup}
       </div>
+    </div>
     </div>
     </div>
   `;
@@ -5049,6 +5165,34 @@ async function renderMailPanel() {
     await runMailSearch(state.activeSrId, nextQuery);
     await persistMailTabState({ query: String(nextQuery || '').trim() });
     await renderMailPanel();
+  });
+  e('mail-account-select')?.addEventListener('change', async (event) => {
+    setMailNavState(state.activeSrId, {
+      account_id: String((event.target && event.target.value) || '').trim(),
+      mailbox_path: '',
+      smart_view: 'inbox',
+    });
+    state.mailSearchResultsByRef.delete(String(state.activeSrId || '').trim());
+    setMailPreviewState(state.activeSrId, null);
+    await persistMailTabState({ account_id: String((event.target && event.target.value) || '').trim(), mailbox_path: '', smart_view: 'inbox' });
+    await renderMailPanel();
+  });
+  body.querySelectorAll('button[data-mail-folder-key]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const type = String(node.getAttribute('data-mail-folder-type') || '').trim();
+      const key = String(node.getAttribute('data-mail-folder-key') || '').trim();
+      setMailNavState(state.activeSrId, {
+        mailbox_path: type === 'mailbox' ? key : '',
+        smart_view: type === 'smart' ? key : '',
+      });
+      state.mailSearchResultsByRef.delete(String(state.activeSrId || '').trim());
+      setMailPreviewState(state.activeSrId, null);
+      await persistMailTabState({
+        mailbox_path: type === 'mailbox' ? key : '',
+        smart_view: type === 'smart' ? key : '',
+      });
+      await renderMailPanel();
+    });
   });
   e('mail-attach-btn')?.addEventListener('click', async () => {
     const chosenThreadIds = results
@@ -5074,6 +5218,18 @@ async function renderMailPanel() {
     renderWorkspaceTabs();
     await renderMailPanel();
   });
+  e('mail-refresh-btn')?.addEventListener('click', async () => {
+    if (!activeAccountId) return;
+    const res = await api.mailSyncAccount(activeAccountId);
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to sync mailbox.');
+      return;
+    }
+    if (Array.isArray(res.accounts)) state.mailAccounts = res.accounts;
+    if (Array.isArray(res.mailboxes)) state.mailboxesByAccount.set(activeAccountId, res.mailboxes);
+    await runMailSearch(state.activeSrId, query);
+    await renderMailPanel();
+  });
   e('mail-compose-open-btn')?.addEventListener('click', async () => {
     const next = getMailComposerState(state.activeSrId);
     setMailComposerState(state.activeSrId, {
@@ -5081,6 +5237,8 @@ async function renderMailPanel() {
       open: true,
       mode: 'compose',
       account_id: next.account_id || String(((accountOptions[0] || {}).id) || '').trim(),
+      attachments: [],
+      draft_key: '',
     });
     await renderMailPanel();
   });
@@ -5092,16 +5250,49 @@ async function renderMailPanel() {
     closeMailComposer(state.activeSrId);
     await renderMailPanel();
   });
-  e('mail-compose-send-btn')?.addEventListener('click', async () => {
+  e('mail-compose-attach-btn')?.addEventListener('click', async () => {
+    const pick = await api.mailPickAttachments();
+    if (!pick || !pick.ok || !Array.isArray(pick.attachments)) return;
+    const current = getMailComposerState(state.activeSrId);
+    setMailComposerState(state.activeSrId, {
+      attachments: current.attachments.concat(pick.attachments),
+    });
+    await renderMailPanel();
+  });
+  e('mail-compose-save-draft-btn')?.addEventListener('click', async () => {
     const accountId = String((e('mail-compose-account') && e('mail-compose-account').value) || '').trim();
+    const current = getMailComposerState(state.activeSrId);
     const payload = {
       to: String((e('mail-compose-to') && e('mail-compose-to').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
       cc: String((e('mail-compose-cc') && e('mail-compose-cc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
       bcc: String((e('mail-compose-bcc') && e('mail-compose-bcc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
       subject: String((e('mail-compose-subject') && e('mail-compose-subject').value) || '').trim(),
       body_text: String((e('mail-compose-body') && e('mail-compose-body').value) || ''),
-      in_reply_to: String(composer.in_reply_to || '').trim(),
-      references: Array.isArray(composer.references) ? composer.references : [],
+      in_reply_to: String(current.in_reply_to || '').trim(),
+      references: Array.isArray(current.references) ? current.references : [],
+      attachments: Array.isArray(current.attachments) ? current.attachments : [],
+      draft_key: String(current.draft_key || '').trim(),
+    };
+    const res = await api.mailSaveDraft(accountId, payload);
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to save draft.');
+      return;
+    }
+    setMailComposerState(state.activeSrId, { draft_key: String((res && res.draft_key) || current.draft_key || '').trim() });
+    showPassiveNotification('Draft saved.');
+  });
+  e('mail-compose-send-btn')?.addEventListener('click', async () => {
+    const accountId = String((e('mail-compose-account') && e('mail-compose-account').value) || '').trim();
+    const current = getMailComposerState(state.activeSrId);
+    const payload = {
+      to: String((e('mail-compose-to') && e('mail-compose-to').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      cc: String((e('mail-compose-cc') && e('mail-compose-cc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      bcc: String((e('mail-compose-bcc') && e('mail-compose-bcc').value) || '').trim().split(',').map((item) => item.trim()).filter(Boolean),
+      subject: String((e('mail-compose-subject') && e('mail-compose-subject').value) || '').trim(),
+      body_text: String((e('mail-compose-body') && e('mail-compose-body').value) || ''),
+      in_reply_to: String(current.in_reply_to || '').trim(),
+      references: Array.isArray(current.references) ? current.references : [],
+      attachments: Array.isArray(current.attachments) ? current.attachments : [],
     };
     const res = await api.mailSendMessage(accountId, payload);
     if (!res || !res.ok) {
@@ -5111,6 +5302,56 @@ async function renderMailPanel() {
     state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
     state.mailStatus = await api.mailStatus();
     closeMailComposer(state.activeSrId);
+    await runMailSearch(state.activeSrId, query);
+    await renderMailPanel();
+  });
+  body.querySelectorAll('button[data-mail-compose-remove-attachment]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      const target = String(node.getAttribute('data-mail-compose-remove-attachment') || '').trim();
+      const current = getMailComposerState(state.activeSrId);
+      setMailComposerState(state.activeSrId, {
+        attachments: (Array.isArray(current.attachments) ? current.attachments : []).filter((item) => String((item && item.source_path) || '').trim() !== target),
+      });
+      await renderMailPanel();
+    });
+  });
+  e('mail-toggle-read-btn')?.addEventListener('click', async () => {
+    const thread = previewState && previewState.thread ? previewState.thread : null;
+    if (!thread) return;
+    const unread = Array.isArray(thread.messages) ? thread.messages.some((message) => !!message.is_unread) : false;
+    const res = await api.mailUpdateThreadState(String(thread.id || '').trim(), { is_unread: !unread });
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to update thread state.');
+      return;
+    }
+    await runMailSearch(state.activeSrId, query);
+    const previewRes = await api.mailPreviewSource(String(thread.id || '').trim());
+    if (previewRes && previewRes.ok && previewRes.thread) setMailPreviewState(state.activeSrId, { thread_id: String(thread.id || '').trim(), thread: previewRes.thread });
+    await renderMailPanel();
+  });
+  e('mail-archive-btn')?.addEventListener('click', async () => {
+    const thread = previewState && previewState.thread ? previewState.thread : null;
+    if (!thread) return;
+    const res = await api.mailMoveThread(String(thread.id || '').trim(), 'archive');
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to archive thread.');
+      return;
+    }
+    setMailPreviewState(state.activeSrId, null);
+    await runMailSearch(state.activeSrId, query);
+    await renderMailPanel();
+  });
+  e('mail-delete-btn')?.addEventListener('click', async () => {
+    const thread = previewState && previewState.thread ? previewState.thread : null;
+    if (!thread) return;
+    const confirmed = window.confirm('Move this thread to trash?');
+    if (!confirmed) return;
+    const res = await api.mailDeleteThread(String(thread.id || '').trim());
+    if (!res || !res.ok) {
+      window.alert((res && res.message) || 'Unable to move thread to trash.');
+      return;
+    }
+    setMailPreviewState(state.activeSrId, null);
     await runMailSearch(state.activeSrId, query);
     await renderMailPanel();
   });
@@ -8169,10 +8410,13 @@ function renderMailAccountsList() {
       <div class="settings-mail-account-meta">
         <div class="settings-user-primary">${escapeHtml(String((account && account.label) || 'Mailbox'))}</div>
         <div class="settings-user-secondary">
-          ${escapeHtml(String((account && account.email) || ''))} · ${escapeHtml(String((account && account.host) || ''))}:${escapeHtml(String((account && account.port) || ''))} · ${escapeHtml(String((account && account.mailbox) || 'INBOX'))}
+          ${escapeHtml(String((account && account.email) || ''))} · ${escapeHtml(String((account && account.account_type) || 'manual_imap_smtp').replace(/_/g, ' '))} · ${escapeHtml(String((account && account.provider) || 'generic').replace(/_/g, ' '))}
         </div>
         <div class="settings-user-secondary">
           ${escapeHtml(String((account && account.last_error) || '')) || `Last sync: ${formatAgo((account && account.last_sync_at) || 0) || 'never'}`}
+        </div>
+        <div class="settings-user-secondary">
+          ${escapeHtml(String((account && account.host) || ''))}:${escapeHtml(String((account && account.port) || ''))} · ${escapeHtml(String((account && account.mailbox) || 'INBOX'))}
         </div>
       </div>
       <div class="settings-inline-actions">
@@ -8194,6 +8438,14 @@ async function refreshMailAccounts() {
   if (!api.mailListAccounts) return;
   const res = await api.mailListAccounts();
   state.mailAccounts = (res && res.ok && Array.isArray(res.accounts)) ? res.accounts : [];
+  if (api.mailListMailboxes) {
+    const next = new Map();
+    for (const account of state.mailAccounts) {
+      const mailboxRes = await api.mailListMailboxes(String((account && account.id) || ''));
+      next.set(String((account && account.id) || '').trim(), (mailboxRes && mailboxRes.ok && Array.isArray(mailboxRes.mailboxes)) ? mailboxRes.mailboxes : []);
+    }
+    state.mailboxesByAccount = next;
+  }
   renderMailAccountsList();
   renderMailSettingsStatus();
 }
@@ -9480,6 +9732,8 @@ function bindControls() {
 
   e('settings-mail-account-save-btn')?.addEventListener('click', async () => {
     const payload = {
+      account_type: 'manual_imap_smtp',
+      provider: (e('settings-mail-account-provider') && e('settings-mail-account-provider').value) || 'generic',
       label: (e('settings-mail-account-label') && e('settings-mail-account-label').value) || '',
       email: (e('settings-mail-account-email') && e('settings-mail-account-email').value) || '',
       host: (e('settings-mail-account-host') && e('settings-mail-account-host').value) || '',
@@ -9504,6 +9758,7 @@ function bindControls() {
     ['settings-mail-account-label', 'settings-mail-account-email', 'settings-mail-account-host', 'settings-mail-account-username', 'settings-mail-account-password', 'settings-mail-account-smtp-host', 'settings-mail-account-smtp-username', 'settings-mail-account-smtp-password'].forEach((id) => {
       if (e(id)) e(id).value = '';
     });
+    if (e('settings-mail-account-provider')) e('settings-mail-account-provider').value = 'generic';
     if (e('settings-mail-account-port')) e('settings-mail-account-port').value = '993';
     if (e('settings-mail-account-smtp-port')) e('settings-mail-account-smtp-port').value = '465';
     if (e('settings-mail-account-mailbox')) e('settings-mail-account-mailbox').value = 'INBOX';
@@ -9512,7 +9767,25 @@ function bindControls() {
     if (e('settings-mail-account-smtp-starttls')) e('settings-mail-account-smtp-starttls').checked = false;
     state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
     state.settingsSaveState = 'Mailbox saved.';
-    renderMailAccountsList();
+    await refreshMailAccounts();
+    await refreshMailStatus();
+  });
+
+  e('settings-mail-google-connect-btn')?.addEventListener('click', async () => {
+    const clientId = String((e('settings-mail-google-client-id') && e('settings-mail-google-client-id').value) || '').trim();
+    const clientSecret = String((e('settings-mail-google-client-secret') && e('settings-mail-google-client-secret').value) || '').trim();
+    const res = await api.mailStartGoogleOAuth({ client_id: clientId, client_secret: clientSecret });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) || 'Unable to connect Gmail.';
+      renderSettingsStatusLine();
+      return;
+    }
+    if (e('settings-mail-google-client-id')) e('settings-mail-google-client-id').value = '';
+    if (e('settings-mail-google-client-secret')) e('settings-mail-google-client-secret').value = '';
+    state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
+    state.settingsSaveState = 'Google mailbox connected.';
+    renderSettingsStatusLine();
+    await refreshMailAccounts();
     await refreshMailStatus();
   });
 
@@ -9531,6 +9804,7 @@ function bindControls() {
         await refreshMailStatus();
         return;
       }
+      if (Array.isArray(res.mailboxes)) state.mailboxesByAccount.set(String((account && account.id) || '').trim(), res.mailboxes);
     }
     state.settingsSaveState = 'Mailbox sync completed.';
     renderSettingsStatusLine();
@@ -9546,6 +9820,7 @@ function bindControls() {
       state.settingsSaveState = (res && res.ok)
         ? 'Mailbox sync completed.'
         : ((res && res.message) || 'Unable to sync mailbox.');
+      if (res && res.ok && Array.isArray(res.mailboxes)) state.mailboxesByAccount.set(accountId, res.mailboxes);
       renderSettingsStatusLine();
       await refreshMailStatus();
       if (state.appView === 'workspace') await renderMailPanel();
@@ -9561,6 +9836,7 @@ function bindControls() {
         return;
       }
       state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : [];
+      state.mailboxesByAccount.delete(accountId);
       state.settingsSaveState = 'Mailbox deleted.';
       renderSettingsStatusLine();
       await refreshMailStatus();

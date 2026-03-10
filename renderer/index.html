@@ -458,6 +458,13 @@
         </div>
         <div id="settings-mail-accounts-list" class="settings-mail-accounts-list"></div>
         <div class="settings-grid settings-grid-2">
+          <label class="settings-field">Provider
+            <select id="settings-mail-account-provider">
+              <option value="generic">Generic IMAP/SMTP</option>
+              <option value="gmail">Gmail (app password)</option>
+              <option value="google_workspace">Google Workspace (app password)</option>
+            </select>
+          </label>
           <label class="settings-field">Label
             <input id="settings-mail-account-label" type="text" placeholder="Thelumenworks" />
           </label>
@@ -515,6 +522,17 @@
         </div>
         <div class="settings-inline-actions">
           <button id="settings-mail-account-save-btn">Save Mailbox</button>
+        </div>
+        <div class="settings-grid settings-grid-2">
+          <label class="settings-field">Google Client ID
+            <input id="settings-mail-google-client-id" type="text" placeholder="OAuth client id" />
+          </label>
+          <label class="settings-field">Google Client Secret
+            <input id="settings-mail-google-client-secret" type="password" placeholder="OAuth client secret" />
+          </label>
+        </div>
+        <div class="settings-inline-actions">
+          <button id="settings-mail-google-connect-btn">Connect Gmail</button>
         </div>
         </div>
       </details>

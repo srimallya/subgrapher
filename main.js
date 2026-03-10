@@ -47,6 +47,7 @@ const { createOrchestratorPreferencesStore } = require('./runtime/orchestrator_p
 const { LUMINO_HTML_ARTIFACT_STYLE_GUIDE } = require('./runtime/lumino_html_artifact_style_guide');
 const { parseEmailFile } = require('./runtime/mail_local');
 const { computeMailConversationKey, parseRawEmailText } = require('./runtime/mail_parser');
+const { refreshGoogleAccessToken, startGoogleMailOAuthFlow } = require('./runtime/mail_google_oauth');
 const { createMailStore } = require('./runtime/mail_store');
 
 const APP_NAME = 'Subgrapher';
@@ -132,6 +133,7 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'lmstudio_base_url',
   'lmstudio_default_model',
   'orchestrator_web_provider',
+  'mail_sync_enabled',
   'abstraction_enabled',
   'abstraction_model',
   'abstraction_strict_redaction',
@@ -4576,6 +4578,7 @@ function getDefaultSettings() {
     lmstudio_token_ref: '',
     orchestrator_web_provider: ORCHESTRATOR_WEB_PROVIDER_DEFAULT,
     orchestrator_web_provider_key_ref: '',
+    mail_sync_enabled: false,
     abstraction_enabled: false,
     abstraction_model: '',
     abstraction_strict_redaction: true,
@@ -4689,6 +4692,9 @@ function readSettings() {
         ? orchestratorWebProvider
         : defaults.orchestrator_web_provider,
       orchestrator_web_provider_key_ref: String((parsed && parsed.orchestrator_web_provider_key_ref) || defaults.orchestrator_web_provider_key_ref).trim(),
+      mail_sync_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'mail_sync_enabled')
+        ? !!parsed.mail_sync_enabled
+        : defaults.mail_sync_enabled,
       abstraction_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'abstraction_enabled')
         ? !!parsed.abstraction_enabled
         : defaults.abstraction_enabled,
@@ -4813,6 +4819,9 @@ function writeSettings(next) {
       ? input.orchestrator_web_provider
       : current.orchestrator_web_provider
   ).trim().toLowerCase();
+  const requestedMailSyncEnabled = Object.prototype.hasOwnProperty.call(input, 'mail_sync_enabled')
+    ? !!input.mail_sync_enabled
+    : !!current.mail_sync_enabled;
   const requestedAbstractionModel = String(
     Object.prototype.hasOwnProperty.call(input, 'abstraction_model')
       ? input.abstraction_model
@@ -4945,6 +4954,7 @@ function writeSettings(next) {
         ? input.orchestrator_web_provider_key_ref
         : current.orchestrator_web_provider_key_ref
     ).trim(),
+    mail_sync_enabled: requestedMailSyncEnabled,
     abstraction_enabled: Object.prototype.hasOwnProperty.call(input, 'abstraction_enabled')
       ? !!input.abstraction_enabled
       : !!current.abstraction_enabled,
@@ -5039,6 +5049,28 @@ function getMailStore() {
       getSecretByRef: getSecretValueByRef,
       setSecret: setSecretValueByRef,
       clearSecret: clearSecretValueByRef,
+      refreshOAuthAccessToken: async (account = {}) => {
+        const refreshTokenRef = String((account && account.oauth_refresh_token_ref) || '').trim();
+        const clientIdRef = String((account && account.oauth_client_id_ref) || '').trim();
+        const clientSecretRef = String((account && account.oauth_client_secret_ref) || '').trim();
+        const refreshTokenRes = refreshTokenRef ? getSecretValueByRef(refreshTokenRef) : null;
+        const clientIdRes = clientIdRef ? getSecretValueByRef(clientIdRef) : null;
+        const clientSecretRes = clientSecretRef ? getSecretValueByRef(clientSecretRef) : null;
+        const refreshToken = refreshTokenRes && refreshTokenRes.ok ? String(refreshTokenRes.secret || '').trim() : '';
+        const clientId = clientIdRes && clientIdRes.ok ? String(clientIdRes.secret || '').trim() : '';
+        const clientSecret = clientSecretRes && clientSecretRes.ok ? String(clientSecretRes.secret || '').trim() : '';
+        if (!refreshToken || !clientId || !clientSecret) {
+          return { ok: false, message: 'Google OAuth refresh configuration is incomplete.' };
+        }
+        const tokenSet = await refreshGoogleAccessToken({ clientId, clientSecret, refreshToken });
+        const saveRes = await mailStore.saveAccount({
+          id: String((account && account.id) || '').trim(),
+          account_type: 'gmail_oauth',
+          oauth_access_token: String(tokenSet.access_token || ''),
+          oauth_token_expires_at: nowTs() + (Math.max(0, Number(tokenSet.expires_in || 0)) * 1000),
+        });
+        return saveRes;
+      },
     });
   }
   return mailStore;
@@ -17739,6 +17771,9 @@ ipcMain.handle('browser:mailSearchLocalThreads', async (_event, payload) => {
   const res = await getMailStore().searchThreads({
     query: String((payload && payload.query) || '').trim(),
     limit: Number((payload && payload.limit) || 40),
+    account_id: String((payload && payload.account_id) || '').trim(),
+    mailbox_path: String((payload && payload.mailbox_path) || '').trim(),
+    smart_view: String((payload && payload.smart_view) || '').trim(),
   });
   return {
     ...res,
@@ -17760,10 +17795,55 @@ ipcMain.handle('browser:mailPreviewSource', async (_event, payload) => {
 
 ipcMain.handle('browser:mailListAccounts', async () => ({ ok: true, accounts: await getMailStore().listAccounts() }));
 
+ipcMain.handle('browser:mailListMailboxes', async (_event, payload) => ({
+  ok: true,
+  mailboxes: await getMailStore().listMailboxes(String((payload && payload.accountId) || '').trim()),
+}));
+
 ipcMain.handle('browser:mailSaveAccount', async (_event, payload) => {
   const res = await getMailStore().saveAccount(payload || {});
   if (!res || !res.ok) return res;
   return { ok: true, account: res.account, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailStartGoogleOAuth', async (_event, payload) => {
+  try {
+    const clientId = String((payload && payload.client_id) || '').trim();
+    const clientSecret = String((payload && payload.client_secret) || '').trim();
+    if (!clientId || !clientSecret) {
+      return { ok: false, message: 'Google client id and client secret are required.' };
+    }
+    const oauth = await startGoogleMailOAuthFlow({
+      clientId,
+      clientSecret,
+      openUrl: async (url) => shell.openExternal(url),
+    });
+    const saveRes = await getMailStore().saveAccount({
+      account_type: 'gmail_oauth',
+      provider: oauth.email.endsWith('@gmail.com') ? 'gmail' : 'google_workspace',
+      label: oauth.name || oauth.email,
+      email: oauth.email,
+      host: 'imap.gmail.com',
+      port: 993,
+      username: oauth.email,
+      mailbox: 'INBOX',
+      use_tls: true,
+      smtp_host: 'smtp.gmail.com',
+      smtp_port: 465,
+      smtp_username: oauth.email,
+      smtp_use_tls: true,
+      smtp_starttls: false,
+      oauth_access_token: oauth.access_token,
+      oauth_refresh_token: oauth.refresh_token,
+      oauth_client_id: clientId,
+      oauth_client_secret: clientSecret,
+      oauth_token_expires_at: nowTs() + (Math.max(0, Number(oauth.expires_in || 0)) * 1000),
+    });
+    if (!saveRes || !saveRes.ok) return saveRes;
+    return { ok: true, account: saveRes.account, accounts: await getMailStore().listAccounts() };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Google sign-in failed.') };
+  }
 });
 
 ipcMain.handle('browser:mailDeleteAccount', async (_event, payload) => {
@@ -17780,11 +17860,55 @@ ipcMain.handle('browser:mailSendMessage', async (_event, payload) => {
   return { ok: true, result: res, accounts: await getMailStore().listAccounts() };
 });
 
+ipcMain.handle('browser:mailSaveDraft', async (_event, payload) => {
+  const accountId = String((payload && payload.accountId) || '').trim();
+  const message = (payload && payload.message && typeof payload.message === 'object') ? payload.message : {};
+  return getMailStore().saveDraft(accountId, message);
+});
+
 ipcMain.handle('browser:mailSyncAccount', async (_event, payload) => {
   const res = await getMailStore().syncAccount(String((payload && payload.accountId) || '').trim());
   return {
     ...res,
     accounts: await getMailStore().listAccounts(),
+    mailboxes: await getMailStore().listMailboxes(String((payload && payload.accountId) || '').trim()),
+  };
+});
+
+ipcMain.handle('browser:mailUpdateThreadState', async (_event, payload) => {
+  const res = await getMailStore().updateThreadState(String((payload && payload.threadId) || '').trim(), payload && payload.patch ? payload.patch : {});
+  if (!res || !res.ok) return res;
+  return { ok: true };
+});
+
+ipcMain.handle('browser:mailMoveThread', async (_event, payload) => {
+  const res = await getMailStore().moveThread(String((payload && payload.threadId) || '').trim(), String((payload && payload.targetRole) || '').trim());
+  if (!res || !res.ok) return res;
+  return { ok: true, result: res };
+});
+
+ipcMain.handle('browser:mailDeleteThread', async (_event, payload) => {
+  const res = await getMailStore().deleteThread(String((payload && payload.threadId) || '').trim());
+  if (!res || !res.ok) return res;
+  return { ok: true, result: res };
+});
+
+ipcMain.handle('browser:mailPickAttachments', async () => {
+  const pick = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose files to attach',
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (pick.canceled || !Array.isArray(pick.filePaths)) {
+    return { ok: false, canceled: true, attachments: [] };
+  }
+  return {
+    ok: true,
+    attachments: pick.filePaths.map((filePath) => ({
+      source_path: String(filePath || '').trim(),
+      file_name: path.basename(String(filePath || '').trim()),
+      mime_type: detectMimeType(filePath),
+      size_bytes: fs.existsSync(filePath) ? Number((fs.statSync(filePath) || {}).size || 0) : 0,
+    })),
   };
 });
 
