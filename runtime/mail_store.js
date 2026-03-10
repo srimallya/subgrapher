@@ -3,9 +3,10 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { ImapClient } = require('./mail_imap');
-const { normalizeWhitespace, parseRawEmailText } = require('./mail_parser');
+const { computeMailConversationKey, normalizeWhitespace, parseRawEmailText } = require('./mail_parser');
+const { sendMailViaSmtp } = require('./mail_smtp');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 let sqlModulePromise = null;
 const dbTaskByPath = new Map();
 
@@ -80,6 +81,13 @@ function ensureSchema(db) {
       mailbox TEXT NOT NULL,
       use_tls INTEGER NOT NULL DEFAULT 1,
       password_ref TEXT NOT NULL,
+      smtp_host TEXT NOT NULL DEFAULT '',
+      smtp_port INTEGER NOT NULL DEFAULT 465,
+      smtp_username TEXT NOT NULL DEFAULT '',
+      smtp_password_ref TEXT NOT NULL DEFAULT '',
+      smtp_use_tls INTEGER NOT NULL DEFAULT 1,
+      smtp_starttls INTEGER NOT NULL DEFAULT 0,
+      send_enabled INTEGER NOT NULL DEFAULT 1,
       sync_enabled INTEGER NOT NULL DEFAULT 1,
       sync_limit INTEGER NOT NULL DEFAULT 200,
       last_sync_at INTEGER NOT NULL DEFAULT 0,
@@ -116,6 +124,18 @@ function ensureSchema(db) {
   db.run('CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id)');
   db.run('CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account_id)');
   db.run('CREATE INDEX IF NOT EXISTS idx_messages_sent ON messages(sent_ts DESC)');
+  const accountColumns = new Set(selectRows(db, 'PRAGMA table_info(accounts)').map((row) => String(row.name || '').trim()));
+  const ensureAccountColumn = (name, sql) => {
+    if (accountColumns.has(name)) return;
+    db.run(`ALTER TABLE accounts ADD COLUMN ${sql}`);
+  };
+  ensureAccountColumn('smtp_host', "smtp_host TEXT NOT NULL DEFAULT ''");
+  ensureAccountColumn('smtp_port', 'smtp_port INTEGER NOT NULL DEFAULT 465');
+  ensureAccountColumn('smtp_username', "smtp_username TEXT NOT NULL DEFAULT ''");
+  ensureAccountColumn('smtp_password_ref', "smtp_password_ref TEXT NOT NULL DEFAULT ''");
+  ensureAccountColumn('smtp_use_tls', 'smtp_use_tls INTEGER NOT NULL DEFAULT 1');
+  ensureAccountColumn('smtp_starttls', 'smtp_starttls INTEGER NOT NULL DEFAULT 0');
+  ensureAccountColumn('send_enabled', 'send_enabled INTEGER NOT NULL DEFAULT 1');
   upsertMeta(db, 'schema_version', String(SCHEMA_VERSION));
 }
 
@@ -135,6 +155,13 @@ function normalizeAccountRecord(row = {}) {
     mailbox: String(row.mailbox || 'INBOX').trim() || 'INBOX',
     use_tls: !!Number(row.use_tls || 0),
     password_ref: String(row.password_ref || '').trim(),
+    smtp_host: String(row.smtp_host || '').trim(),
+    smtp_port: Math.max(1, Math.round(Number(row.smtp_port || 465))),
+    smtp_username: String(row.smtp_username || '').trim(),
+    smtp_password_ref: String(row.smtp_password_ref || '').trim(),
+    smtp_use_tls: !!Number(row.smtp_use_tls || 0),
+    smtp_starttls: !!Number(row.smtp_starttls || 0),
+    send_enabled: !Object.prototype.hasOwnProperty.call(row, 'send_enabled') || !!Number(row.send_enabled || 0),
     sync_enabled: !!Number(row.sync_enabled || 0),
     sync_limit: Math.max(1, Math.min(500, Math.round(Number(row.sync_limit || 200)))),
     last_sync_at: Number(row.last_sync_at || 0),
@@ -151,10 +178,7 @@ function threadIdForAccount(accountId = '', threadKey = '') {
 function buildParsedMessage(account = {}, uid = 0, rawSource = '', mailboxName = '') {
   const parsed = parseRawEmailText(rawSource, `imap://${account.id}/${uid}`);
   const threadKey = String(
-    parsed.references[parsed.references.length - 1]
-    || parsed.in_reply_to
-    || parsed.message_id_header
-    || `${parsed.subject}:${parsed.from}`
+    computeMailConversationKey(parsed, String(account.email || '').trim().toLowerCase())
   ).trim() || crypto.createHash('sha1').update(rawSource).digest('hex');
   const sentTs = parseDateTs(parsed.sent_at);
   return {
@@ -188,6 +212,21 @@ function buildParsedMessage(account = {}, uid = 0, rawSource = '', mailboxName =
     ].join(' ')).toLowerCase(),
     created_at: nowTs(),
     updated_at: nowTs(),
+  };
+}
+
+function inferSmtpHost(host = '') {
+  const clean = String(host || '').trim();
+  if (!clean) return '';
+  if (/^imap\./i.test(clean)) return clean.replace(/^imap\./i, 'smtp.');
+  return clean;
+}
+
+function normalizeComposeRecipients(input = {}) {
+  return {
+    to: parseRecipients(JSON.stringify({ to: input.to })).to,
+    cc: parseRecipients(JSON.stringify({ cc: input.cc })).cc,
+    bcc: parseRecipients(JSON.stringify({ bcc: input.bcc })).bcc,
   };
 }
 
@@ -246,8 +285,9 @@ function upsertAccount(db, account = {}) {
   const stmt = db.prepare(`
     INSERT INTO accounts (
       id, label, email, host, port, username, mailbox, use_tls, password_ref,
+      smtp_host, smtp_port, smtp_username, smtp_password_ref, smtp_use_tls, smtp_starttls, send_enabled,
       sync_enabled, sync_limit, last_sync_at, last_error, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       label = excluded.label,
       email = excluded.email,
@@ -257,6 +297,13 @@ function upsertAccount(db, account = {}) {
       mailbox = excluded.mailbox,
       use_tls = excluded.use_tls,
       password_ref = excluded.password_ref,
+      smtp_host = excluded.smtp_host,
+      smtp_port = excluded.smtp_port,
+      smtp_username = excluded.smtp_username,
+      smtp_password_ref = excluded.smtp_password_ref,
+      smtp_use_tls = excluded.smtp_use_tls,
+      smtp_starttls = excluded.smtp_starttls,
+      send_enabled = excluded.send_enabled,
       sync_enabled = excluded.sync_enabled,
       sync_limit = excluded.sync_limit,
       last_sync_at = excluded.last_sync_at,
@@ -273,6 +320,13 @@ function upsertAccount(db, account = {}) {
     account.mailbox,
     account.use_tls ? 1 : 0,
     account.password_ref,
+    account.smtp_host || '',
+    account.smtp_port || 465,
+    account.smtp_username || '',
+    account.smtp_password_ref || '',
+    account.smtp_use_tls ? 1 : 0,
+    account.smtp_starttls ? 1 : 0,
+    account.send_enabled ? 1 : 0,
     account.sync_enabled ? 1 : 0,
     account.sync_limit,
     account.last_sync_at || 0,
@@ -397,6 +451,7 @@ function createMailStore(options = {}) {
         return {
           ...normalized,
           password_configured: !!normalized.password_ref,
+          smtp_password_configured: !!normalized.smtp_password_ref,
         };
       })
     ));
@@ -405,6 +460,7 @@ function createMailStore(options = {}) {
   async function saveAccount(input = {}) {
     const id = String(input.id || makeId('mailacct')).trim() || makeId('mailacct');
     const password = String(input.password || '');
+    const smtpPassword = String(input.smtp_password || '');
     const existingList = await listAccounts();
     const existing = existingList.find((item) => item.id === id) || null;
     let passwordRef = String((existing && existing.password_ref) || '').trim();
@@ -414,6 +470,25 @@ function createMailStore(options = {}) {
       passwordRef = String(setRes.ref || '').trim();
     }
     if (!passwordRef) return { ok: false, message: 'Mailbox password is required.' };
+    let smtpPasswordRef = String((existing && existing.smtp_password_ref) || '').trim();
+    if (smtpPassword) {
+      const setRes = setSecret(smtpPasswordRef, smtpPassword, 'mailbox-smtp');
+      if (!setRes || !setRes.ok) return { ok: false, message: (setRes && setRes.message) || 'Unable to store SMTP password.' };
+      smtpPasswordRef = String(setRes.ref || '').trim();
+    }
+    if (!smtpPasswordRef) smtpPasswordRef = passwordRef;
+    const smtpHost = String(input.smtp_host || (existing && existing.smtp_host) || inferSmtpHost(input.host || (existing && existing.host) || '')).trim();
+    const smtpPort = Math.max(1, Math.round(Number(
+      input.smtp_port
+      || (existing && existing.smtp_port)
+      || (Number(input.port || (existing && existing.port) || 993) === 587 ? 587 : 465)
+    )));
+    const smtpUseTls = Object.prototype.hasOwnProperty.call(input, 'smtp_use_tls')
+      ? !!input.smtp_use_tls
+      : ((existing && existing.smtp_use_tls) || smtpPort === 465);
+    const smtpStarttls = Object.prototype.hasOwnProperty.call(input, 'smtp_starttls')
+      ? !!input.smtp_starttls
+      : ((existing && existing.smtp_starttls) || (!smtpUseTls && smtpPort === 587));
     const account = {
       id,
       label: String(input.label || input.email || '').trim(),
@@ -424,6 +499,13 @@ function createMailStore(options = {}) {
       mailbox: String(input.mailbox || 'INBOX').trim() || 'INBOX',
       use_tls: input.use_tls !== false,
       password_ref: passwordRef,
+      smtp_host: smtpHost,
+      smtp_port: smtpPort,
+      smtp_username: String(input.smtp_username || (existing && existing.smtp_username) || input.username || input.email || '').trim(),
+      smtp_password_ref: smtpPasswordRef,
+      smtp_use_tls: smtpUseTls,
+      smtp_starttls: smtpStarttls,
+      send_enabled: input.send_enabled !== false,
       sync_enabled: input.sync_enabled !== false,
       sync_limit: Math.max(1, Math.min(500, Math.round(Number(input.sync_limit || 200)))),
       last_sync_at: Number((existing && existing.last_sync_at) || 0),
@@ -437,7 +519,14 @@ function createMailStore(options = {}) {
     await withDatabase(async (db) => {
       upsertAccount(db, account);
     });
-    return { ok: true, account: { ...account, password_configured: true } };
+    return {
+      ok: true,
+      account: {
+        ...account,
+        password_configured: true,
+        smtp_password_configured: !!account.smtp_password_ref,
+      },
+    };
   }
 
   async function deleteAccount(accountId = '') {
@@ -447,6 +536,7 @@ function createMailStore(options = {}) {
     const existing = accounts.find((item) => item.id === id);
     if (!existing) return { ok: true, missing: true };
     if (existing.password_ref) clearSecret(existing.password_ref);
+    if (existing.smtp_password_ref && existing.smtp_password_ref !== existing.password_ref) clearSecret(existing.smtp_password_ref);
     await withDatabase(async (db) => {
       const stmt = db.prepare('DELETE FROM accounts WHERE id = ?');
       stmt.bind([id]);
@@ -569,12 +659,16 @@ function createMailStore(options = {}) {
         ok: true,
         thread: {
           id,
+          account_id: String(rows[0].account_id || '').trim(),
+          account_email: String(rows[0].account_email || '').trim(),
           subject: String(rows[rows.length - 1].subject || '').trim(),
           account_label: String(rows[0].account_label || '').trim(),
           mailbox: String(rows[0].mailbox || '').trim(),
           messages: rows.map((row) => ({
             recipients: parseRecipients(row.recipients),
             id: `${String(row.account_id || '').trim()}:${String(row.uid || '').trim()}`,
+            account_id: String(row.account_id || '').trim(),
+            account_email: String(row.account_email || '').trim(),
             source_path: '',
             source_key: '',
             mail_message_id: '',
@@ -598,6 +692,65 @@ function createMailStore(options = {}) {
         },
       };
     });
+  }
+
+  async function sendMail(accountId = '', payload = {}) {
+    const id = String(accountId || '').trim();
+    if (!id) return { ok: false, message: 'Account id is required.' };
+    const accounts = await listAccounts();
+    const account = accounts.find((item) => item.id === id);
+    if (!account) return { ok: false, message: 'Mailbox account not found.' };
+    if (!account.send_enabled) return { ok: false, message: 'Sending is disabled for this account.' };
+    const smtpHost = String(account.smtp_host || inferSmtpHost(account.host)).trim();
+    if (!smtpHost) return { ok: false, message: 'SMTP host is missing for this account.' };
+    const smtpSecretRef = String(account.smtp_password_ref || account.password_ref || '').trim();
+    const smtpSecret = getSecretByRef(smtpSecretRef);
+    if (!smtpSecret || !smtpSecret.ok || !smtpSecret.secret) {
+      return { ok: false, message: (smtpSecret && smtpSecret.message) || 'SMTP password is missing.' };
+    }
+
+    const recipients = normalizeComposeRecipients(payload || {});
+    const fromAddress = String((payload && payload.from) || account.email || '').trim();
+    const subject = String((payload && payload.subject) || '').trim();
+    const bodyText = String((payload && payload.body_text) || '');
+    if (!fromAddress) return { ok: false, message: 'From address is required.' };
+    if (!recipients.to.length && !recipients.cc.length && !recipients.bcc.length) {
+      return { ok: false, message: 'At least one recipient is required.' };
+    }
+
+    const sendRes = await sendMailViaSmtp({
+      host: smtpHost,
+      port: account.smtp_port || 465,
+      secure: !!account.smtp_use_tls,
+      starttls: !!account.smtp_starttls,
+      username: String(account.smtp_username || account.username || account.email || '').trim(),
+      password: smtpSecret.secret,
+      helo_name: smtpHost,
+    }, {
+      from: fromAddress,
+      to: recipients.to,
+      cc: recipients.cc,
+      bcc: recipients.bcc,
+      subject,
+      body_text: bodyText,
+      in_reply_to: String((payload && payload.in_reply_to) || '').trim(),
+      references: Array.isArray(payload && payload.references) ? payload.references : [],
+      message_id_header: String((payload && payload.message_id_header) || '').trim(),
+    });
+
+    const localUid = -Math.max(1, nowTs());
+    const rawWithTerminator = String((sendRes && sendRes.raw_source) || '');
+    await withDatabase(async (db) => {
+      const message = buildParsedMessage(account, localUid, rawWithTerminator, 'Sent');
+      upsertMessage(db, message);
+    });
+
+    return {
+      ok: true,
+      account,
+      message_id_header: String((sendRes && sendRes.message_id_header) || '').trim(),
+      sent_at: String((sendRes && sendRes.sent_at) || '').trim(),
+    };
   }
 
   async function exportThreads(threadIds = []) {
@@ -635,6 +788,7 @@ function createMailStore(options = {}) {
     listAccounts,
     saveAccount,
     searchThreads,
+    sendMail,
     syncAccount,
   };
 }

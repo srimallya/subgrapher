@@ -138,6 +138,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     mailPreviewSource: (threadId = '') => ipcRenderer.invoke('browser:mailPreviewSource', { threadId }),
     mailListAccounts: () => ipcRenderer.invoke('browser:mailListAccounts'),
     mailSaveAccount: (account = {}) => ipcRenderer.invoke('browser:mailSaveAccount', account || {}),
+    mailSendMessage: (accountId = '', message = {}) => ipcRenderer.invoke('browser:mailSendMessage', {
+      accountId,
+      message,
+    }),
     mailDeleteAccount: (accountId = '') => ipcRenderer.invoke('browser:mailDeleteAccount', { accountId }),
     mailSyncAccount: (accountId = '') => ipcRenderer.invoke('browser:mailSyncAccount', { accountId }),
     openMailPrivacySettings: () => ipcRenderer.invoke('browser:openMailPrivacySettings'),
