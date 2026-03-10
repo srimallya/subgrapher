@@ -3418,7 +3418,6 @@ async function analyzeImageWithOpenAiLikeProvider(provider = 'openai', model = '
 
   const body = {
     model: modelId,
-    temperature: 0.2,
     messages: [
       {
         role: 'system',
@@ -3433,6 +3432,7 @@ async function analyzeImageWithOpenAiLikeProvider(provider = 'openai', model = '
       },
     ],
   };
+  if (targetProvider !== 'openai') body.temperature = 0.2;
 
   const { controller, timer } = makeTimeoutSignal(timeoutMs);
   try {

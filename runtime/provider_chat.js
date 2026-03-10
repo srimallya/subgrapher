@@ -303,9 +303,9 @@ async function openAiLikeChat(params, options = {}) {
       ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
       { role: 'user', content: userPrompt },
     ],
-    temperature: 0.2,
     stream: wantsStreaming,
   };
+  if (provider !== 'openai') body.temperature = 0.2;
 
   const headers = {
     'content-type': 'application/json',
@@ -602,8 +602,8 @@ async function callProviderWithTools(params = {}, options = {}) {
           ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
           ...normalizeMessagesForOpenAi(messages),
         ],
-        temperature: 0.2,
       };
+      if (provider !== 'openai') body.temperature = 0.2;
       if (!disableTools) {
         body.tool_choice = 'auto';
         body.tools = normalizeToolSchemaForOpenAi(tools);
