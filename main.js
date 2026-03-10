@@ -560,6 +560,7 @@ function buildReferenceSnapshot(ref) {
     active_tab_id: String(target.active_tab_id || ''),
     artifacts: Array.isArray(target.artifacts) ? target.artifacts : [],
     highlights: Array.isArray(target.highlights) ? target.highlights : [],
+    mail_threads: Array.isArray(target.mail_threads) ? target.mail_threads : [],
     context_files: Array.isArray(target.context_files) ? target.context_files : [],
     folder_mounts: Array.isArray(target.folder_mounts) ? target.folder_mounts : [],
     youtube_transcripts: (target.youtube_transcripts && typeof target.youtube_transcripts === 'object') ? target.youtube_transcripts : {},
@@ -10129,6 +10130,7 @@ function normalizeIncomingSyncedReference(raw, context = {}) {
     tabs,
     active_tab_id: activeTabId || null,
     artifacts: mergedArtifacts,
+    mail_threads: [],
     context_files: Array.isArray(raw.context_files)
       ? raw.context_files.slice(0, 100).map((file) => ({
         id: String((file && file.id) || makeId('ctx')),
@@ -11003,6 +11005,7 @@ function createReferenceBase(seed = {}) {
       type: 'markdown',
       content: '# Notes\n\nStart collecting findings here.',
     })],
+    mail_threads: [],
     context_files: [],
     folder_mounts: [],
     youtube_transcripts: {},
@@ -11062,6 +11065,7 @@ function createForkReference(parent, seed = {}) {
     tabs,
     active_tab_id: tabs[0] ? tabs[0].id : null,
     artifacts,
+    mail_threads: Array.isArray(parent.mail_threads) ? [...parent.mail_threads] : [],
     context_files: Array.isArray(parent.context_files) ? [...parent.context_files] : [],
     folder_mounts: Array.isArray(parent.folder_mounts) ? [...parent.folder_mounts] : [],
     youtube_transcripts: (parent.youtube_transcripts && typeof parent.youtube_transcripts === 'object') ? { ...parent.youtube_transcripts } : {},
@@ -16118,6 +16122,7 @@ function applySnapshotToForkReference(targetRef, snapshot = {}) {
   targetRef.active_tab_id = String(snap.active_tab_id || (targetRef.tabs[0] && targetRef.tabs[0].id) || '');
   targetRef.artifacts = Array.isArray(snap.artifacts) ? deepClone(snap.artifacts) : [];
   targetRef.highlights = Array.isArray(snap.highlights) ? deepClone(snap.highlights) : [];
+  targetRef.mail_threads = Array.isArray(snap.mail_threads) ? deepClone(snap.mail_threads) : [];
   targetRef.context_files = Array.isArray(snap.context_files) ? deepClone(snap.context_files) : [];
   targetRef.folder_mounts = Array.isArray(snap.folder_mounts) ? deepClone(snap.folder_mounts) : [];
   targetRef.youtube_transcripts = (snap.youtube_transcripts && typeof snap.youtube_transcripts === 'object') ? deepClone(snap.youtube_transcripts) : {};
