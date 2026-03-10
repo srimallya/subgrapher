@@ -186,6 +186,12 @@ const PROVIDER_SUMMARY_MODEL_FALLBACK = {
   google: 'gemini-2.0-flash',
   lmstudio: 'local-model',
 };
+const CEREBRAS_KNOWN_CHAT_MODELS = [
+  'gpt-oss-120b',
+  'llama3.1-8b',
+  'qwen-3-235b-a22b-instruct-2507',
+  'zai-glm-4.7',
+];
 const PROVIDER_PRIMARY_KEY_ID = 'primary';
 const LMSTUDIO_DEFAULT_BASE_URL = 'http://127.0.0.1:1234';
 const ORCHESTRATOR_WEB_PROVIDER_DEFAULT = 'ddg';
@@ -997,6 +1003,44 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function probeCerebrasChatModel(model, apiKey) {
+  const modelId = String(model || '').trim();
+  const key = String(apiKey || '').trim();
+  if (!modelId || !key) return false;
+  const result = await fetchJsonWithTimeout('https://api.cerebras.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      stream: false,
+      max_tokens: 1,
+      temperature: 0,
+      messages: [
+        { role: 'user', content: 'Reply with ok.' },
+      ],
+    }),
+  }, 20_000);
+  return !!(result && result.ok);
+}
+
+async function mergeAccessibleCerebrasModels(listedModels, apiKey) {
+  const current = Array.isArray(listedModels) ? listedModels.filter(Boolean) : [];
+  const merged = new Set(current);
+  const missing = CEREBRAS_KNOWN_CHAT_MODELS.filter((model) => !merged.has(model));
+  if (!missing.length) return current.sort();
+  for (const model of missing) {
+    try {
+      if (await probeCerebrasChatModel(model, apiKey)) merged.add(model);
+    } catch (_) {
+      // Keep the provider list as-is when probe requests fail.
+    }
+  }
+  return Array.from(merged).sort();
 }
 
 async function readResponseJson(response) {
@@ -2164,9 +2208,12 @@ async function fetchProviderModels(provider, apiKey) {
     if (!result.ok) {
       return { ok: false, message: `Model list request failed (${result.status}).`, details: result.raw || '' };
     }
-    const models = Array.isArray(result.json && result.json.data)
+    let models = Array.isArray(result.json && result.json.data)
       ? result.json.data.map((item) => String((item && item.id) || '').trim()).filter(Boolean)
       : [];
+    if (target === 'cerebras') {
+      models = await mergeAccessibleCerebrasModels(models, key);
+    }
     return { ok: true, provider: target, models: models.sort() };
   }
 
