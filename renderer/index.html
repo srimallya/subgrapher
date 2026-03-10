@@ -153,6 +153,14 @@
           </div>
           <div id="skills-body" class="skills-body"></div>
         </section>
+
+        <section id="mail-panel" class="mail-panel hidden">
+          <div class="mail-header">
+            <strong id="mail-title">Mail</strong>
+            <span id="mail-status" class="muted">No mail linked</span>
+          </div>
+          <div id="mail-body" class="mail-body"></div>
+        </section>
       </div>
 
       <div id="memory-rail" class="memory-rail hidden">
@@ -425,6 +433,62 @@
         <div class="settings-inline-actions">
           <button id="settings-import-chrome-btn">Import from Chrome</button>
           <button id="settings-import-safari-btn">Import from Safari</button>
+        </div>
+        </div>
+      </details>
+
+      <details class="settings-section settings-accordion" data-settings-section="mail">
+        <summary>Mail</summary>
+        <div class="settings-section-content">
+        <div class="settings-grid settings-grid-2">
+          <label class="settings-field settings-boolean-field">
+            <span>Mail Sync</span>
+            <span class="settings-toggle-card">
+              <input id="settings-mail-sync-enabled" data-setting="mail_sync_enabled" type="checkbox" />
+              <span>Enable IMAP mailbox sync into Subgrapher’s local mail database.</span>
+            </span>
+          </label>
+          <div class="settings-field">
+            <span>Mailbox Accounts</span>
+            <div class="settings-inline-actions">
+              <button id="settings-mail-sync-all-btn">Sync Selected</button>
+            </div>
+            <div id="settings-mail-status" class="muted small">Unavailable</div>
+          </div>
+        </div>
+        <div id="settings-mail-accounts-list" class="settings-mail-accounts-list"></div>
+        <div class="settings-grid settings-grid-2">
+          <label class="settings-field">Label
+            <input id="settings-mail-account-label" type="text" placeholder="Thelumenworks" />
+          </label>
+          <label class="settings-field">Email
+            <input id="settings-mail-account-email" type="email" placeholder="name@example.com" />
+          </label>
+          <label class="settings-field">IMAP Host
+            <input id="settings-mail-account-host" type="text" placeholder="imap.example.com" />
+          </label>
+          <label class="settings-field">Port
+            <input id="settings-mail-account-port" type="number" value="993" />
+          </label>
+          <label class="settings-field">Username
+            <input id="settings-mail-account-username" type="text" placeholder="IMAP username" />
+          </label>
+          <label class="settings-field">Mailbox
+            <input id="settings-mail-account-mailbox" type="text" value="INBOX" />
+          </label>
+          <label class="settings-field">Password / App Password
+            <input id="settings-mail-account-password" type="password" placeholder="Stored securely" />
+          </label>
+          <label class="settings-field settings-boolean-field">
+            <span>TLS</span>
+            <span class="settings-toggle-card">
+              <input id="settings-mail-account-tls" type="checkbox" checked />
+              <span>Use secure IMAP over TLS.</span>
+            </span>
+          </label>
+        </div>
+        <div class="settings-inline-actions">
+          <button id="settings-mail-account-save-btn">Save Mailbox</button>
         </div>
         </div>
       </details>

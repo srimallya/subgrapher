@@ -8,6 +8,12 @@ Subgrapher uses one artifact runtime for authored outputs:
 Legacy pygame/viz tabs are removed from active runtime behavior.
 Image analysis is unified: active provider native vision is attempted first, then LM Studio fallback is used when needed.
 Hyperweb now includes E2E chat (`DM` + `room`) over the existing RTC data-channel path.
+Workspace surfaces currently include:
+- `web`
+- `artifact`
+- `files`
+- `skills`
+- `mail`
 
 ## Artifact Data Model
 Artifacts are stored as:
@@ -116,6 +122,28 @@ Migration is idempotent and safe to run repeatedly.
 - Non-text local files (image/doc/pdf/binary) may be analyzed via LM Studio during abstraction construction.
 - `read_context_file` returns extracted non-text content and auto-attempts LM Studio vision summaries for images (with metadata fallback if unavailable).
 
+## Mail Runtime
+- Mail is synced directly into Subgrapher from user-configured IMAP accounts.
+- Mailbox accounts are configured in `Settings -> Mail`.
+- Mail credentials are stored via the OS keychain; they are not embedded in reference data.
+- Active mail flow does not depend on Apple Mail folder scanning or AppleScript automation.
+- Sync is read-only.
+- Sync targets:
+  - the configured mailbox
+  - common sent-mail folders where available
+- The goal is to reconstruct usable conversation threads from both inbound and outbound mail.
+- Reference mail UX uses three stable sections:
+  - search/actions
+  - thread list
+  - content preview
+- Search runs against Subgrapher's local mail database, not a live mail client process.
+- Adding mail to a reference snapshots selected synced threads into that reference.
+- Mail preview should preserve human-readable structure:
+  - paragraph spacing
+  - sender/recipient headers
+  - quoted reply blocks
+  - mailbox/account metadata
+
 ## Local Evidence RAG
 - Local evidence retrieval is hybrid:
   - BM25 lexical score
@@ -140,6 +168,15 @@ Removed from renderer preload usage:
 - `browser:vizFrame`
 
 `browser:srOpenVizTab` remains deprecated guidance only (no new viz tab creation).
+
+Mail renderer/main contract now includes IMAP-backed local store operations:
+- `browser:mailListAccounts`
+- `browser:mailSaveAccount`
+- `browser:mailDeleteAccount`
+- `browser:mailSyncAccount`
+- `browser:mailSearchLocalThreads`
+- `browser:mailPreviewSource`
+- `browser:srAttachMailThreadsFromStore`
 
 ## Python Runtime + Packaging
 - Packaged apps use immutable runtime policy (no runtime `pip install`).

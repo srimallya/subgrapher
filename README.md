@@ -29,7 +29,7 @@ This implementation delivers:
   - old `viz` tab payloads are auto-mapped into markdown artifacts on load
   - dedicated viz tabs are deprecated
 - Workspace surfaces and tabs:
-  - `web`, `artifact`, `files`, `skills`
+  - `web`, `artifact`, `files`, `skills`, `mail`
   - URL-bar artifact commands: `/add`, `/create`, `/rename/<name>`, `/rm`
 - Reference graph lifecycle:
   - create root
@@ -45,6 +45,14 @@ This implementation delivers:
   - import local context files across the same supported extension set (text/code/docs/images)
   - Files preview renders mounted images directly; docs/binary files show extracted fragments + summaries
   - web crawler commands: `/crawl <url>`, `/crawl status`, `/crawl stop`
+- Mail runtime:
+  - read-only IMAP mailbox sync into a local Subgrapher mail database
+  - mailbox accounts are configured in `Settings -> Mail`
+  - synced mail is searched from the reference `mail` tab, not through Apple Mail automation
+  - sync currently indexes the configured mailbox plus common sent-mail folders so inbound and outbound messages can appear in the same thread
+  - mail tab layout is stable and fixed: search/actions on top, thread list in the middle, content preview below
+  - adding mail to a reference snapshots selected synced threads into that reference
+  - mail preview preserves readable paragraphs, headers, and quoted reply blocks where possible
 - Web research reliability:
   - shared web search path is used across Path A, Path B, and Telegram orchestration
   - fallback chain: DDG API -> DDG HTML -> Bing HTML parser
@@ -84,6 +92,7 @@ This implementation delivers:
   - Settings controls: `rag_enabled`, `rag_embedding_model`, `rag_top_k`, index status, and manual reindex for active workspace
 - Key/secret storage:
   - provider keys and secure refs are implemented via OS keychain on macOS
+  - mailbox passwords are stored in the OS keychain; they are not written to the reference store
 - Data-at-rest protection:
   - core reference/metadata stores are encrypted at rest (AES-256-GCM envelope)
   - plaintext legacy stores are migrated on read to encrypted format
@@ -163,6 +172,7 @@ For new users:
 
 - This is a clean standalone project, independent of `ttc_webapp` SaaS runtime.
 - Context files imported from mounted folders are read-only by default.
+- Mail sync is IMAP-based and local to Subgrapher's own database; Apple Mail folder scanning and AppleScript control are not part of the active mail path.
 - Multi-device sync is opt-in and identity-gated; users without Trust Commons identity remain local-only.
 - Use chat commands for direct workspace mutations:
   - `/artifact title: content`
@@ -186,6 +196,9 @@ For new users:
 - `runtime/file_indexer.js`: folder ingestion/indexing.
 - `runtime/lumino_crawler.js`: crawl and ingestion pipeline.
 - `runtime/keychain.js`: macOS keychain provider key storage.
+- `runtime/mail_imap.js`: read-only IMAP client used for mailbox sync.
+- `runtime/mail_store.js`: local mail database and thread search/export layer.
+- `runtime/mail_parser.js`: raw email parsing and body normalization.
 
 ## License
 

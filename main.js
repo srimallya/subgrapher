@@ -45,6 +45,9 @@ const { createOrchestratorSessionStore } = require('./runtime/orchestrator_sessi
 const { createOrchestratorUsersStore } = require('./runtime/orchestrator_users_store');
 const { createOrchestratorPreferencesStore } = require('./runtime/orchestrator_preferences_store');
 const { LUMINO_HTML_ARTIFACT_STYLE_GUIDE } = require('./runtime/lumino_html_artifact_style_guide');
+const { parseEmailFile } = require('./runtime/mail_local');
+const { computeMailConversationKey, parseRawEmailText } = require('./runtime/mail_parser');
+const { createMailStore } = require('./runtime/mail_store');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -106,6 +109,7 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'reference_ranking_enabled',
   'lumino_last_provider',
   'lumino_last_model',
+  'mail_sync_enabled',
   'hyperweb_enabled',
   'hyperweb_relay_url',
   'trustcommons_sync_enabled',
@@ -256,6 +260,7 @@ const abstractionRefreshInFlight = new Map(); // refId -> { promise, controller 
 const pythonSandboxManagers = new Map();
 let pythonRuntimeResolver = null;
 let secureSecretStore = null;
+let mailStore = null;
 let telegramService = null;
 let orchestratorJobsStore = null;
 let orchestratorScheduler = null;
@@ -557,6 +562,7 @@ function buildReferenceSnapshot(ref) {
     artifacts: Array.isArray(target.artifacts) ? target.artifacts : [],
     highlights: Array.isArray(target.highlights) ? target.highlights : [],
     context_files: Array.isArray(target.context_files) ? target.context_files : [],
+    mail_threads: Array.isArray(target.mail_threads) ? target.mail_threads : [],
     folder_mounts: Array.isArray(target.folder_mounts) ? target.folder_mounts : [],
     youtube_transcripts: (target.youtube_transcripts && typeof target.youtube_transcripts === 'object') ? target.youtube_transcripts : {},
     reference_graph: (target.reference_graph && typeof target.reference_graph === 'object') ? target.reference_graph : { nodes: [], edges: [] },
@@ -2110,6 +2116,20 @@ function openDefaultBrowserSettings() {
   }
   shell.openExternal('https://support.google.com/chrome/answer/95417');
   return { ok: true, opened: true, message: 'Opened default browser help instructions.' };
+}
+
+function openMailPrivacySettings() {
+  try {
+    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles');
+    return { ok: true };
+  } catch (_) {
+    try {
+      shell.openExternal('x-apple.systempreferences:com.apple.preference.security');
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: String((err && err.message) || 'Unable to open macOS Privacy settings.') };
+    }
+  }
 }
 
 function requestDefaultBrowser() {
@@ -4558,6 +4578,7 @@ function getDefaultSettings() {
     agent_mode_v1_enabled: false,
     lumino_last_provider: 'openai',
     lumino_last_model: '',
+    mail_sync_enabled: false,
     provider_key_profiles: defaultProviderKeyProfiles(),
     history_enabled: true,
     history_max_entries: HISTORY_DEFAULT_MAX_ENTRIES,
@@ -4661,6 +4682,9 @@ function readSettings() {
       agent_mode_v1_enabled: !!(parsed && parsed.agent_mode_v1_enabled),
       lumino_last_provider: PROVIDERS.includes(savedProvider) ? savedProvider : defaults.lumino_last_provider,
       lumino_last_model: savedModel,
+      mail_sync_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'mail_sync_enabled')
+        ? !!parsed.mail_sync_enabled
+        : defaults.mail_sync_enabled,
       provider_key_profiles: providerKeyProfiles,
       history_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'history_enabled')
         ? !!parsed.history_enabled
@@ -4905,6 +4929,9 @@ function writeSettings(next) {
       : !!current.agent_mode_v1_enabled,
     lumino_last_provider: PROVIDERS.includes(requestedLastProvider) ? requestedLastProvider : 'openai',
     lumino_last_model: requestedLastModel,
+    mail_sync_enabled: Object.prototype.hasOwnProperty.call(input, 'mail_sync_enabled')
+      ? !!input.mail_sync_enabled
+      : !!current.mail_sync_enabled,
     provider_key_profiles: requestedProviderKeyProfiles,
     history_enabled: Object.prototype.hasOwnProperty.call(input, 'history_enabled')
       ? !!input.history_enabled
@@ -5003,6 +5030,18 @@ function getSecureSecretStore() {
     });
   }
   return secureSecretStore;
+}
+
+function getMailStore() {
+  if (!mailStore) {
+    mailStore = createMailStore({
+      userDataPath: app.getPath('userData'),
+      getSecretByRef: getSecretValueByRef,
+      setSecret: setSecretValueByRef,
+      clearSecret: clearSecretValueByRef,
+    });
+  }
+  return mailStore;
 }
 
 function getSecretValueByRef(ref) {
@@ -10015,6 +10054,14 @@ function normalizeSyncedReferenceTabs(rawTabs = []) {
     if (kind === 'viz') {
       return null;
     }
+    if (kind === 'mail') {
+      return createMailTab({
+        id: String((tab && tab.id) || makeId('tab')),
+        title: String((tab && tab.title) || 'Mail'),
+        mail_view_state: (tab && typeof tab.mail_view_state === 'object') ? tab.mail_view_state : {},
+        updated_at: Number((tab && tab.updated_at) || nowTs()),
+      });
+    }
     if (kind === 'skills') {
       return createSkillsTab({
         id: String((tab && tab.id) || makeId('tab')),
@@ -10121,6 +10168,7 @@ function normalizeIncomingSyncedReference(raw, context = {}) {
         updated_at: nowTs(),
       }))
       : [],
+    mail_threads: Array.isArray(raw.mail_threads) ? raw.mail_threads.slice(0, 100) : [],
     folder_mounts: [],
     youtube_transcripts: sanitizeYouTubeTranscriptMap(raw.youtube_transcripts),
     reference_graph: (raw && typeof raw.reference_graph === 'object' && raw.reference_graph)
@@ -10706,6 +10754,25 @@ function createSkillsTab(seed = {}) {
   };
 }
 
+function createMailTab(seed = {}) {
+  const mailViewState = (seed.mail_view_state && typeof seed.mail_view_state === 'object')
+    ? seed.mail_view_state
+    : {};
+  return {
+    id: String(seed.id || makeId('tab')),
+    tab_kind: 'mail',
+    url: 'about:blank',
+    title: String(seed.title || 'Mail').slice(0, 120),
+    mail_view_state: {
+      query: String(mailViewState.query || '').trim(),
+      selected_thread_id: String(mailViewState.selected_thread_id || '').trim(),
+    },
+    snapshot_at: nowTs(),
+    last_active: nowTs(),
+    updated_at: Number(seed.updated_at || nowTs()),
+  };
+}
+
 function normalizeFilesViewState(input = {}) {
   const raw = (input && typeof input === 'object') ? input : {};
   const scope = String(raw.scope || 'all').trim().toLowerCase();
@@ -10812,6 +10879,137 @@ function ensureSingleSkillsTab(ref) {
   });
   firstSkillsTab.title = String(firstSkillsTab.title || 'Skills').slice(0, 120);
   return { tab: firstSkillsTab, created: false, deduped };
+}
+
+function ensureSingleMailTab(ref) {
+  if (!ref || typeof ref !== 'object') {
+    return { tab: null, created: false, deduped: false };
+  }
+
+  ref.tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
+  const firstMailTab = ref.tabs.find((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail') || null;
+  if (!firstMailTab) {
+    const created = createMailTab({});
+    ref.tabs.push(created);
+    return { tab: created, created: true, deduped: false };
+  }
+
+  let kept = false;
+  let deduped = false;
+  ref.tabs = ref.tabs.filter((tab) => {
+    const kind = String((tab && tab.tab_kind) || '').trim().toLowerCase();
+    if (kind !== 'mail') return true;
+    if (!kept && String((tab && tab.id) || '') === String(firstMailTab.id || '')) {
+      kept = true;
+      return true;
+    }
+    deduped = true;
+    return false;
+  });
+  firstMailTab.title = String(firstMailTab.title || 'Mail').slice(0, 120);
+  firstMailTab.mail_view_state = (firstMailTab.mail_view_state && typeof firstMailTab.mail_view_state === 'object')
+    ? {
+      query: String(firstMailTab.mail_view_state.query || '').trim(),
+      selected_thread_id: String(firstMailTab.mail_view_state.selected_thread_id || '').trim(),
+    }
+    : { query: '', selected_thread_id: '' };
+
+  return { tab: firstMailTab, created: false, deduped };
+}
+
+function getReferenceContextDir(srId) {
+  return path.join(app.getPath('userData'), 'semantic_references', String(srId || '').trim(), 'context_files');
+}
+
+function importBufferAsContextFile(ref, srId, fileName, buffer, options = {}) {
+  if (!ref || !srId || !Buffer.isBuffer(buffer)) return null;
+  ref.context_files = Array.isArray(ref.context_files) ? ref.context_files : [];
+  const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+  const existing = ref.context_files.find((file) => String((file && file.content_hash) || '') === hash);
+  if (existing) return existing;
+
+  const fileId = makeId('ctx');
+  const outDir = getReferenceContextDir(srId);
+  fs.mkdirSync(outDir, { recursive: true });
+  const safeName = path.basename(String(fileName || 'attachment').trim() || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const outPath = path.join(outDir, `${fileId}_${safeName}`);
+  fs.writeFileSync(outPath, buffer);
+
+  const ext = String(path.extname(safeName) || '').toLowerCase();
+  const mimeType = String((options && options.mime_type) || detectMimeType(ext, isTextExtension(ext)) || 'application/octet-stream').trim();
+  const extracted = extractContextTextFromBuffer(buffer, {
+    filePath: outPath,
+    filename: safeName,
+    ext,
+    mimeType,
+    maxChars: 8_000,
+  });
+  const summary = summarizeText(String((extracted && extracted.text) || ''), 560);
+  const item = {
+    id: fileId,
+    source_type: String((options && options.source_type) || 'mail_attachment').trim() || 'mail_attachment',
+    original_name: safeName,
+    relative_path: safeName,
+    stored_path: outPath,
+    mime_type: mimeType,
+    size_bytes: buffer.length,
+    content_hash: hash,
+    ingest_status: 'ready',
+    summary: summary || `${safeName} (${String(ext || '').replace(/^\./, '').toUpperCase() || 'FILE'})`,
+    extract_strategy: String((extracted && extracted.strategy) || ''),
+    read_only: false,
+    created_at: nowTs(),
+    updated_at: nowTs(),
+  };
+  ref.context_files.push(item);
+  return item;
+}
+
+function buildMailThreadFromParsedMessages(parsedMessages = [], options = {}) {
+  const items = Array.isArray(parsedMessages) ? parsedMessages.filter(Boolean) : [];
+  if (!items.length) return null;
+  const primary = items[0];
+  const thread = sanitizeMailThread({
+    id: String((options && options.id) || makeId('mailthread')),
+    source_kind: String((options && options.source_kind) || 'manual_import'),
+    source_thread_key: String((options && options.source_thread_key)
+      || computeMailConversationKey(primary)),
+    subject: primary.subject,
+    participants: Array.from(new Set(items.flatMap((item) => [item.from].concat(item.to || [], item.cc || [])).filter(Boolean))),
+    snippet: primary.snippet,
+    last_message_at: nowTs(),
+    imported_at: nowTs(),
+    updated_at: nowTs(),
+    messages: items.map((item) => ({
+      id: makeId('mailmsg'),
+      source_path: item.source_path,
+      source_key: item.source_key,
+      mail_message_id: String(item.mail_message_id || '').trim(),
+      account_name: String(item.account_name || '').trim(),
+      mailbox_name: String(item.mailbox_name || '').trim(),
+      message_id_header: item.message_id_header,
+      in_reply_to: item.in_reply_to,
+      references: item.references,
+      from: item.from,
+      to: item.to,
+      cc: item.cc,
+      bcc: item.bcc,
+      subject: item.subject,
+      sent_at: item.sent_at,
+      body_text: item.body_text,
+      body_html: item.body_html,
+      snippet: item.snippet,
+      attachments: Array.isArray(item.attachments) ? item.attachments.map((attachment) => ({
+        id: makeId('mailatt'),
+        file_name: attachment.file_name,
+        mime_type: attachment.mime_type,
+        size_bytes: Buffer.isBuffer(attachment.data) ? attachment.data.length : Number(attachment.size_bytes || 0),
+        source_path: item.source_path,
+        imported_context_file_id: '',
+      })) : [],
+    })),
+  });
+  return thread;
 }
 
 function normalizeArtifactType(value) {
@@ -10951,6 +11149,7 @@ function createReferenceBase(seed = {}) {
       content: '# Notes\n\nStart collecting findings here.',
     })],
     context_files: [],
+    mail_threads: [],
     folder_mounts: [],
     youtube_transcripts: {},
     reference_graph: { nodes: [], edges: [] },
@@ -11010,6 +11209,7 @@ function createForkReference(parent, seed = {}) {
     active_tab_id: tabs[0] ? tabs[0].id : null,
     artifacts,
     context_files: Array.isArray(parent.context_files) ? [...parent.context_files] : [],
+    mail_threads: Array.isArray(parent.mail_threads) ? deepClone(parent.mail_threads) : [],
     folder_mounts: Array.isArray(parent.folder_mounts) ? [...parent.folder_mounts] : [],
     youtube_transcripts: (parent.youtube_transcripts && typeof parent.youtube_transcripts === 'object') ? { ...parent.youtube_transcripts } : {},
     reference_graph: (parent.reference_graph && typeof parent.reference_graph === 'object') ? { ...parent.reference_graph } : { nodes: [], edges: [] },
@@ -11075,6 +11275,65 @@ function sanitizeHighlightEntry(item = {}) {
     web_end: Number.isFinite(webEnd) ? Math.max(0, Math.round(webEnd)) : null,
     created_at: Number((item && item.created_at) || nowTs()),
     updated_at: Number((item && item.updated_at) || nowTs()),
+  };
+}
+
+function sanitizeMailAttachment(item = {}) {
+  if (!item || typeof item !== 'object') return null;
+  return {
+    id: String(item.id || makeId('mailatt')).trim() || makeId('mailatt'),
+    file_name: String(item.file_name || 'attachment').slice(0, 240),
+    mime_type: String(item.mime_type || 'application/octet-stream').slice(0, 120),
+    size_bytes: Math.max(0, Math.round(Number(item.size_bytes || 0))),
+    source_path: String(item.source_path || '').slice(0, 2000),
+    imported_context_file_id: String(item.imported_context_file_id || '').trim(),
+  };
+}
+
+function sanitizeMailMessage(item = {}) {
+  if (!item || typeof item !== 'object') return null;
+  return {
+    id: String(item.id || makeId('mailmsg')).trim() || makeId('mailmsg'),
+    source_path: String(item.source_path || '').slice(0, 2000),
+    source_key: String(item.source_key || '').slice(0, 120),
+    mail_message_id: String(item.mail_message_id || '').slice(0, 80),
+    account_name: String(item.account_name || '').slice(0, 240),
+    mailbox_name: String(item.mailbox_name || '').slice(0, 240),
+    message_id_header: String(item.message_id_header || '').slice(0, 240),
+    in_reply_to: String(item.in_reply_to || '').slice(0, 240),
+    references: Array.isArray(item.references) ? item.references.map((entry) => String(entry || '').slice(0, 240)).filter(Boolean).slice(0, 80) : [],
+    from: String(item.from || '').slice(0, 400),
+    to: Array.isArray(item.to) ? item.to.map((entry) => String(entry || '').slice(0, 400)).filter(Boolean).slice(0, 80) : [],
+    cc: Array.isArray(item.cc) ? item.cc.map((entry) => String(entry || '').slice(0, 400)).filter(Boolean).slice(0, 80) : [],
+    bcc: Array.isArray(item.bcc) ? item.bcc.map((entry) => String(entry || '').slice(0, 400)).filter(Boolean).slice(0, 80) : [],
+    subject: String(item.subject || '').slice(0, 400),
+    sent_at: String(item.sent_at || '').slice(0, 120),
+    body_text: String(item.body_text || '').slice(0, 80_000),
+    body_html: String(item.body_html || '').slice(0, 80_000),
+    snippet: String(item.snippet || '').slice(0, 600),
+    attachments: Array.isArray(item.attachments) ? item.attachments.map((entry) => sanitizeMailAttachment(entry)).filter(Boolean).slice(0, 60) : [],
+  };
+}
+
+function sanitizeMailThread(item = {}) {
+  if (!item || typeof item !== 'object') return null;
+  const messages = Array.isArray(item.messages) ? item.messages.map((entry) => sanitizeMailMessage(entry)).filter(Boolean).slice(0, 200) : [];
+  const threadId = String(item.id || makeId('mailthread')).trim() || makeId('mailthread');
+  return {
+    id: threadId,
+    source_kind: String(item.source_kind || 'manual_import').trim().toLowerCase() || 'manual_import',
+    source_thread_key: String(item.source_thread_key || '').slice(0, 240),
+    subject: String(item.subject || ((messages[0] && messages[0].subject) || '')).slice(0, 400),
+    participants: Array.isArray(item.participants)
+      ? item.participants.map((entry) => String(entry || '').slice(0, 400)).filter(Boolean).slice(0, 120)
+      : [],
+    snippet: String(item.snippet || ((messages[0] && messages[0].snippet) || '')).slice(0, 600),
+    message_count: messages.length,
+    attachment_count: messages.reduce((acc, msg) => acc + (Array.isArray(msg.attachments) ? msg.attachments.length : 0), 0),
+    last_message_at: Number(item.last_message_at || nowTs()),
+    imported_at: Number(item.imported_at || nowTs()),
+    updated_at: Number(item.updated_at || nowTs()),
+    messages,
   };
 }
 
@@ -11641,6 +11900,12 @@ function getReferences() {
       }
     }
     ref.artifacts = normalizedArtifacts;
+    const rawMailThreads = Array.isArray(ref.mail_threads) ? ref.mail_threads : [];
+    const normalizedMailThreads = rawMailThreads.map((item) => sanitizeMailThread(item)).filter(Boolean).slice(0, 120);
+    if (JSON.stringify(rawMailThreads) !== JSON.stringify(normalizedMailThreads)) {
+      changed = true;
+    }
+    ref.mail_threads = normalizedMailThreads;
 
     const contextBefore = JSON.stringify(Array.isArray(ref.context_files) ? ref.context_files : []);
     pruneYouTubeTranscriptContextFiles(ref);
@@ -11667,6 +11932,13 @@ function getReferences() {
         changed = true;
       }
     }
+    const hasMailThreads = Array.isArray(ref && ref.mail_threads) && ref.mail_threads.length > 0;
+    if (hasMailThreads) {
+      const mailTabRes = ensureSingleMailTab(ref);
+      if (mailTabRes && (mailTabRes.created || mailTabRes.deduped)) {
+        changed = true;
+      }
+    }
   });
   if (changed) {
     writeReferencesRaw(refs);
@@ -11690,11 +11962,17 @@ function setReferences(refs, options = {}) {
     ref.artifacts = Array.isArray(ref.artifacts)
       ? ref.artifacts.slice(0, 80).map((artifact) => createArtifact(artifact))
       : [createArtifact({ type: 'markdown', title: 'Research Draft', content: '' })];
+    ref.mail_threads = Array.isArray(ref.mail_threads)
+      ? ref.mail_threads.map((item) => sanitizeMailThread(item)).filter(Boolean).slice(0, 120)
+      : [];
     ref.agent_meta = normalizeReferenceAgentMeta(ref.agent_meta);
     if (ref.abstraction_cache && typeof ref.abstraction_cache === 'object') {
       ref.abstraction_cache = normalizeAbstractionCache(ref.abstraction_cache, String(ref.id || '').trim());
     }
     pruneYouTubeTranscriptContextFiles(ref);
+    if (Array.isArray(ref.mail_threads) && ref.mail_threads.length > 0) {
+      ensureSingleMailTab(ref);
+    }
     if (!skipMemoryCapture) {
       capturePeriodicMemoryCheckpoints(ref);
     }
@@ -16554,6 +16832,17 @@ ipcMain.handle('browser:srAddTab', (_event, payload) => {
     return { ok: false, message: 'Unable to create skills tab.' };
   }
 
+  if (tabKind === 'mail') {
+    const mailRes = ensureSingleMailTab(refs[idx]);
+    if (mailRes && mailRes.tab) {
+      refs[idx].active_tab_id = mailRes.tab.id;
+      refs[idx].updated_at = nowTs();
+      setReferences(refs);
+      return { ok: true, tab: mailRes.tab, reference: refs[idx], references: refs, deduped: !mailRes.created };
+    }
+    return { ok: false, message: 'Unable to create mail tab.' };
+  }
+
   if (tabKind === 'files') {
     const filesRes = ensureFilesTab(refs[idx], tab);
     if (filesRes && filesRes.tab) {
@@ -17393,6 +17682,378 @@ ipcMain.handle('browser:srRemoveContextFile', async (_event, payload) => {
   queueReferenceAbstractionRefresh(srId, { force: true, restart: true }).catch(() => {});
 
   return { ok: true, removed_tab_ids, reference: refs[idx], references: refs };
+});
+
+function mailAttachmentIdentityKey(message = {}, attachment = {}) {
+  const sourceIdentity = String(
+    message.source_path
+    || message.message_id_header
+    || `${message.account_name || ''}:${message.mailbox_name || ''}:${message.mail_message_id || ''}`
+  ).trim();
+  return `${sourceIdentity}:${String((attachment && attachment.file_name) || '').trim()}`;
+}
+
+function parseMailSourceItem(source = {}) {
+  const sourcePath = String((source && source.source_path) || '').trim();
+  const rawSource = String((source && source.raw_source) || '');
+
+  let parsed = null;
+  if (rawSource) {
+    parsed = parseRawEmailText(rawSource, sourcePath);
+    parsed.mail_message_id = String((source && source.mail_message_id) || '').trim();
+    parsed.account_name = String((source && source.account_name) || '').trim();
+    parsed.mailbox_name = String((source && source.mailbox_name) || '').trim();
+    return parsed;
+  }
+
+  if (!sourcePath || !fs.existsSync(sourcePath)) return null;
+  parsed = parseEmailFile(sourcePath);
+  parsed.mail_message_id = '';
+  parsed.account_name = '';
+  parsed.mailbox_name = '';
+  return parsed;
+}
+
+function previewMailSourceItem(source = {}) {
+  const parsed = parseMailSourceItem(source);
+  if (!parsed) return null;
+  return sanitizeMailMessage({
+    source_path: parsed.source_path,
+    source_key: parsed.source_key,
+    mail_message_id: parsed.mail_message_id,
+    account_name: parsed.account_name,
+    mailbox_name: parsed.mailbox_name,
+    message_id_header: parsed.message_id_header,
+    in_reply_to: parsed.in_reply_to,
+    references: parsed.references,
+    from: parsed.from,
+    to: parsed.to,
+    cc: parsed.cc,
+    bcc: parsed.bcc,
+    subject: parsed.subject,
+    sent_at: parsed.sent_at,
+    body_text: parsed.body_text,
+    body_html: parsed.body_html,
+    snippet: parsed.snippet,
+    attachments: Array.isArray(parsed.attachments) ? parsed.attachments.map((attachment) => ({
+      file_name: attachment.file_name,
+      mime_type: attachment.mime_type,
+      size_bytes: Buffer.isBuffer(attachment.data) ? attachment.data.length : Number(attachment.size_bytes || 0),
+      source_path: parsed.source_path,
+      imported_context_file_id: '',
+    })) : [],
+  });
+}
+
+ipcMain.handle('browser:mailStatus', async () => {
+  const settings = readSettings();
+  const accounts = settings.mail_sync_enabled ? await getMailStore().listAccounts() : [];
+  return {
+    ok: true,
+    enabled: !!settings.mail_sync_enabled,
+    available: true,
+    root_path: '',
+    indexed_at: Math.max(0, ...accounts.map((item) => Number(item.last_sync_at || 0))),
+    files_scanned: 0,
+    error_code: '',
+    accounts,
+    preferred_accounts: accounts,
+    message: !settings.mail_sync_enabled
+      ? 'Mail sync is disabled.'
+      : `${accounts.length} mailbox account(s) configured.`,
+  };
+});
+
+ipcMain.handle('browser:mailSearchLocalThreads', async (_event, payload) => {
+  const settings = readSettings();
+  if (!settings.mail_sync_enabled) {
+    return { ok: true, items: [], total: 0, disabled: true, message: 'Mail sync is disabled in settings.' };
+  }
+  const res = await getMailStore().searchThreads({
+    query: String((payload && payload.query) || '').trim(),
+    limit: Number((payload && payload.limit) || 40),
+  });
+  return {
+    ...res,
+    available: true,
+    disabled: false,
+    message: '',
+  };
+});
+
+ipcMain.handle('browser:mailPreviewSource', async (_event, payload) => {
+  try {
+    const threadId = String((payload && payload.threadId) || '').trim();
+    if (!threadId) return { ok: false, message: 'threadId is required.' };
+    return getMailStore().getThread(threadId);
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to load thread.') };
+  }
+});
+
+ipcMain.handle('browser:openMailPrivacySettings', () => ({ ok: false, message: 'Mail privacy settings are not used for IMAP sync.' }));
+
+ipcMain.handle('browser:mailListAccounts', async () => {
+  return { ok: true, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailSaveAccount', async (_event, payload) => {
+  const res = await getMailStore().saveAccount(payload || {});
+  if (!res || !res.ok) return res;
+  return { ok: true, account: res.account, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailDeleteAccount', async (_event, payload) => {
+  const res = await getMailStore().deleteAccount(String((payload && payload.accountId) || '').trim());
+  if (!res || !res.ok) return res;
+  return { ok: true, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailSyncAccount', async (_event, payload) => {
+  const res = await getMailStore().syncAccount(String((payload && payload.accountId) || '').trim());
+  return {
+    ...res,
+    accounts: await getMailStore().listAccounts(),
+  };
+});
+
+async function attachMailSourcesToReference(srId, sourceItems = [], options = {}) {
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, srId);
+  if (idx < 0) return { ok: false, message: 'Reference not found.' };
+  if (!Array.isArray(sourceItems) || sourceItems.length === 0) {
+    return { ok: false, message: 'No mail sources provided.' };
+  }
+
+  refs[idx].mail_threads = Array.isArray(refs[idx].mail_threads) ? refs[idx].mail_threads : [];
+  refs[idx].context_files = Array.isArray(refs[idx].context_files) ? refs[idx].context_files : [];
+
+  const parsedByThread = new Map();
+  sourceItems.forEach((source) => {
+    try {
+      const parsed = parseMailSourceItem(source);
+      if (!parsed) return;
+      const key = String(
+        computeMailConversationKey(parsed, String((source && source.account_name) || '').trim().toLowerCase())
+      ).trim() || crypto.createHash('sha1').update(JSON.stringify(source || {})).digest('hex');
+      const bucket = parsedByThread.get(key) || [];
+      bucket.push(parsed);
+      parsedByThread.set(key, bucket);
+    } catch (_) {
+      // Ignore unreadable messages.
+    }
+  });
+
+  const importedThreads = [];
+  parsedByThread.forEach((messages, threadKey) => {
+    const thread = buildMailThreadFromParsedMessages(messages, {
+      source_kind: String((options && options.source_kind) || 'apple_mail_local'),
+      source_thread_key: threadKey,
+    });
+    if (!thread) return;
+    thread.messages.forEach((message, msgIndex) => {
+      const parsed = messages[msgIndex];
+      const attachments = Array.isArray(parsed && parsed.attachments) ? parsed.attachments : [];
+      message.attachments = message.attachments.map((attachment, attIndex) => {
+        const rawAttachment = attachments[attIndex];
+        if (!rawAttachment || !Buffer.isBuffer(rawAttachment.data)) return attachment;
+        const imported = importBufferAsContextFile(
+          refs[idx],
+          srId,
+          attachment.file_name,
+          rawAttachment.data,
+          { mime_type: attachment.mime_type, source_type: 'mail_attachment' },
+        );
+        return {
+          ...attachment,
+          imported_context_file_id: String((imported && imported.id) || '').trim(),
+        };
+      });
+    });
+    const existingIdx = refs[idx].mail_threads.findIndex((item) => String((item && item.source_thread_key) || '') === String(thread.source_thread_key || ''));
+    if (existingIdx >= 0) refs[idx].mail_threads[existingIdx] = thread;
+    else refs[idx].mail_threads.push(thread);
+    importedThreads.push(thread);
+  });
+
+  const mailTabRes = ensureSingleMailTab(refs[idx]);
+  refs[idx].active_tab_id = mailTabRes && mailTabRes.tab ? mailTabRes.tab.id : refs[idx].active_tab_id;
+  refs[idx].updated_at = nowTs();
+  setReferences(refs);
+
+  return {
+    ok: true,
+    imported_threads: importedThreads,
+    tab: mailTabRes && mailTabRes.tab ? mailTabRes.tab : null,
+    reference: refs[idx],
+    references: refs,
+  };
+}
+
+function syncAppleMailThreadsInReference(ref, srId) {
+  if (!ref || typeof ref !== 'object') return false;
+  ref.mail_threads = Array.isArray(ref.mail_threads) ? ref.mail_threads : [];
+  let changed = false;
+  const nextThreads = [];
+
+  ref.mail_threads.forEach((thread) => {
+    const current = sanitizeMailThread(thread);
+    if (!current) {
+      changed = true;
+      return;
+    }
+    if (!['apple_mail_local', 'apple_mail_live'].includes(String(current.source_kind || ''))) {
+      nextThreads.push(current);
+      return;
+    }
+
+    const importedAttachmentMap = new Map();
+    (Array.isArray(current.messages) ? current.messages : []).forEach((message) => {
+      (Array.isArray(message.attachments) ? message.attachments : []).forEach((attachment) => {
+        const key = mailAttachmentIdentityKey(message, attachment);
+        importedAttachmentMap.set(key, String((attachment && attachment.imported_context_file_id) || '').trim());
+      });
+    });
+
+    const reparsed = [];
+    (Array.isArray(current.messages) ? current.messages : []).forEach((message) => {
+      const sourcePath = String((message && message.source_path) || '').trim();
+      try {
+        if (String(current.source_kind || '') === 'apple_mail_live') {
+          const parsed = parseMailSourceItem({
+            mail_message_id: message.mail_message_id,
+            account_name: message.account_name,
+            mailbox_name: message.mailbox_name,
+          });
+          if (!parsed) {
+            changed = true;
+            return;
+          }
+          reparsed.push(parsed);
+          return;
+        }
+        if (!sourcePath || !fs.existsSync(sourcePath)) {
+          changed = true;
+          return;
+        }
+        reparsed.push(parseEmailFile(sourcePath));
+      } catch (_) {
+        changed = true;
+      }
+    });
+
+    if (!reparsed.length) {
+      changed = true;
+      return;
+    }
+
+    const rebuilt = buildMailThreadFromParsedMessages(reparsed, {
+      id: current.id,
+      source_kind: current.source_kind,
+      source_thread_key: current.source_thread_key,
+    });
+    if (!rebuilt) {
+      changed = true;
+      return;
+    }
+    rebuilt.messages.forEach((message) => {
+      message.attachments = (Array.isArray(message.attachments) ? message.attachments : []).map((attachment) => {
+        const key = mailAttachmentIdentityKey(message, attachment);
+        return {
+          ...attachment,
+          imported_context_file_id: importedAttachmentMap.get(key) || '',
+        };
+      });
+    });
+    if (JSON.stringify(rebuilt) !== JSON.stringify(current)) changed = true;
+    nextThreads.push(rebuilt);
+  });
+
+  if (changed) {
+    ref.mail_threads = nextThreads;
+    ref.updated_at = nowTs();
+  }
+  return changed;
+}
+
+ipcMain.handle('browser:srListMailThreads', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, srId);
+  if (idx < 0) return { ok: false, message: 'Reference not found.' };
+  const didChange = syncAppleMailThreadsInReference(refs[idx], srId);
+  if (didChange) setReferences(refs);
+  return {
+    ok: true,
+    threads: Array.isArray(refs[idx].mail_threads) ? refs[idx].mail_threads : [],
+  };
+});
+
+ipcMain.handle('browser:srGetMailThread', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const threadId = String((payload && payload.threadId) || '').trim();
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, srId);
+  if (idx < 0) return { ok: false, message: 'Reference not found.' };
+  const threads = Array.isArray(refs[idx].mail_threads) ? refs[idx].mail_threads : [];
+  const thread = threads.find((item) => String((item && item.id) || '') === threadId);
+  if (!thread) return { ok: false, message: 'Mail thread not found.' };
+  return { ok: true, thread };
+});
+
+ipcMain.handle('browser:srImportMailFiles', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, srId);
+  if (idx < 0) return { ok: false, message: 'Reference not found.' };
+
+  let paths = Array.isArray(payload && payload.absolutePaths)
+    ? payload.absolutePaths.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  if (!paths.length) {
+    const pick = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import mail files',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Mail Files', extensions: ['eml', 'emlx'] }],
+    });
+    if (pick.canceled || !Array.isArray(pick.filePaths) || !pick.filePaths.length) {
+      return { ok: false, canceled: true, message: 'Mail import canceled.' };
+    }
+    paths = pick.filePaths.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  const sources = paths.map((filePath) => ({
+    source_path: filePath,
+    source_id: crypto.createHash('sha1').update(filePath).digest('hex'),
+  }));
+  return attachMailSourcesToReference(srId, sources, { source_kind: 'manual_import' });
+});
+
+ipcMain.handle('browser:srAttachMailThreads', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const sourceItems = Array.isArray(payload && payload.sources) ? payload.sources : [];
+  return attachMailSourcesToReference(srId, sourceItems, {
+    source_kind: String((payload && payload.source_kind) || 'apple_mail_local'),
+  });
+});
+
+ipcMain.handle('browser:srAttachMailThreadsFromStore', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const threadIds = Array.isArray(payload && payload.thread_ids) ? payload.thread_ids : [];
+  const exportedThreads = await getMailStore().exportThreads(threadIds);
+  const sources = [];
+  exportedThreads.forEach((thread) => {
+    (Array.isArray(thread && thread.messages) ? thread.messages : []).forEach((message) => {
+      sources.push({
+        raw_source: String((message && message.raw_source) || ''),
+        account_name: String((message && message.account_name) || '').trim(),
+        mailbox_name: String((message && message.mailbox_name) || '').trim(),
+        mail_message_id: String((message && message.mail_message_id) || '').trim(),
+      });
+    });
+  });
+  return attachMailSourcesToReference(srId, sources, {
+    source_kind: 'imap_sync',
+  });
 });
 
 ipcMain.handle('browser:srGetProgram', (_event, payload) => {
