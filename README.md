@@ -70,6 +70,10 @@ This implementation delivers:
     - archive thread when provider capabilities allow it
     - move thread to trash
     - attach selected synced threads into the active reference
+    - reference mail attach flow is two-step:
+      - select one or more synced threads in the full list
+      - `Add Selected` attaches that set to the active reference and switches the tab into an attached-thread review view
+      - `Back` returns to the full list while preserving the current attached selection so more threads can be added and attached again
   - mail layouts are fixed and practical:
     - reference mail tab: search/actions, thread list, content preview
     - global Mail page: account/folder nav, thread list, content preview, composer

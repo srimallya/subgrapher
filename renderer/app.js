@@ -5299,8 +5299,7 @@ async function renderMailPanel() {
       <button id="mail-search-btn">Search</button>
       <button id="mail-refresh-btn">Refresh</button>
       ${selectionMode ? '<button id="mail-back-btn">Back</button>' : ''}
-      ${selectedThreadIds.length > 0 && !selectionMode ? '<button id="mail-attach-btn">Add Selected</button>' : ''}
-      ${selectionMode ? '<button id="mail-confirm-attach-btn">Attach Selected</button>' : ''}
+      ${selectedThreadIds.length > 0 ? '<button id="mail-attach-btn">Add Selected</button>' : ''}
       <button id="mail-compose-open-btn">Compose</button>
       ${previewState && previewState.thread ? '<button id="mail-reply-btn">Reply</button>' : ''}
       ${previewState && previewState.thread && previewState.thread.capabilities && previewState.thread.capabilities.supports_archive ? '<button id="mail-archive-btn">Archive</button>' : ''}
@@ -5388,16 +5387,6 @@ async function renderMailPanel() {
       showPassiveNotification('Select at least one mail thread to add.');
       return;
     }
-    setMailSelectedView(state.activeSrId, true);
-    setMailPreviewState(state.activeSrId, null);
-    await renderMailPanel();
-  });
-  e('mail-confirm-attach-btn')?.addEventListener('click', async () => {
-    const chosenThreadIds = getSelectedMailThreadIds(state.activeSrId, results);
-    if (!chosenThreadIds.length) {
-      showPassiveNotification('Select at least one mail thread to attach.');
-      return;
-    }
     const res = await api.srAttachMailThreadsFromStore(state.activeSrId, chosenThreadIds);
     if (!res || !res.ok) {
       window.alert((res && res.message) || 'Unable to attach mail threads.');
@@ -5408,7 +5397,7 @@ async function renderMailPanel() {
       state.activeSurface = makeActiveSurface('mail', { mailTabId: String(res.tab.id || '').trim() });
       rememberSurfaceForReference(state.activeSrId, state.activeSurface);
     }
-    clearMailSelection(state.activeSrId);
+    setMailSelectedView(state.activeSrId, true);
     setMailPreviewState(state.activeSrId, null);
     renderReferences();
     renderWorkspaceTabs();

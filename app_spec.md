@@ -169,6 +169,10 @@ Migration is idempotent and safe to run repeatedly.
   - archive when provider capabilities allow it
   - move thread to trash
   - attach selected synced threads into the active reference
+  - reference mail attach flow:
+    - user selects one or more synced threads in the full thread list
+    - `Add Selected` attaches that set to the active reference and switches the reference mail tab into an attached-thread review view
+    - `Back` returns to the full thread list without discarding the current attached selection, so the user can extend the set and attach again
 - Search runs against Subgrapher's local mail database, not a live mail client process.
 - Legacy local mail databases are not migrated forward; when the mail schema changes, Subgrapher resets `mail_store.sqlite` and rebuilds it from a fresh sync.
 - Mail preview should preserve human-readable structure:
