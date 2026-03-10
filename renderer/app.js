@@ -10143,17 +10143,34 @@ function bindControls() {
     runBrowserImport('safari', 'settings-status-line');
   });
 
-  e('settings-mail-account-save-btn')?.addEventListener('click', async () => {
+  e('settings-mail-account-save-btn')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const saveBtn = e('settings-mail-account-save-btn');
+    const label = String((e('settings-mail-account-label') && e('settings-mail-account-label').value) || '').trim();
+    const email = String((e('settings-mail-account-email') && e('settings-mail-account-email').value) || '').trim();
+    const host = String((e('settings-mail-account-host') && e('settings-mail-account-host').value) || '').trim();
+    const username = String((e('settings-mail-account-username') && e('settings-mail-account-username').value) || '').trim();
+    const password = String((e('settings-mail-account-password') && e('settings-mail-account-password').value) || '');
+    if (!label || !email || !host || !username || !password) {
+      state.settingsSaveState = 'Label, email, IMAP host, username, and password are required.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const priorLabel = saveBtn ? saveBtn.textContent : '';
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving...';
+    }
     const payload = {
       account_type: 'manual_imap_smtp',
       provider: (e('settings-mail-account-provider') && e('settings-mail-account-provider').value) || 'generic',
-      label: (e('settings-mail-account-label') && e('settings-mail-account-label').value) || '',
-      email: (e('settings-mail-account-email') && e('settings-mail-account-email').value) || '',
-      host: (e('settings-mail-account-host') && e('settings-mail-account-host').value) || '',
+      label,
+      email,
+      host,
       port: Number((e('settings-mail-account-port') && e('settings-mail-account-port').value) || 993),
-      username: (e('settings-mail-account-username') && e('settings-mail-account-username').value) || '',
+      username,
       mailbox: (e('settings-mail-account-mailbox') && e('settings-mail-account-mailbox').value) || 'INBOX',
-      password: (e('settings-mail-account-password') && e('settings-mail-account-password').value) || '',
+      password,
       smtp_host: (e('settings-mail-account-smtp-host') && e('settings-mail-account-smtp-host').value) || '',
       smtp_port: Number((e('settings-mail-account-smtp-port') && e('settings-mail-account-smtp-port').value) || 465),
       smtp_username: (e('settings-mail-account-smtp-username') && e('settings-mail-account-smtp-username').value) || '',
@@ -10162,17 +10179,28 @@ function bindControls() {
       smtp_use_tls: !!(e('settings-mail-account-smtp-tls') && e('settings-mail-account-smtp-tls').checked),
       smtp_starttls: !!(e('settings-mail-account-smtp-starttls') && e('settings-mail-account-smtp-starttls').checked),
     };
-    const res = await api.mailSaveAccount(payload);
-    if (!res || !res.ok) {
-      state.settingsSaveState = (res && res.message) || 'Unable to save mailbox account.';
+    try {
+      const res = await api.mailSaveAccount(payload);
+      if (!res || !res.ok) {
+        state.settingsSaveState = (res && res.message) || 'Unable to save mailbox account.';
+        renderSettingsStatusLine();
+        return;
+      }
+      resetMailAccountForm();
+      state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
+      state.settingsSaveState = 'Mailbox saved.';
       renderSettingsStatusLine();
-      return;
+      await refreshMailAccounts();
+      await refreshMailStatus();
+    } catch (_) {
+      state.settingsSaveState = 'Unable to save mailbox account.';
+      renderSettingsStatusLine();
+    } finally {
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = priorLabel || 'Add Mail Account';
+      }
     }
-    resetMailAccountForm();
-    state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
-    state.settingsSaveState = 'Mailbox saved.';
-    await refreshMailAccounts();
-    await refreshMailStatus();
   });
 
   e('settings-mail-google-connect-btn')?.addEventListener('click', async () => {
