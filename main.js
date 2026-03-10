@@ -17684,6 +17684,328 @@ ipcMain.handle('browser:srRemoveContextFile', async (_event, payload) => {
   return { ok: true, removed_tab_ids, reference: refs[idx], references: refs };
 });
 
+function sanitizeMailMessage(message = {}) {
+  return {
+    id: String(message.id || makeId('mailmsg')).trim(),
+    source_path: String(message.source_path || '').trim(),
+    source_key: String(message.source_key || '').trim(),
+    mail_message_id: String(message.mail_message_id || '').trim(),
+    account_name: String(message.account_name || '').trim(),
+    mailbox_name: String(message.mailbox_name || '').trim(),
+    message_id_header: String(message.message_id_header || '').trim(),
+    in_reply_to: String(message.in_reply_to || '').trim(),
+    references: Array.isArray(message.references) ? message.references.map((item) => String(item || '').trim()).filter(Boolean) : [],
+    from: String(message.from || '').trim(),
+    to: Array.isArray(message.to) ? message.to.map((item) => String(item || '').trim()).filter(Boolean) : [],
+    cc: Array.isArray(message.cc) ? message.cc.map((item) => String(item || '').trim()).filter(Boolean) : [],
+    bcc: Array.isArray(message.bcc) ? message.bcc.map((item) => String(item || '').trim()).filter(Boolean) : [],
+    subject: String(message.subject || '').trim(),
+    sent_at: String(message.sent_at || '').trim(),
+    body_text: String(message.body_text || ''),
+    body_html: String(message.body_html || ''),
+    snippet: String(message.snippet || '').trim(),
+    attachments: Array.isArray(message.attachments) ? message.attachments.map((attachment) => ({
+      id: String((attachment && attachment.id) || makeId('mailatt')).trim(),
+      file_name: String((attachment && attachment.file_name) || 'attachment').trim(),
+      mime_type: String((attachment && attachment.mime_type) || 'application/octet-stream').trim(),
+      size_bytes: Math.max(0, Number((attachment && attachment.size_bytes) || 0)),
+      source_path: String((attachment && attachment.source_path) || '').trim(),
+      imported_context_file_id: String((attachment && attachment.imported_context_file_id) || '').trim(),
+    })) : [],
+  };
+}
+
+function sanitizeMailThread(thread = {}) {
+  return {
+    id: String(thread.id || makeId('mailthread')).trim(),
+    source_kind: String(thread.source_kind || 'manual_import').trim(),
+    source_thread_key: String(thread.source_thread_key || '').trim(),
+    subject: String(thread.subject || '').trim(),
+    participants: Array.isArray(thread.participants) ? thread.participants.map((item) => String(item || '').trim()).filter(Boolean) : [],
+    snippet: String(thread.snippet || '').trim(),
+    last_message_at: Number(thread.last_message_at || nowTs()),
+    imported_at: Number(thread.imported_at || nowTs()),
+    updated_at: Number(thread.updated_at || nowTs()),
+    messages: Array.isArray(thread.messages) ? thread.messages.map((item) => sanitizeMailMessage(item)) : [],
+  };
+}
+
+function mailAttachmentIdentityKey(message = {}, attachment = {}) {
+  const sourceIdentity = String(
+    message.source_path
+    || message.message_id_header
+    || `${message.account_name || ''}:${message.mailbox_name || ''}:${message.mail_message_id || ''}`
+  ).trim();
+  return `${sourceIdentity}:${String((attachment && attachment.file_name) || '').trim()}`;
+}
+
+function parseMailSourceItem(source = {}) {
+  const sourcePath = String((source && source.source_path) || '').trim();
+  const rawSource = String((source && source.raw_source) || '');
+
+  let parsed = null;
+  if (rawSource) {
+    parsed = parseRawEmailText(rawSource, sourcePath);
+    parsed.mail_message_id = String((source && source.mail_message_id) || '').trim();
+    parsed.account_name = String((source && source.account_name) || '').trim();
+    parsed.mailbox_name = String((source && source.mailbox_name) || '').trim();
+    return parsed;
+  }
+
+  if (!sourcePath || !fs.existsSync(sourcePath)) return null;
+  parsed = parseEmailFile(sourcePath);
+  parsed.mail_message_id = '';
+  parsed.account_name = '';
+  parsed.mailbox_name = '';
+  return parsed;
+}
+
+function buildMailThreadFromParsedMessages(parsedMessages = [], options = {}) {
+  const items = Array.isArray(parsedMessages) ? parsedMessages.filter(Boolean) : [];
+  if (!items.length) return null;
+  const primary = items[0];
+  return sanitizeMailThread({
+    id: String((options && options.id) || makeId('mailthread')),
+    source_kind: String((options && options.source_kind) || 'manual_import'),
+    source_thread_key: String((options && options.source_thread_key) || computeMailConversationKey(primary)),
+    subject: primary.subject,
+    participants: Array.from(new Set(items.flatMap((item) => [item.from].concat(item.to || [], item.cc || [])).filter(Boolean))),
+    snippet: primary.snippet,
+    last_message_at: nowTs(),
+    imported_at: nowTs(),
+    updated_at: nowTs(),
+    messages: items.map((item) => ({
+      id: makeId('mailmsg'),
+      source_path: item.source_path,
+      source_key: item.source_key,
+      mail_message_id: String(item.mail_message_id || '').trim(),
+      account_name: String(item.account_name || '').trim(),
+      mailbox_name: String(item.mailbox_name || '').trim(),
+      message_id_header: item.message_id_header,
+      in_reply_to: item.in_reply_to,
+      references: item.references,
+      from: item.from,
+      to: item.to,
+      cc: item.cc,
+      bcc: item.bcc,
+      subject: item.subject,
+      sent_at: item.sent_at,
+      body_text: item.body_text,
+      body_html: item.body_html,
+      snippet: item.snippet,
+      attachments: Array.isArray(item.attachments) ? item.attachments.map((attachment) => ({
+        id: makeId('mailatt'),
+        file_name: attachment.file_name,
+        mime_type: attachment.mime_type,
+        size_bytes: Buffer.isBuffer(attachment.data) ? attachment.data.length : Number(attachment.size_bytes || 0),
+        source_path: item.source_path,
+        imported_context_file_id: '',
+      })) : [],
+    })),
+  });
+}
+
+async function attachMailSourcesToReference(srId, sourceItems = [], options = {}) {
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, srId);
+  if (idx < 0) return { ok: false, message: 'Reference not found.' };
+  if (!Array.isArray(sourceItems) || sourceItems.length === 0) {
+    return { ok: false, message: 'No mail sources provided.' };
+  }
+
+  refs[idx].mail_threads = Array.isArray(refs[idx].mail_threads) ? refs[idx].mail_threads : [];
+  refs[idx].context_files = Array.isArray(refs[idx].context_files) ? refs[idx].context_files : [];
+
+  const parsedByThread = new Map();
+  sourceItems.forEach((source) => {
+    try {
+      const parsed = parseMailSourceItem(source);
+      if (!parsed) return;
+      const key = String(
+        computeMailConversationKey(parsed, String((source && source.account_name) || '').trim().toLowerCase())
+      ).trim() || crypto.createHash('sha1').update(JSON.stringify(source || {})).digest('hex');
+      const bucket = parsedByThread.get(key) || [];
+      bucket.push(parsed);
+      parsedByThread.set(key, bucket);
+    } catch (_) {
+      // Ignore unreadable messages.
+    }
+  });
+
+  const importedThreads = [];
+  parsedByThread.forEach((messages, threadKey) => {
+    const thread = buildMailThreadFromParsedMessages(messages, {
+      source_kind: String((options && options.source_kind) || 'manual_import'),
+      source_thread_key: threadKey,
+    });
+    if (!thread) return;
+    thread.messages.forEach((message, msgIndex) => {
+      const parsed = messages[msgIndex];
+      const attachments = Array.isArray(parsed && parsed.attachments) ? parsed.attachments : [];
+      message.attachments = message.attachments.map((attachment, attIndex) => {
+        const rawAttachment = attachments[attIndex];
+        if (!rawAttachment || !Buffer.isBuffer(rawAttachment.data)) return attachment;
+        const imported = importBufferAsContextFile(
+          refs[idx],
+          srId,
+          attachment.file_name,
+          rawAttachment.data,
+          { mime_type: attachment.mime_type, source_type: 'mail_attachment' },
+        );
+        return {
+          ...attachment,
+          imported_context_file_id: String((imported && imported.id) || '').trim(),
+        };
+      });
+    });
+    const existingIdx = refs[idx].mail_threads.findIndex((item) => String((item && item.source_thread_key) || '') === String(thread.source_thread_key || ''));
+    if (existingIdx >= 0) refs[idx].mail_threads[existingIdx] = thread;
+    else refs[idx].mail_threads.push(thread);
+    importedThreads.push(thread);
+  });
+
+  const mailTabRes = ensureSingleMailTab(refs[idx], { title: 'Mail' });
+  refs[idx].active_tab_id = mailTabRes && mailTabRes.tab ? mailTabRes.tab.id : refs[idx].active_tab_id;
+  refs[idx].updated_at = nowTs();
+  setReferences(refs);
+
+  return {
+    ok: true,
+    imported_threads: importedThreads,
+    tab: mailTabRes && mailTabRes.tab ? mailTabRes.tab : null,
+    reference: refs[idx],
+    references: refs,
+  };
+}
+
+ipcMain.handle('browser:srListMailThreads', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, srId);
+  if (idx < 0) return { ok: false, message: 'Reference not found.' };
+  return {
+    ok: true,
+    threads: Array.isArray(refs[idx].mail_threads) ? refs[idx].mail_threads.map((item) => sanitizeMailThread(item)) : [],
+  };
+});
+
+ipcMain.handle('browser:srGetMailThread', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const threadId = String((payload && payload.threadId) || '').trim();
+  const refs = getReferences();
+  const idx = findReferenceIndex(refs, srId);
+  if (idx < 0) return { ok: false, message: 'Reference not found.' };
+  const thread = (Array.isArray(refs[idx].mail_threads) ? refs[idx].mail_threads : []).find((item) => String((item && item.id) || '') === threadId);
+  if (!thread) return { ok: false, message: 'Mail thread not found.' };
+  return { ok: true, thread: sanitizeMailThread(thread) };
+});
+
+ipcMain.handle('browser:srAttachMailThreads', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const sourceItems = Array.isArray(payload && payload.sources) ? payload.sources : [];
+  return attachMailSourcesToReference(srId, sourceItems, {
+    source_kind: String((payload && payload.source_kind) || 'manual_import'),
+  });
+});
+
+ipcMain.handle('browser:srAttachMailThreadsFromStore', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  const threadIds = Array.isArray(payload && payload.thread_ids) ? payload.thread_ids : [];
+  const exportedThreads = await getMailStore().exportThreads(threadIds);
+  const sources = [];
+  exportedThreads.forEach((thread) => {
+    (Array.isArray(thread && thread.messages) ? thread.messages : []).forEach((message) => {
+      sources.push({
+        raw_source: String((message && message.raw_source) || ''),
+        account_name: String((message && message.account_name) || '').trim(),
+        mailbox_name: String((message && message.mailbox_name) || '').trim(),
+        mail_message_id: String((message && message.mail_message_id) || '').trim(),
+      });
+    });
+  });
+  return attachMailSourcesToReference(srId, sources, {
+    source_kind: 'imap_sync',
+  });
+});
+
+ipcMain.handle('browser:mailStatus', async () => {
+  const settings = readSettings();
+  const accounts = settings.mail_sync_enabled ? await getMailStore().listAccounts() : [];
+  return {
+    ok: true,
+    enabled: !!settings.mail_sync_enabled,
+    available: true,
+    root_path: '',
+    indexed_at: Math.max(0, ...accounts.map((item) => Number(item.last_sync_at || 0))),
+    files_scanned: 0,
+    error_code: '',
+    accounts,
+    preferred_accounts: accounts,
+    message: !settings.mail_sync_enabled
+      ? 'Mail sync is disabled.'
+      : `${accounts.length} mailbox account(s) configured.`,
+  };
+});
+
+ipcMain.handle('browser:mailSearchLocalThreads', async (_event, payload) => {
+  const settings = readSettings();
+  if (!settings.mail_sync_enabled) {
+    return { ok: true, items: [], total: 0, disabled: true, message: 'Mail sync is disabled in settings.' };
+  }
+  const res = await getMailStore().searchThreads({
+    query: String((payload && payload.query) || '').trim(),
+    limit: Number((payload && payload.limit) || 40),
+  });
+  return {
+    ...res,
+    available: true,
+    disabled: false,
+    message: '',
+  };
+});
+
+ipcMain.handle('browser:mailPreviewSource', async (_event, payload) => {
+  try {
+    const threadId = String((payload && payload.threadId) || '').trim();
+    if (!threadId) return { ok: false, message: 'threadId is required.' };
+    return getMailStore().getThread(threadId);
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to load thread.') };
+  }
+});
+
+ipcMain.handle('browser:mailListAccounts', async () => {
+  return { ok: true, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailSaveAccount', async (_event, payload) => {
+  const res = await getMailStore().saveAccount(payload || {});
+  if (!res || !res.ok) return res;
+  return { ok: true, account: res.account, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailDeleteAccount', async (_event, payload) => {
+  const res = await getMailStore().deleteAccount(String((payload && payload.accountId) || '').trim());
+  if (!res || !res.ok) return res;
+  return { ok: true, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailSendMessage', async (_event, payload) => {
+  const accountId = String((payload && payload.accountId) || '').trim();
+  const message = (payload && payload.message && typeof payload.message === 'object') ? payload.message : {};
+  const res = await getMailStore().sendMail(accountId, message);
+  if (!res || !res.ok) return res;
+  return { ok: true, result: res, accounts: await getMailStore().listAccounts() };
+});
+
+ipcMain.handle('browser:mailSyncAccount', async (_event, payload) => {
+  const res = await getMailStore().syncAccount(String((payload && payload.accountId) || '').trim());
+  return {
+    ...res,
+    accounts: await getMailStore().listAccounts(),
+  };
+});
+
 function mailAttachmentIdentityKey(message = {}, attachment = {}) {
   const sourceIdentity = String(
     message.source_path
