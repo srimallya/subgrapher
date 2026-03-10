@@ -479,11 +479,37 @@
           <label class="settings-field">Password / App Password
             <input id="settings-mail-account-password" type="password" placeholder="Stored securely" />
           </label>
+          <label class="settings-field">SMTP Host
+            <input id="settings-mail-account-smtp-host" type="text" placeholder="smtp.example.com" />
+          </label>
+          <label class="settings-field">SMTP Port
+            <input id="settings-mail-account-smtp-port" type="number" value="465" />
+          </label>
+          <label class="settings-field">SMTP Username
+            <input id="settings-mail-account-smtp-username" type="text" placeholder="SMTP username" />
+          </label>
+          <label class="settings-field">SMTP Password / App Password
+            <input id="settings-mail-account-smtp-password" type="password" placeholder="Stored securely" />
+          </label>
           <label class="settings-field settings-boolean-field">
             <span>TLS</span>
             <span class="settings-toggle-card">
               <input id="settings-mail-account-tls" type="checkbox" checked />
               <span>Use secure IMAP over TLS.</span>
+            </span>
+          </label>
+          <label class="settings-field settings-boolean-field">
+            <span>SMTP TLS</span>
+            <span class="settings-toggle-card">
+              <input id="settings-mail-account-smtp-tls" type="checkbox" checked />
+              <span>Use implicit TLS for SMTP submission.</span>
+            </span>
+          </label>
+          <label class="settings-field settings-boolean-field">
+            <span>SMTP STARTTLS</span>
+            <span class="settings-toggle-card">
+              <input id="settings-mail-account-smtp-starttls" type="checkbox" />
+              <span>Upgrade plain SMTP connections with STARTTLS.</span>
             </span>
           </label>
         </div>

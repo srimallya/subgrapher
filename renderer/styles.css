@@ -2666,3 +2666,23 @@ body.chat-collapsed #chat-panel-resizer {
   border-top: 1px solid var(--border);
   padding-top: 6px;
 }
+
+.mail-compose-block {
+  flex: 0 0 auto;
+}
+
+.mail-compose-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mail-compose-subject,
+.mail-compose-body {
+  grid-column: 1 / -1;
+}
+
+.mail-compose-body textarea {
+  min-height: 180px;
+  resize: vertical;
+}
