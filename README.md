@@ -46,14 +46,34 @@ This implementation delivers:
   - Files preview renders mounted images directly; docs/binary files show extracted fragments + summaries
   - web crawler commands: `/crawl <url>`, `/crawl status`, `/crawl stop`
 - Mail runtime:
-  - read-only IMAP mailbox sync into a local Subgrapher mail database
-  - mailbox accounts are configured in `Settings -> Mail`
+  - local mail store backed by `mail_store.sqlite` under app `userData`
+  - account setup lives in `Settings -> Mail`
+  - supported account modes:
+    - generic IMAP/SMTP with password auth
+    - Gmail / Google Workspace OAuth bootstrap from Settings
+  - credentials and OAuth secrets are stored in the OS keychain, not in reference data
+  - sync is IMAP-driven and manual-only right now:
+    - `Sync` per account in Settings
+    - `Sync Selected` from Settings
+    - `Sync` from the global Mail page / reference Mail tab
+  - there is no background polling scheduler, IMAP IDLE loop, or OS new-mail notification path yet
+  - sync indexes the configured mailbox plus discovered/common sent, drafts, archive, and trash folders where available
+  - mail is normalized into local accounts, mailboxes, messages, and reconstructed threads
   - incompatible legacy `mail_store.sqlite` files are discarded on startup; the app rebuilds the local mail store with the current schema and requires a fresh sync
-  - synced mail is searched from the reference `mail` tab, not through Apple Mail automation
-  - sync currently indexes the configured mailbox plus common sent-mail folders so inbound and outbound messages can appear in the same thread
-  - mail tab layout is stable and fixed: search/actions on top, thread list in the middle, content preview below
-  - adding mail to a reference snapshots selected synced threads into that reference
-  - mail preview preserves readable paragraphs, headers, and quoted reply blocks where possible
+  - both the global `Mail` page and reference `mail` tab search the local Subgrapher mail store, not Apple Mail and not live mailbox APIs
+  - available mail actions today:
+    - search threads by query/account/folder/smart view
+    - preview normalized thread content
+    - compose, reply, save draft, send
+    - attach local files to outgoing mail
+    - mark thread read/unread
+    - archive thread when provider capabilities allow it
+    - move thread to trash
+    - attach selected synced threads into the active reference
+  - mail layouts are fixed and practical:
+    - reference mail tab: search/actions, thread list, content preview
+    - global Mail page: account/folder nav, thread list, content preview, composer
+  - mail preview preserves readable paragraphs, headers, quoted reply blocks, and mailbox/account metadata where possible
 - Web research reliability:
   - shared web search path is used across Path A, Path B, and Telegram orchestration
   - fallback chain: DDG API -> DDG HTML -> Bing HTML parser

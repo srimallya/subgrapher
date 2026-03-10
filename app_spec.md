@@ -123,22 +123,54 @@ Migration is idempotent and safe to run repeatedly.
 - `read_context_file` returns extracted non-text content and auto-attempts LM Studio vision summaries for images (with metadata fallback if unavailable).
 
 ## Mail Runtime
-- Mail is synced directly into Subgrapher from user-configured IMAP accounts.
-- Mailbox accounts are configured in `Settings -> Mail`.
-- Mail credentials are stored via the OS keychain; they are not embedded in reference data.
-- Active mail flow does not depend on Apple Mail folder scanning or AppleScript automation.
-- Sync is read-only.
+- Storage model:
+  - local SQLite mail store at `mail_store.sqlite` in app `userData`
+  - normalized tables for accounts, mailboxes, and messages
+  - threads are reconstructed from normalized local messages
+- Account setup:
+  - configured in `Settings -> Mail`
+  - supports generic IMAP/SMTP accounts with password auth
+  - supports Gmail / Google Workspace OAuth bootstrap from Settings
+  - credentials and OAuth secrets are stored via OS keychain refs, not in reference data
+- Active mail flow:
+  - Subgrapher talks to IMAP/SMTP directly
+  - Apple Mail folder scanning and AppleScript automation are not part of the active path
+- Sync model:
+  - manual only right now
+  - triggered from Settings per account / selected accounts
+  - also triggered from global Mail and reference mail surfaces
+  - no background polling scheduler yet
+  - no IMAP IDLE lifecycle yet
+  - no OS new-mail notifications yet
 - Sync targets:
-  - the configured mailbox
-  - common sent-mail folders where available
-- The goal is to reconstruct usable conversation threads from both inbound and outbound mail.
-- Reference mail UX uses three stable sections:
-  - search/actions
-  - thread list
-  - content preview
+  - configured mailbox
+  - discovered/common sent folders
+  - discovered/common drafts, archive, and trash folders where available
+- Goal:
+  - reconstruct usable inbound + outbound conversation threads in the local store
+- Mail surfaces:
+  - reference `mail` tab:
+    - search/actions
+    - thread list
+    - content preview
+  - global `Mail` page:
+    - account/folder navigation
+    - thread list
+    - content preview
+    - composer
+- Mail actions available now:
+  - search local threads by query/account/folder/smart view
+  - preview normalized thread content
+  - compose and reply
+  - save draft
+  - send message
+  - attach local files to outgoing mail
+  - mark read/unread
+  - archive when provider capabilities allow it
+  - move thread to trash
+  - attach selected synced threads into the active reference
 - Search runs against Subgrapher's local mail database, not a live mail client process.
 - Legacy local mail databases are not migrated forward; when the mail schema changes, Subgrapher resets `mail_store.sqlite` and rebuilds it from a fresh sync.
-- Adding mail to a reference snapshots selected synced threads into that reference.
 - Mail preview should preserve human-readable structure:
   - paragraph spacing
   - sender/recipient headers
@@ -172,11 +204,20 @@ Removed from renderer preload usage:
 
 Mail renderer/main contract now includes IMAP-backed local store operations:
 - `browser:mailListAccounts`
+- `browser:mailListMailboxes`
+- `browser:mailStatus`
+- `browser:mailStartGoogleOAuth`
 - `browser:mailSaveAccount`
 - `browser:mailDeleteAccount`
 - `browser:mailSyncAccount`
 - `browser:mailSearchLocalThreads`
 - `browser:mailPreviewSource`
+- `browser:mailSendMessage`
+- `browser:mailSaveDraft`
+- `browser:mailUpdateThreadState`
+- `browser:mailMoveThread`
+- `browser:mailDeleteThread`
+- `browser:mailPickAttachments`
 - `browser:srAttachMailThreadsFromStore`
 
 ## Python Runtime + Packaging
