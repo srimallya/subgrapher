@@ -11698,6 +11698,10 @@ function getReferences() {
       }
     }
     ref.artifacts = normalizedArtifacts;
+    if (!Array.isArray(ref.mail_threads)) {
+      ref.mail_threads = [];
+      changed = true;
+    }
 
     const contextBefore = JSON.stringify(Array.isArray(ref.context_files) ? ref.context_files : []);
     pruneYouTubeTranscriptContextFiles(ref);
@@ -11747,6 +11751,7 @@ function setReferences(refs, options = {}) {
     ref.artifacts = Array.isArray(ref.artifacts)
       ? ref.artifacts.slice(0, 80).map((artifact) => createArtifact(artifact))
       : [createArtifact({ type: 'markdown', title: 'Research Draft', content: '' })];
+    ref.mail_threads = Array.isArray(ref.mail_threads) ? ref.mail_threads : [];
     ref.agent_meta = normalizeReferenceAgentMeta(ref.agent_meta);
     if (ref.abstraction_cache && typeof ref.abstraction_cache === 'object') {
       ref.abstraction_cache = normalizeAbstractionCache(ref.abstraction_cache, String(ref.id || '').trim());
