@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, Menu, ipcMain, dialog, shell, nativeImage, safeStorage, systemPreferences } = require('electron');
+const { app, BrowserWindow, BrowserView, Menu, ipcMain, dialog, shell, nativeImage, safeStorage, systemPreferences, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -105,6 +105,7 @@ const REFERENCE_RANKING_USAGE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const REFERENCE_RANKING_CONTEXT_LIMIT = 24;
 const REFERENCE_RANKING_TERMS_LIMIT = 120;
 const HISTORY_EMBED_DIM = 96;
+const MAIL_POLL_INTERVAL_DEFAULT_SEC = 300;
 const SETTINGS_EDITABLE_KEYS = new Set([
   'default_search_engine',
   'reference_ranking_enabled',
@@ -134,6 +135,7 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'lmstudio_default_model',
   'orchestrator_web_provider',
   'mail_sync_enabled',
+  'mail_poll_interval_sec',
   'abstraction_enabled',
   'abstraction_model',
   'abstraction_strict_redaction',
@@ -276,6 +278,7 @@ let orchestratorSessionStore = null;
 let orchestratorUsersStore = null;
 let orchestratorPreferencesStore = null;
 let mailStore = null;
+let mailSyncManager = null;
 const pathBMetrics = {
   pathb_reuse_count: 0,
   pathb_create_count: 0,
@@ -4626,6 +4629,7 @@ function getDefaultSettings() {
     orchestrator_web_provider: ORCHESTRATOR_WEB_PROVIDER_DEFAULT,
     orchestrator_web_provider_key_ref: '',
     mail_sync_enabled: false,
+    mail_poll_interval_sec: MAIL_POLL_INTERVAL_DEFAULT_SEC,
     abstraction_enabled: false,
     abstraction_model: '',
     abstraction_strict_redaction: true,
@@ -4667,6 +4671,7 @@ function readSettings() {
     const lmstudioBaseUrl = String((parsed && parsed.lmstudio_base_url) || defaults.lmstudio_base_url).trim();
     const lmstudioDefaultModel = String((parsed && parsed.lmstudio_default_model) || defaults.lmstudio_default_model).trim();
     const orchestratorWebProvider = String((parsed && parsed.orchestrator_web_provider) || defaults.orchestrator_web_provider).trim().toLowerCase();
+    const mailPollIntervalSec = Number((parsed && parsed.mail_poll_interval_sec) || defaults.mail_poll_interval_sec);
     const abstractionModel = String((parsed && parsed.abstraction_model) || defaults.abstraction_model).trim();
     const imageAnalysisModel = String((parsed && parsed.image_analysis_model) || defaults.image_analysis_model).trim();
     const imageAnalysisPrompt = String((parsed && parsed.image_analysis_prompt) || defaults.image_analysis_prompt).trim();
@@ -4742,6 +4747,9 @@ function readSettings() {
       mail_sync_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'mail_sync_enabled')
         ? !!parsed.mail_sync_enabled
         : defaults.mail_sync_enabled,
+      mail_poll_interval_sec: Number.isFinite(mailPollIntervalSec)
+        ? Math.max(120, Math.min(900, Math.round(mailPollIntervalSec)))
+        : defaults.mail_poll_interval_sec,
       abstraction_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'abstraction_enabled')
         ? !!parsed.abstraction_enabled
         : defaults.abstraction_enabled,
@@ -4869,6 +4877,11 @@ function writeSettings(next) {
   const requestedMailSyncEnabled = Object.prototype.hasOwnProperty.call(input, 'mail_sync_enabled')
     ? !!input.mail_sync_enabled
     : !!current.mail_sync_enabled;
+  const requestedMailPollIntervalSec = Number(
+    Object.prototype.hasOwnProperty.call(input, 'mail_poll_interval_sec')
+      ? input.mail_poll_interval_sec
+      : current.mail_poll_interval_sec
+  );
   const requestedAbstractionModel = String(
     Object.prototype.hasOwnProperty.call(input, 'abstraction_model')
       ? input.abstraction_model
@@ -5002,6 +5015,9 @@ function writeSettings(next) {
         : current.orchestrator_web_provider_key_ref
     ).trim(),
     mail_sync_enabled: requestedMailSyncEnabled,
+    mail_poll_interval_sec: Number.isFinite(requestedMailPollIntervalSec)
+      ? Math.max(120, Math.min(900, Math.round(requestedMailPollIntervalSec)))
+      : MAIL_POLL_INTERVAL_DEFAULT_SEC,
     abstraction_enabled: Object.prototype.hasOwnProperty.call(input, 'abstraction_enabled')
       ? !!input.abstraction_enabled
       : !!current.abstraction_enabled,
@@ -5121,6 +5137,252 @@ function getMailStore() {
     });
   }
   return mailStore;
+}
+
+function publishMailEvent(payload = {}) {
+  sendBrowserEvent('browser:mail-event', payload);
+}
+
+function buildMailMessageStateKey(row = {}) {
+  return `${String((row && row.account_id) || '').trim()}:${Math.round(Number((row && row.uid) || 0))}:${String((row && row.mailbox) || '').trim().toLowerCase()}`;
+}
+
+function isInboundMailMessage(row = {}, account = {}) {
+  const sender = String((row && row.sender) || '').trim().toLowerCase();
+  const accountEmail = String((account && account.email) || '').trim().toLowerCase();
+  if (!sender) return true;
+  if (!accountEmail) return true;
+  return !sender.includes(accountEmail);
+}
+
+function isQualifyingNewMail(row = {}, account = {}) {
+  const mailboxRole = String((row && row.mailbox_role) || '').trim().toLowerCase();
+  if (!row || !row.is_unread) return false;
+  if (row.is_draft || row.is_trashed || row.is_archived) return false;
+  if (mailboxRole === 'sent' || mailboxRole === 'junk' || mailboxRole === 'trash' || mailboxRole === 'archive' || mailboxRole === 'drafts') return false;
+  return isInboundMailMessage(row, account);
+}
+
+function groupNewMailRows(rows = []) {
+  const grouped = new Map();
+  rows.forEach((row) => {
+    const threadId = String((row && row.thread_id) || '').trim();
+    if (!threadId) return;
+    if (!grouped.has(threadId)) grouped.set(threadId, []);
+    grouped.get(threadId).push(row);
+  });
+  return [...grouped.entries()].map(([thread_id, items]) => ({
+    thread_id,
+    rows: items.sort((a, b) => Number(b.sent_ts || 0) - Number(a.sent_ts || 0)),
+  }));
+}
+
+async function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+async function openMailThreadFromMain(payload = {}) {
+  const route = {
+    type: 'open_thread',
+    account_id: String((payload && payload.account_id) || '').trim(),
+    mailbox_path: String((payload && payload.mailbox_path) || '').trim(),
+    smart_view: String((payload && payload.smart_view) || '').trim(),
+    thread_id: String((payload && payload.thread_id) || '').trim(),
+  };
+  await focusMainWindow();
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && mainWindow.webContents.isLoadingMainFrame()) {
+    mainWindow.webContents.once('did-finish-load', () => publishMailEvent(route));
+    return;
+  }
+  setTimeout(() => publishMailEvent(route), 80);
+}
+
+function showNewMailNotification(group = {}, account = {}) {
+  if (typeof Notification !== 'function') return false;
+  if (typeof Notification.isSupported === 'function' && !Notification.isSupported()) return false;
+  const rows = Array.isArray(group.rows) ? group.rows : [];
+  const latest = rows[0] || {};
+  const title = rows.length > 1
+    ? `${String(account.label || account.email || 'Mail').trim()}: ${rows.length} new messages`
+    : String((latest && latest.sender) || account.label || account.email || 'New mail').trim();
+  const subject = String((latest && latest.subject) || 'Untitled thread').trim() || 'Untitled thread';
+  const body = rows.length > 1
+    ? `${subject} (${rows.length} unread messages)`
+    : subject;
+  try {
+    const notification = new Notification({
+      title,
+      body,
+      silent: false,
+    });
+    notification.on('click', () => {
+      openMailThreadFromMain({
+        account_id: String(account.id || '').trim(),
+        mailbox_path: String((latest && latest.mailbox) || '').trim(),
+        smart_view: '',
+        thread_id: String(group.thread_id || '').trim(),
+      }).catch(() => {});
+    });
+    notification.show();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function createMailSyncManager() {
+  let timer = null;
+  let bootstrapTimer = null;
+  const activeAccounts = new Map();
+
+  function status() {
+    const settings = readSettings();
+    return {
+      ok: true,
+      running: !!timer,
+      active_accounts: [...activeAccounts.keys()],
+      poll_interval_sec: Number(settings.mail_poll_interval_sec || MAIL_POLL_INTERVAL_DEFAULT_SEC),
+    };
+  }
+
+  function stop() {
+    if (timer) clearInterval(timer);
+    if (bootstrapTimer) clearTimeout(bootstrapTimer);
+    timer = null;
+    bootstrapTimer = null;
+    return status();
+  }
+
+  async function syncAccountNow(accountId = '', options = {}) {
+    const id = String(accountId || '').trim();
+    if (!id) return { ok: false, message: 'Account id is required.' };
+    if (activeAccounts.has(id)) {
+      return { ok: true, skipped: true, syncing: true, message: 'Mailbox sync already in progress.' };
+    }
+    const store = getMailStore();
+    const account = await store.getAccount(id);
+    if (!account) return { ok: false, message: 'Mailbox account not found.' };
+    const startedAt = nowTs();
+    const reason = String((options && options.reason) || 'manual').trim();
+    activeAccounts.set(id, { started_at: startedAt, reason });
+    await store.updateAccount(id, {
+      sync_state: 'syncing',
+      last_error: '',
+      new_threads_count: 0,
+      new_messages_count: 0,
+    });
+    publishMailEvent({ type: 'sync_status', phase: 'started', account_id: id, reason });
+    const beforeRows = await store.listMessageStateForAccount(id);
+    const beforeKeys = new Set(beforeRows.map((row) => buildMailMessageStateKey(row)));
+    const beforeThreads = new Set(beforeRows.map((row) => String((row && row.thread_id) || '').trim()).filter(Boolean));
+    try {
+      const syncRes = await store.syncAccount(id);
+      const finishedAt = nowTs();
+      if (!syncRes || !syncRes.ok) {
+        await store.updateAccount(id, {
+          sync_state: 'error',
+          last_sync_at: finishedAt,
+          last_error: String((syncRes && syncRes.message) || 'IMAP sync failed.'),
+          new_threads_count: 0,
+          new_messages_count: 0,
+        });
+        publishMailEvent({ type: 'sync_status', phase: 'finished', account_id: id, reason, ok: false });
+        return syncRes || { ok: false, message: 'IMAP sync failed.' };
+      }
+      const afterRows = await store.listMessageStateForAccount(id);
+      const newRows = afterRows.filter((row) => !beforeKeys.has(buildMailMessageStateKey(row)));
+      const newThreadIds = new Set(
+        newRows
+          .map((row) => String((row && row.thread_id) || '').trim())
+          .filter((threadId) => threadId && !beforeThreads.has(threadId))
+      );
+      const qualifyingRows = newRows.filter((row) => isQualifyingNewMail(row, account));
+      const grouped = groupNewMailRows(qualifyingRows);
+      let notified = false;
+      if (account.notifications_enabled) {
+        grouped.forEach((item) => {
+          notified = showNewMailNotification(item, account) || notified;
+        });
+      }
+      await store.updateAccount(id, {
+        sync_state: 'idle',
+        last_sync_at: finishedAt,
+        last_success_at: finishedAt,
+        last_error: '',
+        new_threads_count: newThreadIds.size,
+        new_messages_count: newRows.length,
+        last_notified_at: notified ? finishedAt : Number(account.last_notified_at || 0),
+      });
+      publishMailEvent({
+        type: 'sync_status',
+        phase: 'finished',
+        account_id: id,
+        reason,
+        ok: true,
+        new_threads_count: newThreadIds.size,
+        new_messages_count: newRows.length,
+      });
+      return {
+        ...syncRes,
+        new_threads_count: newThreadIds.size,
+        new_messages_count: newRows.length,
+      };
+    } catch (err) {
+      const finishedAt = nowTs();
+      await store.updateAccount(id, {
+        sync_state: 'error',
+        last_sync_at: finishedAt,
+        last_error: String((err && err.message) || 'IMAP sync failed.'),
+        new_threads_count: 0,
+        new_messages_count: 0,
+      });
+      publishMailEvent({ type: 'sync_status', phase: 'finished', account_id: id, reason, ok: false });
+      return { ok: false, message: String((err && err.message) || 'IMAP sync failed.') };
+    } finally {
+      activeAccounts.delete(id);
+    }
+  }
+
+  async function tick(reason = 'scheduled') {
+    const settings = readSettings();
+    if (!settings.mail_sync_enabled) return;
+    const accounts = await getMailStore().listAccounts();
+    for (const account of accounts) {
+      if (!account || !account.sync_enabled) continue;
+      await syncAccountNow(String(account.id || '').trim(), { reason }).catch(() => {});
+    }
+  }
+
+  function start(settings = readSettings()) {
+    stop();
+    if (!settings.mail_sync_enabled) return status();
+    const intervalMs = Math.max(120, Number(settings.mail_poll_interval_sec || MAIL_POLL_INTERVAL_DEFAULT_SEC)) * 1000;
+    timer = setInterval(() => {
+      tick('scheduled').catch(() => {});
+    }, intervalMs);
+    bootstrapTimer = setTimeout(() => {
+      tick('startup').catch(() => {});
+    }, 5000);
+    return status();
+  }
+
+  return {
+    start,
+    status,
+    stop,
+    syncAccountNow,
+  };
+}
+
+function getMailSyncManager() {
+  if (!mailSyncManager) mailSyncManager = createMailSyncManager();
+  return mailSyncManager;
 }
 
 function resolveLmstudioToken(settings = readSettings()) {
@@ -6147,6 +6409,62 @@ async function pathBReadResearchArtifact(params = {}) {
   };
 }
 
+async function pathBMailSearch(params = {}) {
+  const query = String((params && params.query) || '').trim();
+  const limit = Math.max(1, Math.min(25, Number((params && params.limit) || 10)));
+  const res = await getMailStore().searchThreads({
+    query,
+    limit,
+    account_id: String((params && params.account_id) || '').trim(),
+    mailbox_path: String((params && params.mailbox_path) || '').trim(),
+    smart_view: String((params && params.smart_view) || '').trim(),
+  });
+  const items = Array.isArray(res && res.items) ? res.items : [];
+  return {
+    ok: !!(res && res.ok),
+    total: Number((res && res.total) || items.length),
+    items: items.map((item, index) => ({
+      thread_id: String((item && item.id) || '').trim(),
+      subject: String((item && item.subject) || '').trim(),
+      participants: Array.isArray(item && item.participants) ? item.participants : [],
+      from: String((item && item.from) || '').trim(),
+      snippet: String((item && item.snippet) || '').trim(),
+      account_id: String((item && item.account_id) || '').trim(),
+      account_label: String((item && item.account_label) || '').trim(),
+      mailbox: String((item && item.mailbox) || '').trim(),
+      mailbox_role: String((item && item.mailbox_role) || '').trim(),
+      unread_count: Math.max(0, Number((item && item.unread_count) || 0)),
+      last_message_at: Number((item && item.last_message_at) || 0),
+      score: Math.max(0, limit - index),
+    })),
+  };
+}
+
+async function pathBMailReadThread(params = {}) {
+  const threadId = String((params && params.thread_id) || '').trim();
+  if (!threadId) return { ok: false, message: 'thread_id is required.' };
+  return getMailStore().getThread(threadId);
+}
+
+async function pathBMailOpenThread(params = {}) {
+  const threadId = String((params && params.thread_id) || '').trim();
+  if (!threadId) return { ok: false, message: 'thread_id is required.' };
+  const res = await getMailStore().getThread(threadId);
+  if (!res || !res.ok || !res.thread) return res || { ok: false, message: 'Thread not found.' };
+  const route = {
+    account_id: String((res.thread && res.thread.account_id) || '').trim(),
+    mailbox_path: String((res.thread && res.thread.mailbox) || '').trim(),
+    smart_view: '',
+    thread_id: threadId,
+  };
+  await openMailThreadFromMain(route);
+  return {
+    ok: true,
+    thread_id: threadId,
+    route,
+  };
+}
+
 async function pathBDelegatePathA(params = {}, options = {}) {
   const srId = String((params && params.sr_id) || '').trim();
   const workerPrompt = String((params && params.worker_prompt) || '').trim();
@@ -6197,6 +6515,9 @@ function getPathBExecutor() {
       addTab: pathBAddTab,
       analyzeImage: pathBAnalyzeImage,
       captureHtmlArtifactPng: captureHtmlArtifactPngForTelegram,
+      mailSearch: pathBMailSearch,
+      mailReadThread: pathBMailReadThread,
+      mailOpenThread: pathBMailOpenThread,
       delegatePathA: pathBDelegatePathA,
       readResearchArtifact: pathBReadResearchArtifact,
       upsertUserPreferences: upsertPathBUserPreferences,
@@ -10520,6 +10841,7 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
     trustcommons_sync: { ok: true, changed: false },
     history: { ok: true, changed: false },
     telegram: { ok: true, changed: false },
+    mail_sync: { ok: true, changed: false },
     orchestrator_scheduler: { ok: true, changed: false },
     abstraction: { ok: true, changed: false },
   };
@@ -10588,6 +10910,19 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
     applied.telegram.ok = !!(telegramRes && telegramRes.ok);
     applied.telegram.status = telegramRes || {};
     applied.telegram.message = String((telegramRes && telegramRes.message) || '');
+  }
+
+  const mailChanged = (
+    prev.mail_sync_enabled !== next.mail_sync_enabled
+    || Number(prev.mail_poll_interval_sec || 0) !== Number(next.mail_poll_interval_sec || 0)
+  );
+  if (mailChanged || (next.mail_sync_enabled && !getMailSyncManager().status().running)) {
+    applied.mail_sync.changed = true;
+    const managerStatus = next.mail_sync_enabled
+      ? getMailSyncManager().start(next)
+      : getMailSyncManager().stop();
+    applied.mail_sync.ok = !!(managerStatus && managerStatus.ok);
+    applied.mail_sync.status = managerStatus || {};
   }
 
   if (!orchestratorScheduler || !orchestratorScheduler.status().running) {
@@ -17794,10 +18129,13 @@ ipcMain.handle('browser:srAttachMailThreadsFromStore', async (_event, payload) =
 ipcMain.handle('browser:mailStatus', async () => {
   const settings = readSettings();
   const accounts = settings.mail_sync_enabled ? await getMailStore().listAccounts() : [];
+  const managerStatus = getMailSyncManager().status();
   return {
     ok: true,
     enabled: !!settings.mail_sync_enabled,
     available: true,
+    scheduler_running: !!(managerStatus && managerStatus.running),
+    poll_interval_sec: Number(settings.mail_poll_interval_sec || MAIL_POLL_INTERVAL_DEFAULT_SEC),
     root_path: '',
     indexed_at: Math.max(0, ...accounts.map((item) => Number(item.last_sync_at || 0))),
     files_scanned: 0,
@@ -17851,6 +18189,9 @@ ipcMain.handle('browser:mailSaveAccount', async (_event, payload) => {
   try {
     const res = await getMailStore().saveAccount(payload || {});
     if (!res || !res.ok) return res;
+    if (readSettings().mail_sync_enabled) {
+      getMailSyncManager().start(readSettings());
+    }
     return { ok: true, account: res.account, accounts: await getMailStore().listAccounts() };
   } catch (err) {
     return { ok: false, message: String((err && err.message) || 'Unable to save mailbox account.') };
@@ -17900,6 +18241,7 @@ ipcMain.handle('browser:mailStartGoogleOAuth', async (_event, payload) => {
 ipcMain.handle('browser:mailDeleteAccount', async (_event, payload) => {
   const res = await getMailStore().deleteAccount(String((payload && payload.accountId) || '').trim());
   if (!res || !res.ok) return res;
+  getMailSyncManager().start(readSettings());
   return { ok: true, accounts: await getMailStore().listAccounts() };
 });
 
@@ -17918,7 +18260,7 @@ ipcMain.handle('browser:mailSaveDraft', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:mailSyncAccount', async (_event, payload) => {
-  const res = await getMailStore().syncAccount(String((payload && payload.accountId) || '').trim());
+  const res = await getMailSyncManager().syncAccountNow(String((payload && payload.accountId) || '').trim(), { reason: 'manual' });
   return {
     ...res,
     accounts: await getMailStore().listAccounts(),

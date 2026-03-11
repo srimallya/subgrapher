@@ -136,12 +136,23 @@ Migration is idempotent and safe to run repeatedly.
   - Subgrapher talks to IMAP/SMTP directly
   - Apple Mail folder scanning and AppleScript automation are not part of the active path
 - Sync model:
-  - manual only right now
+  - main-process polling scheduler
+  - controlled by global Mail settings
+  - app-level polling interval shared by enabled accounts
   - triggered from Settings per account / selected accounts
   - also triggered from global Mail and reference mail surfaces
-  - no background polling scheduler yet
+  - per-account sync state tracks:
+    - `sync_state`
+    - `last_sync_at`
+    - `last_success_at`
+    - `last_error`
+    - `new_threads_count`
+    - `new_messages_count`
+    - `last_notified_at`
+  - per-account notifications toggle in Settings
+  - OS notifications fire for new inbound unread mail detected from local-store diffs after sync
+  - notification click routes the user into global `Mail` on the target account/thread
   - no IMAP IDLE lifecycle yet
-  - no OS new-mail notifications yet
 - Sync targets:
   - configured mailbox
   - discovered/common sent folders
@@ -173,6 +184,10 @@ Migration is idempotent and safe to run repeatedly.
     - user selects one or more synced threads in the full thread list
     - `Add Selected` attaches that set to the active reference and switches the reference mail tab into an attached-thread review view
     - `Back` returns to the full thread list without discarding the current attached selection, so the user can extend the set and attach again
+- Path B mail actions available now:
+  - `mail_search` over the normalized local mail store only
+  - `mail_read_thread` for normalized thread retrieval
+  - `mail_open_thread` to route the renderer into global `Mail`
 - Search runs against Subgrapher's local mail database, not a live mail client process.
 - Legacy local mail databases are not migrated forward; when the mail schema changes, Subgrapher resets `mail_store.sqlite` and rebuilds it from a fresh sync.
 - Mail preview should preserve human-readable structure:
@@ -218,6 +233,9 @@ Mail renderer/main contract now includes IMAP-backed local store operations:
 - `browser:mailPreviewSource`
 - `browser:mailSendMessage`
 - `browser:mailSaveDraft`
+- renderer event channel: `browser:mail-event`
+  - `sync_status` updates for background/manual sync lifecycle
+  - `open_thread` route payload for notification-driven Mail navigation
 - `browser:mailUpdateThreadState`
 - `browser:mailMoveThread`
 - `browser:mailDeleteThread`

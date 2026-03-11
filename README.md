@@ -52,11 +52,23 @@ This implementation delivers:
     - generic IMAP/SMTP with password auth
     - Gmail / Google Workspace OAuth bootstrap from Settings
   - credentials and OAuth secrets are stored in the OS keychain, not in reference data
-  - sync is IMAP-driven and manual-only right now:
+  - sync is IMAP-driven with a main-process polling scheduler:
+    - global `Mail Sync` toggle in Settings
+    - app-level polling interval in Settings (`mail_poll_interval_sec`, default 300 sec)
     - `Sync` per account in Settings
     - `Sync Selected` from Settings
     - `Sync` from the global Mail page / reference Mail tab
-  - there is no background polling scheduler, IMAP IDLE loop, or OS new-mail notification path yet
+  - per-account sync state is tracked and shown in Settings / global Mail:
+    - `idle | syncing | error`
+    - `last_sync_at`
+    - `last_success_at`
+    - `last_error`
+    - `new_threads_count`
+    - `new_messages_count`
+  - per-account notifications can be toggled in Settings
+  - OS notifications are emitted for new inbound unread mail detected after sync
+  - clicking a mail notification opens the global `Mail` page on the matching account/thread
+  - IMAP IDLE is not implemented yet; v1 uses polling only
   - sync indexes the configured mailbox plus discovered/common sent, drafts, archive, and trash folders where available
   - mail is normalized into local accounts, mailboxes, messages, and reconstructed threads
   - incompatible legacy `mail_store.sqlite` files are discarded on startup; the app rebuilds the local mail store with the current schema and requires a fresh sync
@@ -78,6 +90,10 @@ This implementation delivers:
     - reference mail tab: search/actions, thread list, content preview
     - global Mail page: account/folder nav, thread list, content preview, composer
   - mail preview preserves readable paragraphs, headers, quoted reply blocks, and mailbox/account metadata where possible
+  - Path B mail tooling is available against the normalized local store:
+    - `mail_search`
+    - `mail_read_thread`
+    - `mail_open_thread`
 - Web research reliability:
   - shared web search path is used across Path A, Path B, and Telegram orchestration
   - fallback chain: DDG API -> DDG HTML -> Bing HTML parser

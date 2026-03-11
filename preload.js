@@ -322,6 +322,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeAllListeners('browser:marker-update');
       ipcRenderer.on('browser:marker-update', (_event, data) => callback(data));
     },
+    onMailEvent: (callback) => {
+      ipcRenderer.removeAllListeners('browser:mail-event');
+      ipcRenderer.on('browser:mail-event', (_event, data) => callback(data));
+    },
   },
   tabs: {
     create: (url) => ipcRenderer.invoke('tabs:create', url),

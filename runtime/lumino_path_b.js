@@ -139,6 +139,7 @@ function normalizeTelegramAttachments(value) {
 function buildPathBSystemPrompt(task = {}) {
   const message = String((task && task.message) || '').trim();
   const hasVizIntent = VIZ_INTENT_RE.test(message);
+  const hasMailIntent = /\b(mail|email|gmail|inbox|mailbox|thread)\b/i.test(message);
   const attachments = normalizeTelegramAttachments(task && task.telegram_attachments);
   const hasImageAttachment = attachments.length > 0;
   const extra = [];
@@ -148,21 +149,34 @@ function buildPathBSystemPrompt(task = {}) {
   if (hasVizIntent) {
     extra.push('When user intent is visualization-oriented, ensure a suitable HTML artifact exists via delegate_path_a, then call capture_html_artifact_png before finish.');
   }
+  if (hasMailIntent) {
+    extra.push('When the request is about finding or reading mail, prefer mail_search and mail_read_thread first. Do not use web_search for mailbox lookup.');
+  }
   return [
     'You are Path B, the global orchestrator for Subgrapher.',
     'Path A is scoped to one reference; you orchestrate globally.',
     'You must drive this task via tools and then call finish.',
-    'Required workflow:',
-    `1) global_reference_search (top_k=${PATH_B_DEFAULT_TOP_K})`,
-    '2) read_reference_snapshot for candidate references',
-    '3) choose exactly one: select_reference OR create_reference',
-    '4) always do web_search',
-    '5) verify links with verify_link until you have >= 3 verified links or retries are exhausted',
-    '6) add_tab for verified links in selected/created reference',
-    '7) delegate_path_a to run scoped deep research',
-    '8) read_research_artifact for summary material',
-    '9) finish with summary_for_telegram + citation_urls (prefer 3 verified URLs).',
-    'Do not fabricate citations. Use only verified links.',
+    hasMailIntent ? 'Mail workflow:' : 'Required workflow:',
+    ...(hasMailIntent
+      ? [
+        '1) use mail_search to find candidate threads from the local mail store',
+        '2) use mail_read_thread on the best candidate',
+        '3) use mail_open_thread if the user should be taken to Mail UI',
+        '4) delegate_path_a only if deeper reasoning over the thread is needed',
+        '5) finish with a concise summary grounded in the local thread content',
+      ]
+      : [
+        `1) global_reference_search (top_k=${PATH_B_DEFAULT_TOP_K})`,
+        '2) read_reference_snapshot for candidate references',
+        '3) choose exactly one: select_reference OR create_reference',
+        '4) always do web_search',
+        '5) verify links with verify_link until you have >= 3 verified links or retries are exhausted',
+        '6) add_tab for verified links in selected/created reference',
+        '7) delegate_path_a to run scoped deep research',
+        '8) read_research_artifact for summary material',
+        '9) finish with summary_for_telegram + citation_urls (prefer 3 verified URLs).',
+        'Do not fabricate citations. Use only verified links.',
+      ]),
     ...extra,
   ].join('\n');
 }
@@ -367,6 +381,46 @@ const PATH_B_TOOLS = [
     },
   },
   {
+    name: 'mail_search',
+    description: 'Search the normalized local mail store for matching threads.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        account_id: { type: 'string' },
+        mailbox_path: { type: 'string' },
+        smart_view: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'mail_read_thread',
+    description: 'Read a normalized mail thread from the local mail store.',
+    parameters: {
+      type: 'object',
+      properties: {
+        thread_id: { type: 'string' },
+      },
+      required: ['thread_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'mail_open_thread',
+    description: 'Open the global Mail UI on a specific thread.',
+    parameters: {
+      type: 'object',
+      properties: {
+        thread_id: { type: 'string' },
+      },
+      required: ['thread_id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'delegate_path_a',
     description: 'Delegate deep scoped research and artifact generation to Path A.',
     parameters: {
@@ -432,6 +486,9 @@ function createPathBExecutor(options = {}) {
   const addTab = typeof options.addTab === 'function' ? options.addTab : null;
   const analyzeImage = typeof options.analyzeImage === 'function' ? options.analyzeImage : null;
   const captureHtmlArtifactPng = typeof options.captureHtmlArtifactPng === 'function' ? options.captureHtmlArtifactPng : null;
+  const mailSearch = typeof options.mailSearch === 'function' ? options.mailSearch : null;
+  const mailReadThread = typeof options.mailReadThread === 'function' ? options.mailReadThread : null;
+  const mailOpenThread = typeof options.mailOpenThread === 'function' ? options.mailOpenThread : null;
   const delegatePathA = typeof options.delegatePathA === 'function' ? options.delegatePathA : null;
   const readResearchArtifact = typeof options.readResearchArtifact === 'function' ? options.readResearchArtifact : null;
   const upsertUserPreferences = typeof options.upsertUserPreferences === 'function' ? options.upsertUserPreferences : null;
@@ -451,6 +508,9 @@ function createPathBExecutor(options = {}) {
     addTab,
     analyzeImage,
     captureHtmlArtifactPng,
+    mailSearch,
+    mailReadThread,
+    mailOpenThread,
     delegatePathA,
     readResearchArtifact,
     upsertUserPreferences,
@@ -565,6 +625,7 @@ function createPathBExecutor(options = {}) {
     const payload = (input && typeof input === 'object') ? input : {};
     const userMessage = String(payload.message || '').trim();
     if (!userMessage) return { ok: false, message: 'Message is required.' };
+    const hasMailIntent = /\b(mail|email|gmail|inbox|mailbox|thread)\b/i.test(userMessage);
 
     const runId = String(payload.run_id || `run_${nowTs()}`).trim();
     const source = String(payload.source || 'telegram').trim().toLowerCase();
@@ -813,6 +874,43 @@ function createPathBExecutor(options = {}) {
         };
       }
 
+      if (name === 'mail_search') {
+        const res = await mailSearch({
+          query: String(args.query || userMessage).trim(),
+          account_id: String(args.account_id || '').trim(),
+          mailbox_path: String(args.mailbox_path || '').trim(),
+          smart_view: String(args.smart_view || '').trim(),
+          limit: Number(args.limit || 10),
+        });
+        return {
+          ok: !!(res && res.ok),
+          message: `Mail search returned ${Math.max(0, Number((res && res.total) || 0))} result(s).`,
+          tool_output: res || { ok: false, message: 'Mail search failed.' },
+        };
+      }
+
+      if (name === 'mail_read_thread') {
+        const res = await mailReadThread({
+          thread_id: String(args.thread_id || '').trim(),
+        });
+        return {
+          ok: !!(res && res.ok),
+          message: res && res.ok ? 'Read mail thread.' : String((res && res.message) || 'Unable to read mail thread.'),
+          tool_output: res || { ok: false, message: 'Unable to read mail thread.' },
+        };
+      }
+
+      if (name === 'mail_open_thread') {
+        const res = await mailOpenThread({
+          thread_id: String(args.thread_id || '').trim(),
+        });
+        return {
+          ok: !!(res && res.ok),
+          message: res && res.ok ? 'Opened mail thread.' : String((res && res.message) || 'Unable to open mail thread.'),
+          tool_output: res || { ok: false, message: 'Unable to open mail thread.' },
+        };
+      }
+
       if (name === 'delegate_path_a') {
         const srId = String(args.sr_id || orchestratorState.selected_sr_id).trim();
         if (!srId) {
@@ -946,7 +1044,7 @@ function createPathBExecutor(options = {}) {
     });
 
     // Deterministic recovery so Path B remains reliable even if the model skips a required tool step.
-    if (!String(orchestratorState.selected_sr_id || '').trim()) {
+    if (!hasMailIntent && !String(orchestratorState.selected_sr_id || '').trim()) {
       const top = toArray(orchestratorState.global_results)[0] || null;
       if (top && top.sr_id) {
         await toolExec({
@@ -967,7 +1065,7 @@ function createPathBExecutor(options = {}) {
       }
     }
 
-    if (toArray(orchestratorState.web_results).length === 0) {
+    if (!hasMailIntent && toArray(orchestratorState.web_results).length === 0) {
       await toolExec({
         name: 'web_search',
         arguments: {
@@ -992,8 +1090,8 @@ function createPathBExecutor(options = {}) {
       }
     };
 
-    await runVerificationPass(userMessage, orchestratorState.web_results);
-    if (toArray(orchestratorState.verified_urls).length < 3) {
+    if (!hasMailIntent) await runVerificationPass(userMessage, orchestratorState.web_results);
+    if (!hasMailIntent && toArray(orchestratorState.verified_urls).length < 3) {
       const broadenedQuery = `${userMessage} latest updates analysis`;
       await toolExec({
         name: 'web_search',
@@ -1006,7 +1104,7 @@ function createPathBExecutor(options = {}) {
     }
 
     const selectedSrId = String(orchestratorState.selected_sr_id || '').trim();
-    if (selectedSrId) {
+    if (!hasMailIntent && selectedSrId) {
       const toTab = toArray(orchestratorState.verified_urls).slice(0, 6);
       for (let i = 0; i < toTab.length; i += 1) {
         const item = toTab[i] || {};
@@ -1021,7 +1119,7 @@ function createPathBExecutor(options = {}) {
       }
     }
 
-    if (selectedSrId && !orchestratorState.delegated_response) {
+    if (!hasMailIntent && selectedSrId && !orchestratorState.delegated_response) {
       await toolExec({
         name: 'delegate_path_a',
         arguments: {
@@ -1032,7 +1130,7 @@ function createPathBExecutor(options = {}) {
     }
 
     const hasResearchSummary = !!String(((orchestratorState.research_artifact && orchestratorState.research_artifact.summary) || '')).trim();
-    if (selectedSrId && (!orchestratorState.research_artifact || !hasResearchSummary)) {
+    if (!hasMailIntent && selectedSrId && (!orchestratorState.research_artifact || !hasResearchSummary)) {
       await toolExec({
         name: 'read_research_artifact',
         arguments: {

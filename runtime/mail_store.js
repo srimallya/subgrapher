@@ -205,9 +205,15 @@ function ensureSchema(db) {
       smtp_starttls INTEGER NOT NULL DEFAULT 0,
       send_enabled INTEGER NOT NULL DEFAULT 1,
       sync_enabled INTEGER NOT NULL DEFAULT 1,
+      notifications_enabled INTEGER NOT NULL DEFAULT 1,
       sync_limit INTEGER NOT NULL DEFAULT 200,
+      sync_state TEXT NOT NULL DEFAULT 'idle',
       last_sync_at INTEGER NOT NULL DEFAULT 0,
+      last_success_at INTEGER NOT NULL DEFAULT 0,
       last_error TEXT NOT NULL DEFAULT '',
+      new_threads_count INTEGER NOT NULL DEFAULT 0,
+      new_messages_count INTEGER NOT NULL DEFAULT 0,
+      last_notified_at INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       account_type TEXT NOT NULL DEFAULT 'manual_imap_smtp',
@@ -251,6 +257,12 @@ function ensureSchema(db) {
   ensureColumn(db, 'accounts', 'smtp_use_tls', 'smtp_use_tls INTEGER NOT NULL DEFAULT 1');
   ensureColumn(db, 'accounts', 'smtp_starttls', 'smtp_starttls INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'accounts', 'send_enabled', 'send_enabled INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'accounts', 'notifications_enabled', 'notifications_enabled INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'accounts', 'sync_state', "sync_state TEXT NOT NULL DEFAULT 'idle'");
+  ensureColumn(db, 'accounts', 'last_success_at', 'last_success_at INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'accounts', 'new_threads_count', 'new_threads_count INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'accounts', 'new_messages_count', 'new_messages_count INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'accounts', 'last_notified_at', 'last_notified_at INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'accounts', 'oauth_access_token_ref', "oauth_access_token_ref TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'accounts', 'oauth_refresh_token_ref', "oauth_refresh_token_ref TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'accounts', 'oauth_client_id_ref', "oauth_client_id_ref TEXT NOT NULL DEFAULT ''");
@@ -354,9 +366,17 @@ function normalizeAccountRecord(row = {}) {
     smtp_starttls: !!Number(row.smtp_starttls || 0),
     send_enabled: !Object.prototype.hasOwnProperty.call(row, 'send_enabled') || !!Number(row.send_enabled || 0),
     sync_enabled: !Object.prototype.hasOwnProperty.call(row, 'sync_enabled') || !!Number(row.sync_enabled || 0),
+    notifications_enabled: !Object.prototype.hasOwnProperty.call(row, 'notifications_enabled') || !!Number(row.notifications_enabled || 0),
     sync_limit: Math.max(1, Math.min(500, Math.round(Number(row.sync_limit || 200)))),
+    sync_state: ['idle', 'syncing', 'error'].includes(String(row.sync_state || '').trim().toLowerCase())
+      ? String(row.sync_state || '').trim().toLowerCase()
+      : 'idle',
     last_sync_at: Number(row.last_sync_at || 0),
+    last_success_at: Number(row.last_success_at || 0),
     last_error: String(row.last_error || '').trim(),
+    new_threads_count: Math.max(0, Math.round(Number(row.new_threads_count || 0))),
+    new_messages_count: Math.max(0, Math.round(Number(row.new_messages_count || 0))),
+    last_notified_at: Number(row.last_notified_at || 0),
     created_at: Number(row.created_at || 0),
     updated_at: Number(row.updated_at || 0),
     account_type: String(row.account_type || 'manual_imap_smtp').trim() || 'manual_imap_smtp',
@@ -584,10 +604,11 @@ function upsertAccount(db, account = {}) {
     INSERT INTO accounts (
       id, label, email, host, port, username, mailbox, use_tls, password_ref,
       smtp_host, smtp_port, smtp_username, smtp_password_ref, smtp_use_tls, smtp_starttls, send_enabled,
-      sync_enabled, sync_limit, last_sync_at, last_error, created_at, updated_at,
+      sync_enabled, notifications_enabled, sync_limit, sync_state, last_sync_at, last_success_at, last_error,
+      new_threads_count, new_messages_count, last_notified_at, created_at, updated_at,
       account_type, provider, oauth_access_token_ref, oauth_refresh_token_ref, oauth_client_id_ref,
       oauth_client_secret_ref, oauth_token_expires_at, capabilities_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       label = excluded.label,
       email = excluded.email,
@@ -605,9 +626,15 @@ function upsertAccount(db, account = {}) {
       smtp_starttls = excluded.smtp_starttls,
       send_enabled = excluded.send_enabled,
       sync_enabled = excluded.sync_enabled,
+      notifications_enabled = excluded.notifications_enabled,
       sync_limit = excluded.sync_limit,
+      sync_state = excluded.sync_state,
       last_sync_at = excluded.last_sync_at,
+      last_success_at = excluded.last_success_at,
       last_error = excluded.last_error,
+      new_threads_count = excluded.new_threads_count,
+      new_messages_count = excluded.new_messages_count,
+      last_notified_at = excluded.last_notified_at,
       updated_at = excluded.updated_at,
       account_type = excluded.account_type,
       provider = excluded.provider,
@@ -636,9 +663,15 @@ function upsertAccount(db, account = {}) {
     account.smtp_starttls ? 1 : 0,
     account.send_enabled ? 1 : 0,
     account.sync_enabled ? 1 : 0,
+    account.notifications_enabled ? 1 : 0,
     account.sync_limit,
+    account.sync_state || 'idle',
     account.last_sync_at || 0,
+    account.last_success_at || 0,
     account.last_error || '',
+    account.new_threads_count || 0,
+    account.new_messages_count || 0,
+    account.last_notified_at || 0,
     account.created_at || nowTs(),
     account.updated_at || nowTs(),
     account.account_type || 'manual_imap_smtp',
@@ -986,9 +1019,17 @@ function createMailStore(options = {}) {
       smtp_starttls: Object.prototype.hasOwnProperty.call(input, 'smtp_starttls') ? !!input.smtp_starttls : (existing ? existing.smtp_starttls : smtpPort === 587),
       send_enabled: Object.prototype.hasOwnProperty.call(input, 'send_enabled') ? !!input.send_enabled : (existing ? existing.send_enabled : true),
       sync_enabled: Object.prototype.hasOwnProperty.call(input, 'sync_enabled') ? !!input.sync_enabled : (existing ? existing.sync_enabled : true),
+      notifications_enabled: Object.prototype.hasOwnProperty.call(input, 'notifications_enabled')
+        ? !!input.notifications_enabled
+        : (existing ? existing.notifications_enabled : true),
       sync_limit: Math.max(1, Math.min(500, Math.round(Number(input.sync_limit || (existing && existing.sync_limit) || 200)))),
+      sync_state: String((existing && existing.sync_state) || 'idle').trim().toLowerCase() || 'idle',
       last_sync_at: Number((existing && existing.last_sync_at) || 0),
+      last_success_at: Number((existing && existing.last_success_at) || 0),
       last_error: String((existing && existing.last_error) || '').trim(),
+      new_threads_count: Math.max(0, Number((existing && existing.new_threads_count) || 0)),
+      new_messages_count: Math.max(0, Number((existing && existing.new_messages_count) || 0)),
+      last_notified_at: Number((existing && existing.last_notified_at) || 0),
       created_at: Number((existing && existing.created_at) || nowTs()),
       updated_at: nowTs(),
       account_type: accountType,
@@ -1056,6 +1097,58 @@ function createMailStore(options = {}) {
       stmt.free();
     });
     return { ok: true };
+  }
+
+  async function getAccount(accountId = '') {
+    const id = String(accountId || '').trim();
+    if (!id) return null;
+    const accounts = await listAccounts();
+    return accounts.find((item) => item.id === id) || null;
+  }
+
+  async function updateAccount(accountId = '', patch = {}) {
+    const id = String(accountId || '').trim();
+    if (!id) return { ok: false, message: 'Account id is required.' };
+    const existing = await getAccount(id);
+    if (!existing) return { ok: false, message: 'Mailbox account not found.' };
+    const next = {
+      ...existing,
+      ...((patch && typeof patch === 'object') ? patch : {}),
+      id: existing.id,
+      updated_at: nowTs(),
+    };
+    await withDatabase(async (db) => {
+      upsertAccount(db, next);
+    });
+    return { ok: true, account: next };
+  }
+
+  async function listMessageStateForAccount(accountId = '') {
+    const id = String(accountId || '').trim();
+    if (!id) return [];
+    return withDatabase(async (db) => (
+      selectRows(
+        db,
+        `SELECT account_id, uid, thread_id, mailbox, mailbox_role, sender, subject, is_unread, is_draft, is_trashed, is_archived, sent_ts
+         FROM messages
+         WHERE account_id = ?
+         ORDER BY sent_ts DESC, updated_at DESC`,
+        [id]
+      ).map((row) => ({
+        account_id: String(row.account_id || '').trim(),
+        uid: Math.round(Number(row.uid || 0)),
+        thread_id: String(row.thread_id || '').trim(),
+        mailbox: String(row.mailbox || '').trim(),
+        mailbox_role: String(row.mailbox_role || '').trim().toLowerCase(),
+        sender: String(row.sender || '').trim(),
+        subject: String(row.subject || '').trim(),
+        is_unread: !!Number(row.is_unread || 0),
+        is_draft: !!Number(row.is_draft || 0),
+        is_trashed: !!Number(row.is_trashed || 0),
+        is_archived: !!Number(row.is_archived || 0),
+        sent_ts: Number(row.sent_ts || 0),
+      }))
+    ));
   }
 
   async function discoverMailboxes(account = {}, client = null) {
@@ -1582,14 +1675,17 @@ function createMailStore(options = {}) {
     deleteAccount,
     deleteThread,
     exportThreads,
+    getAccount,
     getThread,
     listAccounts,
+    listMessageStateForAccount,
     listMailboxes,
     saveAccount,
     saveDraft,
     searchThreads,
     sendMail,
     syncAccount,
+    updateAccount,
     updateThreadState,
     moveThread,
   };

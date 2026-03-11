@@ -5613,6 +5613,7 @@ async function renderGlobalMailPage() {
   state.mailStatus = mailStatus || null;
   const accountOptions = Array.isArray(state.mailAccounts) ? state.mailAccounts : [];
   const activeAccountId = nav.account_id || String(((accountOptions[0] || {}).id) || '').trim();
+  const activeAccount = getMailAccountById(activeAccountId);
   if (!nav.account_id && activeAccountId) setMailNavState(viewId, { account_id: activeAccountId });
   const activeMailboxes = state.mailboxesByAccount.get(activeAccountId) || [];
   if (!Array.isArray(results) || results.length === 0) {
@@ -5621,7 +5622,9 @@ async function renderGlobalMailPage() {
     state.mailSearchResultsByRef.set(stateId, results);
   }
   status.textContent = String((mailStatus && mailStatus.message) || 'Mail');
-  statusLine.textContent = activeAccountId ? 'Manual sync only.' : 'No mailbox account configured.';
+  statusLine.textContent = activeAccount
+    ? describeMailAccountStatus(activeAccount)
+    : 'No mailbox account configured.';
   const navItems = buildMailNavItems(activeMailboxes);
   const threadListMarkup = results.length
     ? results.map((item) => {
@@ -5925,6 +5928,40 @@ async function openMailPage() {
   await setAppView('mail');
   await refreshMailStatus();
   await refreshMailAccounts();
+  await renderGlobalMailPage();
+}
+
+async function handleMailEventPayload(payload = {}) {
+  const type = String((payload && payload.type) || '').trim().toLowerCase();
+  if (!type) return;
+  if (type === 'sync_status') {
+    await refreshMailAccounts();
+    state.mailStatus = await api.mailStatus();
+    renderMailSettingsStatus();
+    if (state.appView === 'mail') await renderGlobalMailPage();
+    if (state.appView === 'workspace' && state.activeSurface.kind === 'mail') await renderMailPanel();
+    return;
+  }
+  if (type !== 'open_thread') return;
+  const viewId = GLOBAL_MAIL_VIEW_ID;
+  const accountId = String((payload && payload.account_id) || '').trim();
+  const mailboxPath = String((payload && payload.mailbox_path) || '').trim();
+  const smartView = String((payload && payload.smart_view) || '').trim();
+  const threadId = String((payload && payload.thread_id) || '').trim();
+  await openMailPage();
+  setMailNavState(viewId, {
+    account_id: accountId,
+    mailbox_path: mailboxPath,
+    smart_view: smartView,
+  });
+  state.mailSearchResultsByRef.delete(resolveMailStateId(viewId));
+  if (threadId) {
+    const previewRes = await api.mailPreviewSource(threadId);
+    if (previewRes && previewRes.ok && previewRes.thread) {
+      setMailPreviewState(viewId, { thread_id: threadId, thread: previewRes.thread });
+    }
+  }
+  await runMailSearch(viewId, getMailSearchState(viewId).query || '');
   await renderGlobalMailPage();
 }
 
@@ -6832,6 +6869,11 @@ function setupBrowserEvents() {
     api.onMarkerUpdate((payload) => {
       const message = String((payload && payload.message) || '').trim();
       if (message) showPassiveNotification(message);
+    });
+  }
+  if (typeof api.onMailEvent === 'function') {
+    api.onMailEvent((payload) => {
+      handleMailEventPayload(payload).catch(() => {});
     });
   }
 }
@@ -8647,6 +8689,10 @@ function normalizeSettingsDraft(raw = {}) {
   const historyMaxEntries = Number.isFinite(historyMaxRaw)
     ? Math.max(500, Math.min(10000, Math.round(historyMaxRaw)))
     : HISTORY_DEFAULT_MAX_ENTRIES;
+  const mailPollIntervalRaw = Number(src.mail_poll_interval_sec);
+  const mailPollIntervalSec = Number.isFinite(mailPollIntervalRaw)
+    ? Math.max(120, Math.min(900, Math.round(mailPollIntervalRaw)))
+    : 300;
   const ragEmbeddingSource = String(src.rag_embedding_source || RAG_EMBEDDING_SOURCE_DEFAULT).trim().toLowerCase() === 'inbuilt'
     ? 'inbuilt'
     : 'lmstudio';
@@ -8690,6 +8736,7 @@ function normalizeSettingsDraft(raw = {}) {
     trustcommons_download_url: String(src.trustcommons_download_url || '').trim(),
     trustcommons_app_bundle_id: String(src.trustcommons_app_bundle_id || '').trim(),
     mail_sync_enabled: !!src.mail_sync_enabled,
+    mail_poll_interval_sec: mailPollIntervalSec,
     history_enabled: Object.prototype.hasOwnProperty.call(src, 'history_enabled') ? !!src.history_enabled : true,
     history_max_entries: historyMaxEntries,
   };
@@ -8707,6 +8754,9 @@ function validateSettingsDraft(draft = {}) {
   }
   if (!Number.isFinite(d.telegram_poll_interval_sec) || d.telegram_poll_interval_sec < 1 || d.telegram_poll_interval_sec > 30) {
     errors.telegram_poll_interval_sec = 'Polling interval must be 1..30 sec.';
+  }
+  if (!Number.isFinite(d.mail_poll_interval_sec) || d.mail_poll_interval_sec < 120 || d.mail_poll_interval_sec > 900) {
+    errors.mail_poll_interval_sec = 'Mail polling interval must be 120..900 sec.';
   }
   if (!Number.isFinite(d.trustcommons_sync_port) || d.trustcommons_sync_port < 1024 || d.trustcommons_sync_port > 65535) {
     errors.trustcommons_sync_port = 'Port must be 1024..65535.';
@@ -8955,7 +9005,31 @@ function renderMailSettingsStatus() {
     node.textContent = (status && status.message) || 'Unavailable';
     return;
   }
-  node.textContent = `${Array.isArray(state.mailAccounts) ? state.mailAccounts.length : 0} mailbox account(s) configured.`;
+  const count = Array.isArray(state.mailAccounts) ? state.mailAccounts.length : 0;
+  const running = status.scheduler_running ? 'scheduler on' : 'scheduler off';
+  const interval = Number(status.poll_interval_sec || draft.mail_poll_interval_sec || 300);
+  node.textContent = `${count} mailbox account(s) configured · ${running} · every ${Math.round(interval / 60)} min`;
+}
+
+function describeMailAccountStatus(account = {}) {
+  const syncState = String((account && account.sync_state) || 'idle').trim().toLowerCase();
+  const stateLabel = syncState === 'syncing'
+    ? 'Syncing now'
+    : (syncState === 'error' ? 'Sync error' : 'Idle');
+  const checked = formatAgo((account && account.last_sync_at) || 0) || 'never';
+  const success = formatAgo((account && account.last_success_at) || 0) || 'never';
+  const newThreads = Math.max(0, Number((account && account.new_threads_count) || 0));
+  const newMessages = Math.max(0, Number((account && account.new_messages_count) || 0));
+  const base = `${stateLabel} · Last checked: ${checked} · Last success: ${success}`;
+  if (account && account.last_error) return `${base} · ${String(account.last_error || '').trim()}`;
+  if (newThreads > 0 || newMessages > 0) return `${base} · New: ${newThreads} thread(s), ${newMessages} message(s)`;
+  return base;
+}
+
+function getMailAccountById(accountId = '') {
+  const id = String(accountId || '').trim();
+  const accounts = Array.isArray(state.mailAccounts) ? state.mailAccounts : [];
+  return accounts.find((item) => String((item && item.id) || '').trim() === id) || null;
 }
 
 function renderMailAccountsList() {
@@ -8974,13 +9048,19 @@ function renderMailAccountsList() {
           ${escapeHtml(String((account && account.email) || ''))} · ${escapeHtml(String((account && account.account_type) || 'manual_imap_smtp').replace(/_/g, ' '))} · ${escapeHtml(String((account && account.provider) || 'generic').replace(/_/g, ' '))}
         </div>
         <div class="settings-user-secondary">
-          ${escapeHtml(String((account && account.last_error) || '')) || `Last sync: ${formatAgo((account && account.last_sync_at) || 0) || 'never'}`}
+          ${escapeHtml(describeMailAccountStatus(account))}
         </div>
         <div class="settings-user-secondary">
           ${escapeHtml(String((account && account.host) || ''))}:${escapeHtml(String((account && account.port) || ''))} · ${escapeHtml(String((account && account.mailbox) || 'INBOX'))}
         </div>
       </div>
       <div class="settings-inline-actions">
+        <label class="settings-field settings-boolean-field">
+          <span class="settings-toggle-card">
+            <input type="checkbox" data-mail-toggle-notifications="${escapeHtml(String((account && account.id) || ''))}" ${account && account.notifications_enabled ? 'checked' : ''} />
+            <span>Notifications</span>
+          </span>
+        </label>
         <button data-mail-sync-account="${escapeHtml(String((account && account.id) || ''))}">Sync</button>
         <button data-mail-delete-account="${escapeHtml(String((account && account.id) || ''))}">Delete</button>
       </div>
@@ -10425,6 +10505,28 @@ function bindControls() {
       renderSettingsStatusLine();
       await refreshMailStatus();
     }
+  });
+  e('settings-mail-accounts-list')?.addEventListener('change', async (event) => {
+    const toggle = event.target.closest('[data-mail-toggle-notifications]');
+    if (!toggle) return;
+    const accountId = String(toggle.getAttribute('data-mail-toggle-notifications') || '').trim();
+    const existing = getMailAccountById(accountId);
+    if (!accountId || !existing) return;
+    const res = await api.mailSaveAccount({
+      id: accountId,
+      notifications_enabled: !!toggle.checked,
+    });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) || 'Unable to update mailbox notifications.';
+      renderSettingsStatusLine();
+      await refreshMailAccounts();
+      return;
+    }
+    state.mailAccounts = Array.isArray(res.accounts) ? res.accounts : state.mailAccounts;
+    state.settingsSaveState = 'Mailbox notifications updated.';
+    renderSettingsStatusLine();
+    await refreshMailAccounts();
+    if (state.appView === 'mail') await renderGlobalMailPage();
   });
 
   e('settings-cancel-btn')?.addEventListener('click', () => {
