@@ -12808,11 +12808,13 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
   const tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
   const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
   const contextFiles = Array.isArray(ref.context_files) ? ref.context_files : [];
+  const mailThreads = Array.isArray(ref.mail_threads) ? ref.mail_threads : [];
   const scoped = Array.isArray(scopedRefs) ? scopedRefs : [];
   const toolingEnabled = !!(options && options.toolingEnabled);
   const activeArtifactContext = (options && options.activeArtifactContext && typeof options.activeArtifactContext === 'object')
     ? options.activeArtifactContext
     : null;
+  const hasMailIntent = /\b(mail|email|gmail|inbox|mailbox|thread|reply|draft)\b/i.test(String(message || '').trim());
 
   const activeTab = tabs.find((tab) => String((tab && tab.id) || '') === String((ref && ref.active_tab_id) || '')) || tabs[0] || null;
   const tabSummary = tabs.slice(0, 8).map((tab) => {
@@ -12835,6 +12837,12 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
     const name = trimForPrompt((file && file.original_name) || (file && file.relative_path) || 'context.txt', 80);
     const note = trimForPrompt((file && file.summary) || '', 180);
     return `- ${name}${note ? `: ${note}` : ''}`;
+  }).join('\n');
+  const mailSummary = mailThreads.slice(0, 12).map((thread) => {
+    const subject = trimForPrompt((thread && thread.subject) || 'Untitled thread', 100);
+    const participants = Array.isArray(thread && thread.participants) ? thread.participants.slice(0, 4).join(', ') : '';
+    const snippet = trimForPrompt((thread && thread.snippet) || '', 160);
+    return `- ${subject}${participants ? ` [${trimForPrompt(participants, 120)}]` : ''}${snippet ? `: ${snippet}` : ''}`;
   }).join('\n');
   const scopedSummary = scoped.slice(0, 20).map((item) => {
     const title = trimForPrompt((item && item.title) || 'Untitled', 80);
@@ -12865,6 +12873,15 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
       '- Create a new artifact only when the user explicitly asks for a new/another/separate version.',
       '- Complete research/tool work first, then write the requested deliverable artifact, then provide a concise final reply.',
       '- For short answers and follow-ups, reply directly in chat without opening any artifact.',
+      ...(hasMailIntent && mailThreads.length > 0
+        ? [
+          'Attached mail workflow:',
+          '- The active reference already has mail threads attached.',
+          '- Use search_attached_mail_threads to find relevant attached mail first.',
+          '- Then use read_attached_mail_thread on the best match before drafting a reply or summary.',
+          '- If the user asks for a draft or reply, write it into a markdown artifact unless they explicitly ask for chat-only output.',
+        ]
+        : []),
       'Research and citation policy:',
       '- For local research, call search_local_evidence before final synthesis.',
       '- For specific questions about uploaded docs/PDFs, call analyze_context_file on the relevant context_file_id before concluding.',
@@ -12904,6 +12921,7 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
     tabSummary ? `Tabs:\n${tabSummary}` : 'Tabs: (none)',
     artifactSummary ? `Artifacts:\n${artifactSummary}` : 'Artifacts: (none)',
     contextSummary ? `Context files:\n${contextSummary}` : 'Context files: (none)',
+    mailSummary ? `Attached mail threads:\n${mailSummary}` : 'Attached mail threads: (none)',
     scopedSummary ? `Visible reference scope:\n${scopedSummary}` : 'Visible reference scope: (none)',
     threadContext ? `\n${threadContext}` : '',
   ].filter(Boolean).join('\n');
@@ -13369,6 +13387,58 @@ async function dispatchProgrammaticTool(req, { srId, refs }) {
     };
   }
 
+  if (name === 'list_attached_mail_threads') {
+    const threads = Array.isArray(ref.mail_threads) ? ref.mail_threads : [];
+    return threads.map((thread) => ({
+      id: String((thread && thread.id) || '').trim(),
+      subject: String((thread && thread.subject) || '').trim(),
+      participants: Array.isArray(thread && thread.participants) ? thread.participants.map((item) => String(item || '').trim()).filter(Boolean) : [],
+      snippet: String((thread && thread.snippet) || '').trim(),
+      last_message_at: Number((thread && thread.last_message_at) || 0),
+      message_count: Array.isArray(thread && thread.messages) ? thread.messages.length : 0,
+    }));
+  }
+
+  if (name === 'search_attached_mail_threads') {
+    const query = String(args.query || '').trim().toLowerCase();
+    const threads = Array.isArray(ref.mail_threads) ? ref.mail_threads : [];
+    const normalized = threads.map((thread) => ({
+      id: String((thread && thread.id) || '').trim(),
+      subject: String((thread && thread.subject) || '').trim(),
+      participants: Array.isArray(thread && thread.participants) ? thread.participants.map((item) => String(item || '').trim()).filter(Boolean) : [],
+      snippet: String((thread && thread.snippet) || '').trim(),
+      last_message_at: Number((thread && thread.last_message_at) || 0),
+      message_count: Array.isArray(thread && thread.messages) ? thread.messages.length : 0,
+      _haystack: [
+        String((thread && thread.subject) || ''),
+        String((thread && thread.snippet) || ''),
+        ...(Array.isArray(thread && thread.participants) ? thread.participants : []),
+        ...(Array.isArray(thread && thread.messages) ? thread.messages.flatMap((message) => [
+          String((message && message.subject) || ''),
+          String((message && message.from) || ''),
+          ...(Array.isArray(message && message.to) ? message.to : []),
+          ...(Array.isArray(message && message.cc) ? message.cc : []),
+          String((message && message.body_text) || ''),
+        ]) : []),
+      ].join('\n').toLowerCase(),
+    }));
+    const matched = query
+      ? normalized.filter((thread) => thread._haystack.includes(query))
+      : normalized;
+    return matched
+      .sort((a, b) => Number(b.last_message_at || 0) - Number(a.last_message_at || 0))
+      .map(({ _haystack, ...thread }) => thread)
+      .slice(0, 40);
+  }
+
+  if (name === 'read_attached_mail_thread') {
+    const threadId = String(args.thread_id || '').trim();
+    const threads = Array.isArray(ref.mail_threads) ? ref.mail_threads : [];
+    const thread = threads.find((item) => String((item && item.id) || '').trim() === threadId) || null;
+    if (!thread) return null;
+    return sanitizeMailThread(thread);
+  }
+
   if (name === 'list_context_files') {
     const contextFiles = Array.isArray(ref.context_files) ? ref.context_files : [];
     return contextFiles.map((f) => ({
@@ -13602,6 +13672,9 @@ function formatToolStatusStart(toolName, args = {}) {
   const name = String(toolName || '').trim();
   const payload = (args && typeof args === 'object') ? args : {};
   if (name === 'list_context_files') return 'Listing context files...';
+  if (name === 'list_attached_mail_threads') return 'Listing attached mail threads...';
+  if (name === 'search_attached_mail_threads') return `Searching attached mail threads for "${trimStatusText(payload.query || '', 90)}"...`;
+  if (name === 'read_attached_mail_thread') return `Reading attached mail thread ${trimStatusText(payload.thread_id || '', 36) || '(selected thread)'}...`;
   if (name === 'read_context_file') return `Reading context file ${trimStatusText(payload.file_id || '', 36) || '(selected file)'}...`;
   if (name === 'search_reference_graph') return `Searching reference graph for "${trimStatusText(payload.query || '', 90)}"...`;
   if (name === 'read_artifact') return `Reading artifact ${trimStatusText(payload.artifact_id || '', 36) || '(selected artifact)'}...`;
@@ -13667,6 +13740,9 @@ function formatPythonBridgeStatusStart(toolName, args = {}) {
   const name = String(toolName || '').trim();
   const payload = (args && typeof args === 'object') ? args : {};
   if (name === 'list_context_files') return 'Listing context files...';
+  if (name === 'list_attached_mail_threads') return 'Listing attached mail threads...';
+  if (name === 'search_attached_mail_threads') return `Searching attached mail threads for "${trimStatusText(payload.query || '', 90)}"...`;
+  if (name === 'read_attached_mail_thread') return `Reading attached mail thread ${trimStatusText(payload.thread_id || '', 36) || '(selected thread)'}...`;
   if (name === 'read_context_file') return `Reading context file ${trimStatusText(payload.file_id || '', 36) || '(selected file)'}...`;
   if (name === 'search_reference_graph') return `Searching reference graph for "${trimStatusText(payload.query || '', 90)}"...`;
   if (name === 'read_artifact') return `Reading artifact ${trimStatusText(payload.artifact_id || '', 36) || '(selected artifact)'}...`;
@@ -13681,6 +13757,12 @@ function formatPythonBridgeStatusDone(toolName, result) {
   if (name === 'list_context_files' && Array.isArray(payload)) {
     return `Listed ${payload.length} context file(s).`;
   }
+  if (name === 'list_attached_mail_threads' && Array.isArray(payload)) {
+    return `Listed ${payload.length} attached mail thread(s).`;
+  }
+  if (name === 'search_attached_mail_threads' && Array.isArray(payload)) {
+    return `Found ${payload.length} attached mail thread(s).`;
+  }
   if (name === 'list_artifacts' && Array.isArray(payload)) {
     return `Listed ${payload.length} artifact(s).`;
   }
@@ -13690,6 +13772,7 @@ function formatPythonBridgeStatusDone(toolName, result) {
     return `Reference graph search returned ${nodeCount} node(s), ${edgeCount} edge(s).`;
   }
   if (name === 'read_context_file') return 'Context file read complete.';
+  if (name === 'read_attached_mail_thread') return 'Attached mail thread read complete.';
   if (name === 'read_artifact') return 'Artifact read complete.';
   if (name === 'list_highlights' && Array.isArray(payload)) {
     return `Read ${payload.length} highlight(s).`;
@@ -14501,7 +14584,10 @@ async function executeLuminoChat(input, options = {}) {
         }
 
         if (
-          name === 'list_artifacts'
+          name === 'list_attached_mail_threads'
+          || name === 'search_attached_mail_threads'
+          || name === 'read_attached_mail_thread'
+          || name === 'list_artifacts'
           || name === 'read_artifact'
           || name === 'list_highlights'
           || name === 'search_reference_graph'
@@ -14519,7 +14605,7 @@ async function executeLuminoChat(input, options = {}) {
               };
             }
             const missingReadResult = (
-              (name === 'read_artifact' || name === 'read_context_file')
+              (name === 'read_artifact' || name === 'read_context_file' || name === 'read_attached_mail_thread')
               && !directResult
             );
             if (missingReadResult) {

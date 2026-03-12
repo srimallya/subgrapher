@@ -365,6 +365,9 @@ const AGENT_TOOLS = [
       '  search_reference_graph(query) -> {nodes, edges}',
       '  list_context_files() -> list[{id, name, size_bytes, summary, mime_type, relative_path, source_type, extract_strategy, is_image}]',
       '  read_context_file(file_id) -> {name, content, mode, mime_type, summary, extract_strategy, vision}',
+      '  list_attached_mail_threads() -> list[{id, subject, participants, snippet, last_message_at, message_count}]',
+      '  search_attached_mail_threads(query) -> list[{id, subject, participants, snippet, last_message_at, message_count}]',
+      '  read_attached_mail_thread(thread_id) -> {id, subject, participants, snippet, messages[]}',
       'Use these stubs to access reference data inside Python. Process and filter results before printing — only stdout reaches your context.',
     ].join(' '),
     parameters: {
@@ -646,6 +649,32 @@ const AGENT_TOOLS = [
     },
   },
   {
+    name: 'search_attached_mail_threads',
+    allowed_callers: ['direct', 'run_python'],
+    description: 'Search the mail threads already attached to the active reference. Use this before reading a specific attached thread.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query over subject, participants, snippet, and message text.' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_attached_mail_thread',
+    allowed_callers: ['direct', 'run_python'],
+    description: 'Read a full normalized mail thread already attached to the active reference.',
+    parameters: {
+      type: 'object',
+      properties: {
+        thread_id: { type: 'string', description: 'Attached mail thread ID.' },
+      },
+      required: ['thread_id'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'finish',
     allowed_callers: ['direct'],
     description: 'Finish the agent loop with a final user-facing answer.',
@@ -660,6 +689,16 @@ const AGENT_TOOLS = [
   },
 
   // ── Programmatic tools (also callable directly where enabled) ─────────────
+  {
+    name: 'list_attached_mail_threads',
+    allowed_callers: ['direct', 'run_python'],
+    description: 'List mail threads already attached to the active reference.',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+  },
   {
     name: 'list_artifacts',
     allowed_callers: ['direct', 'run_python'],
@@ -797,6 +836,9 @@ function aggregatePending(target, source) {
 }
 
 const LOCAL_EVIDENCE_TOOL_NAMES = new Set([
+  'list_attached_mail_threads',
+  'search_attached_mail_threads',
+  'read_attached_mail_thread',
   'list_artifacts',
   'read_artifact',
   'list_highlights',
@@ -1135,7 +1177,7 @@ function buildRecoveryPrompt(missingPhase) {
     return [
       'Continue the task.',
       'Required phase missing: workspace local evidence read.',
-      'Call exactly one local evidence tool now (list_artifacts, read_artifact, list_highlights, list_context_files, read_context_file, analyze_context_file, or search_reference_graph).',
+      'Call exactly one local evidence tool now (list_artifacts, read_artifact, list_highlights, list_context_files, read_context_file, analyze_context_file, search_reference_graph, list_attached_mail_threads, search_attached_mail_threads, or read_attached_mail_thread).',
       'Do not call finish yet.',
     ].join(' ');
   }
