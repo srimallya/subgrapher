@@ -608,7 +608,7 @@ function upsertAccount(db, account = {}) {
       new_threads_count, new_messages_count, last_notified_at, created_at, updated_at,
       account_type, provider, oauth_access_token_ref, oauth_refresh_token_ref, oauth_client_id_ref,
       oauth_client_secret_ref, oauth_token_expires_at, capabilities_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       label = excluded.label,
       email = excluded.email,
@@ -1230,7 +1230,11 @@ function createMailStore(options = {}) {
         const allUids = await client.uidSearchAll();
         const numericUids = allUids.map((item) => Math.round(Number(item || 0))).filter(Boolean);
         const targetUids = numericUids.slice(-account.sync_limit);
+        const metadataRows = await client.uidFetchMetadata(targetUids);
+        const metadataByUid = new Map(metadataRows.map((item) => [Math.round(Number((item && item.uid) || 0)), item]));
         const seenUids = new Set(targetUids);
+        const existingUids = new Set();
+        const mailboxRole = inferMailboxRole(mailbox.path, mailbox.special_use);
         await withDatabase(async (db) => {
           const existingRows = selectRows(
             db,
@@ -1239,6 +1243,7 @@ function createMailStore(options = {}) {
           );
           existingRows.forEach((row) => {
             const uid = Math.round(Number(row.uid || 0));
+            if (uid) existingUids.add(uid);
             if (uid && !seenUids.has(uid)) {
               const delStmt = db.prepare('DELETE FROM messages WHERE account_id = ? AND uid = ? AND LOWER(mailbox) = LOWER(?)');
               delStmt.bind([account.id, uid, mailbox.path]);
@@ -1246,8 +1251,35 @@ function createMailStore(options = {}) {
               delStmt.free();
             }
           });
+          const updateFlagsStmt = db.prepare(`
+            UPDATE messages
+            SET flags_json = ?, is_unread = ?, is_flagged = ?, is_draft = ?, is_trashed = ?, is_archived = ?, updated_at = ?
+            WHERE account_id = ? AND uid = ? AND LOWER(mailbox) = LOWER(?)
+          `);
+          existingUids.forEach((uid) => {
+            const metadata = metadataByUid.get(uid);
+            if (!metadata) return;
+            const flags = Array.isArray(metadata.flags) ? metadata.flags : [];
+            const state = flagsToState(flags, mailboxRole);
+            updateFlagsStmt.bind([
+              JSON.stringify(flags),
+              state.is_unread,
+              state.is_flagged,
+              state.is_draft,
+              state.is_trashed,
+              state.is_archived,
+              nowTs(),
+              account.id,
+              uid,
+              mailbox.path,
+            ]);
+            updateFlagsStmt.step();
+            updateFlagsStmt.reset();
+          });
+          updateFlagsStmt.free();
         });
-        for (const uid of targetUids) {
+        const missingUids = targetUids.filter((uid) => !existingUids.has(uid));
+        for (const uid of missingUids) {
           const fetched = await client.fetchRawMessage(uid);
           await withDatabase(async (db) => {
             const message = buildParsedMessage(account, mailbox, uid, fetched.raw_source, fetched.flags || [], db);
@@ -1261,6 +1293,14 @@ function createMailStore(options = {}) {
           });
           syncedCount += 1;
         }
+        await withDatabase(async (db) => {
+          upsertMailbox(db, {
+            ...mailbox,
+            message_count: numericUids.length,
+            last_sync_at: nowTs(),
+            updated_at: nowTs(),
+          });
+        });
       }
 
       await withDatabase(async (db) => {

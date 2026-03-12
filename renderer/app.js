@@ -10490,13 +10490,16 @@ function bindControls() {
       if (!res || !res.ok) {
         state.settingsSaveState = (res && res.message) || `Unable to sync ${String((account && account.label) || 'mailbox')}.`;
         renderSettingsStatusLine();
+        await refreshMailAccounts();
         await refreshMailStatus();
         return;
       }
+      if (Array.isArray(res.accounts)) state.mailAccounts = res.accounts;
       if (Array.isArray(res.mailboxes)) state.mailboxesByAccount.set(String((account && account.id) || '').trim(), res.mailboxes);
     }
     state.settingsSaveState = 'Mailbox sync completed.';
     renderSettingsStatusLine();
+    await refreshMailAccounts();
     await refreshMailStatus();
     if (state.appView === 'workspace') await renderMailPanel();
     if (state.appView === 'mail') await renderGlobalMailPage();
@@ -10510,8 +10513,10 @@ function bindControls() {
       state.settingsSaveState = (res && res.ok)
         ? 'Mailbox sync completed.'
         : ((res && res.message) || 'Unable to sync mailbox.');
+      if (res && Array.isArray(res.accounts)) state.mailAccounts = res.accounts;
       if (res && res.ok && Array.isArray(res.mailboxes)) state.mailboxesByAccount.set(accountId, res.mailboxes);
       renderSettingsStatusLine();
+      await refreshMailAccounts();
       await refreshMailStatus();
       if (state.appView === 'workspace') await renderMailPanel();
       if (state.appView === 'mail') await renderGlobalMailPage();
