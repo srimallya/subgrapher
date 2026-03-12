@@ -2680,6 +2680,11 @@ body.chat-collapsed #chat-panel-resizer {
   background: #2a2a2a;
 }
 
+.mail-list-row.unread:not(.active) {
+  border-color: #5a4c3a;
+  background: #24201c;
+}
+
 .mail-list-row-main {
   flex: 1 1 auto;
   min-width: 0;
@@ -2716,10 +2721,34 @@ body.chat-collapsed #chat-panel-resizer {
   font-size: 13px;
 }
 
+.mail-row-title.unread,
+.mail-list-row.unread .mail-row-sender-name {
+  font-weight: 600;
+}
+
 .mail-row-sub,
 .mail-message-body {
   color: var(--muted);
   font-size: 12px;
+}
+
+.mail-row-meta {
+  color: var(--muted);
+}
+
+.mail-row-sender {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--text);
+}
+
+.mail-row-sender-name {
+  color: var(--text);
+}
+
+.mail-row-time {
+  color: var(--muted);
 }
 
 .mail-message-body {

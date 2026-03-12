@@ -5062,6 +5062,14 @@ function renderMailPreviewMarkup(preview) {
   `;
 }
 
+function orderMailThreadMessages(messages = []) {
+  return (Array.isArray(messages) ? messages.slice() : []).sort((a, b) => {
+    const sentDiff = Number((b && b.sent_ts) || 0) - Number((a && a.sent_ts) || 0);
+    if (sentDiff !== 0) return sentDiff;
+    return Number((b && b.uid) || 0) - Number((a && a.uid) || 0);
+  });
+}
+
 async function runMailSearch(srId, query) {
   const refId = String(srId || '').trim();
   const nav = getMailNavState(refId);
@@ -5097,6 +5105,25 @@ async function refreshVisibleMailStoreState(viewId, accountId = '') {
   if (previewRes && previewRes.ok && previewRes.thread) {
     setMailPreviewState(targetViewId, { thread_id: previewThreadId, thread: previewRes.thread });
   }
+}
+
+async function openMailThreadPreview(viewId, threadId) {
+  const id = String(threadId || '').trim();
+  if (!id) return null;
+  let res = await api.mailPreviewSource(id);
+  if (!res || !res.ok || !res.thread) return null;
+  let thread = res.thread;
+  const hasUnread = Array.isArray(thread.messages) && thread.messages.some((message) => !!message.is_unread);
+  if (hasUnread) {
+    const updateRes = await api.mailUpdateThreadState(id, { is_unread: false });
+    if (updateRes && updateRes.ok) {
+      await runMailSearch(viewId, getMailSearchState(viewId).query || '');
+      res = await api.mailPreviewSource(id);
+      if (res && res.ok && res.thread) thread = res.thread;
+    }
+  }
+  setMailPreviewState(viewId, { thread_id: id, thread });
+  return thread;
 }
 
 function buildReplyDraftFromPreview(previewState = null) {
@@ -5191,21 +5218,26 @@ async function renderMailPanel() {
       const threadId = String((item && item.id) || '').trim();
       const isActive = previewState && String((previewState && previewState.thread_id) || '') === threadId;
       const isSelected = selectedSources.has(threadId);
+      const isUnread = Number((item && item.unread_count) || 0) > 0;
       const meta = [
         String((item && item.account_label) || '').trim(),
         MAIL_SMART_FOLDER_LABELS[String((item && item.mailbox_role) || '').trim().toLowerCase()] || formatMailFolderLabel({ path: String((item && item.mailbox) || '').trim() }),
-        String((item && item.from) || '').trim(),
-        formatAgo((item && item.last_message_at) || 0),
       ].filter(Boolean).join(' · ');
+      const sender = String((item && item.from) || '').trim() || 'Unknown sender';
+      const sentAgo = formatAgo((item && item.last_message_at) || 0);
       return `
-        <div class="mail-list-row ${isActive ? 'active' : ''}">
+        <div class="mail-list-row ${isActive ? 'active' : ''} ${isUnread ? 'unread' : ''}">
           <button type="button" class="mail-list-row-main" data-mail-thread-preview="${escapeHtml(threadId)}">
-            <div class="mail-row-title">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
-            <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
+            <div class="mail-row-title ${isUnread ? 'unread' : ''}">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
+            <div class="mail-row-sub mail-row-meta muted small">${escapeHtml(meta)}</div>
+            <div class="mail-row-sub mail-row-sender">
+              <span class="mail-row-sender-name">${escapeHtml(sender)}</span>
+              ${sentAgo ? `<span class="mail-row-time">${escapeHtml(sentAgo)}</span>` : ''}
+            </div>
             <div class="mail-row-sub">${escapeHtml(normalizeMailSnippet((item && item.snippet) || ''))}</div>
           </button>
           <div class="mail-row-side">
-            ${Number((item && item.unread_count) || 0) > 0 ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
+            ${isUnread ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
             <button type="button" class="mail-row-select-btn ${isSelected ? 'active' : ''}" data-mail-thread-select="${escapeHtml(threadId)}">
               ${selectionMode ? 'Remove' : (isSelected ? 'Selected' : 'Select')}
             </button>
@@ -5219,7 +5251,7 @@ async function renderMailPanel() {
 
   let contentMarkup = '<div class="muted small">Select a thread above to preview it.</div>';
   if (previewState && previewState.thread && Array.isArray(previewState.thread.messages)) {
-    contentMarkup = previewState.thread.messages.map((message) => renderMailPreviewMarkup(message)).join('');
+    contentMarkup = orderMailThreadMessages(previewState.thread.messages).map((message) => renderMailPreviewMarkup(message)).join('');
   }
 
   const composeMarkup = composer && composer.open ? `
@@ -5589,9 +5621,8 @@ async function renderMailPanel() {
     node.addEventListener('click', async () => {
       const threadId = String(node.getAttribute('data-mail-thread-preview') || '').trim();
       if (!threadId || !state.activeSrId) return;
-      const res = await api.mailPreviewSource(threadId);
-      if (!res || !res.ok || !res.thread) return;
-      setMailPreviewState(state.activeSrId, { thread_id: threadId, thread: res.thread });
+      const thread = await openMailThreadPreview(state.activeSrId, threadId);
+      if (!thread) return;
       await renderMailPanel();
     });
   });
@@ -5648,21 +5679,26 @@ async function renderGlobalMailPage() {
     ? results.map((item) => {
       const threadId = String((item && item.id) || '').trim();
       const isActive = previewState && String((previewState && previewState.thread_id) || '') === threadId;
+      const isUnread = Number((item && item.unread_count) || 0) > 0;
       const meta = [
         String((item && item.account_label) || '').trim(),
         MAIL_SMART_FOLDER_LABELS[String((item && item.mailbox_role) || '').trim().toLowerCase()] || formatMailFolderLabel({ path: String((item && item.mailbox) || '').trim() }),
-        String((item && item.from) || '').trim(),
-        formatAgo((item && item.last_message_at) || 0),
       ].filter(Boolean).join(' · ');
+      const sender = String((item && item.from) || '').trim() || 'Unknown sender';
+      const sentAgo = formatAgo((item && item.last_message_at) || 0);
       return `
-        <div class="mail-list-row ${isActive ? 'active' : ''}">
+        <div class="mail-list-row ${isActive ? 'active' : ''} ${isUnread ? 'unread' : ''}">
           <button type="button" class="mail-list-row-main" data-global-mail-thread-preview="${escapeHtml(threadId)}">
-            <div class="mail-row-title">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
-            <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
+            <div class="mail-row-title ${isUnread ? 'unread' : ''}">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
+            <div class="mail-row-sub mail-row-meta muted small">${escapeHtml(meta)}</div>
+            <div class="mail-row-sub mail-row-sender">
+              <span class="mail-row-sender-name">${escapeHtml(sender)}</span>
+              ${sentAgo ? `<span class="mail-row-time">${escapeHtml(sentAgo)}</span>` : ''}
+            </div>
             <div class="mail-row-sub">${escapeHtml(normalizeMailSnippet((item && item.snippet) || ''))}</div>
           </button>
           <div class="mail-row-side">
-            ${Number((item && item.unread_count) || 0) > 0 ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
+            ${isUnread ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
           </div>
         </div>
       `;
@@ -5671,7 +5707,7 @@ async function renderGlobalMailPage() {
 
   let contentMarkup = '<div class="muted small">Select a thread to preview it.</div>';
   if (previewState && previewState.thread && Array.isArray(previewState.thread.messages)) {
-    contentMarkup = previewState.thread.messages.map((message) => renderMailPreviewMarkup(message)).join('');
+    contentMarkup = orderMailThreadMessages(previewState.thread.messages).map((message) => renderMailPreviewMarkup(message)).join('');
   }
 
   const composeMarkup = composer && composer.open ? `
@@ -5934,9 +5970,8 @@ async function renderGlobalMailPage() {
     node.addEventListener('click', async () => {
       const threadId = String(node.getAttribute('data-global-mail-thread-preview') || '').trim();
       if (!threadId) return;
-      const res = await api.mailPreviewSource(threadId);
-      if (!res || !res.ok || !res.thread) return;
-      setMailPreviewState(viewId, { thread_id: threadId, thread: res.thread });
+      const thread = await openMailThreadPreview(viewId, threadId);
+      if (!thread) return;
       await renderGlobalMailPage();
     });
   });
