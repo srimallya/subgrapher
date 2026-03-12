@@ -5368,7 +5368,7 @@ function createMailSyncManager() {
     }, intervalMs);
     bootstrapTimer = setTimeout(() => {
       tick('startup').catch(() => {});
-    }, 5000);
+    }, 0);
     return status();
   }
 
