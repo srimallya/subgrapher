@@ -5081,6 +5081,24 @@ async function runMailSearch(srId, query) {
   return res;
 }
 
+async function refreshVisibleMailStoreState(viewId, accountId = '') {
+  const targetViewId = String(viewId || '').trim();
+  if (!targetViewId) return;
+  const targetAccountId = String(accountId || '').trim();
+  const nav = getMailNavState(targetViewId);
+  const activeAccountId = String(nav.account_id || '').trim();
+  if (targetAccountId && activeAccountId && activeAccountId !== targetAccountId) return;
+  const searchState = getMailSearchState(targetViewId);
+  const previewState = getMailPreviewState(targetViewId);
+  const previewThreadId = String((previewState && previewState.thread_id) || '').trim();
+  await runMailSearch(targetViewId, searchState.query || '');
+  if (!previewThreadId) return;
+  const previewRes = await api.mailPreviewSource(previewThreadId);
+  if (previewRes && previewRes.ok && previewRes.thread) {
+    setMailPreviewState(targetViewId, { thread_id: previewThreadId, thread: previewRes.thread });
+  }
+}
+
 function buildReplyDraftFromPreview(previewState = null) {
   const thread = previewState && previewState.thread ? previewState.thread : null;
   const messages = Array.isArray(thread && thread.messages) ? thread.messages : [];
@@ -5935,9 +5953,19 @@ async function handleMailEventPayload(payload = {}) {
   const type = String((payload && payload.type) || '').trim().toLowerCase();
   if (!type) return;
   if (type === 'sync_status') {
+    const phase = String((payload && payload.phase) || '').trim().toLowerCase();
+    const accountId = String((payload && payload.account_id) || '').trim();
     await refreshMailAccounts();
     state.mailStatus = await api.mailStatus();
     renderMailSettingsStatus();
+    if (phase === 'finished') {
+      if (state.appView === 'mail') {
+        await refreshVisibleMailStoreState(GLOBAL_MAIL_VIEW_ID, accountId);
+      }
+      if (state.appView === 'workspace' && state.activeSurface.kind === 'mail') {
+        await refreshVisibleMailStoreState(state.activeSrId, accountId);
+      }
+    }
     if (state.appView === 'mail') await renderGlobalMailPage();
     if (state.appView === 'workspace' && state.activeSurface.kind === 'mail') await renderMailPanel();
     return;
