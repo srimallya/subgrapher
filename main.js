@@ -8233,13 +8233,13 @@ function readHyperwebSocialState() {
 }
 
 function getHyperwebIdentityPrivateKeyRaw() {
-  const got = keychain.getSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_IDENTITY_SERVICE });
+  const got = getPlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_IDENTITY_SERVICE });
   if (got && got.ok && got.secret) return String(got.secret || '');
   return '';
 }
 
 function getHyperwebChatPrivateKeyRaw() {
-  const got = keychain.getSecret(HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_CHAT_KEY_SERVICE });
+  const got = getPlatformServiceSecret(HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_CHAT_KEY_SERVICE });
   if (got && got.ok && got.secret) return String(got.secret || '');
   return '';
 }
@@ -8316,7 +8316,7 @@ function generateAndPersistHyperwebIdentity(state) {
   const privateKeyObj = generated.privateKey;
   const pubKeyPem = generated.publicKey.export({ type: 'spki', format: 'pem' });
   const encodedPrivate = encodeHyperwebPrivateKey(privateKeyObj);
-  keychain.setSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, encodedPrivate, { service: HYPERWEB_IDENTITY_SERVICE });
+  setPlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, encodedPrivate, { service: HYPERWEB_IDENTITY_SERVICE });
   const fingerprint = localFingerprintFromPubKey(pubKeyPem);
   const nextIdentity = {
     pubkey: pubKeyPem,
@@ -8365,7 +8365,7 @@ function ensureHyperwebIdentity() {
     }
     const encoded = encodeHyperwebPrivateKey(privateKeyObj);
     if (encoded && !privateKeyRaw.startsWith(HYPERWEB_IDENTITY_DER_PREFIX)) {
-      keychain.setSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, encoded, { service: HYPERWEB_IDENTITY_SERVICE });
+      setPlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, encoded, { service: HYPERWEB_IDENTITY_SERVICE });
     }
   }
 
@@ -8408,7 +8408,7 @@ function ensureHyperwebChatKeyPair(stateOverride = null) {
     publicKeyPem = generated.publicKey.export({ type: 'spki', format: 'pem' });
     const encoded = encodeHyperwebChatPrivateKey(privateKeyObj);
     if (encoded) {
-      keychain.setSecret(HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT, encoded, { service: HYPERWEB_CHAT_KEY_SERVICE });
+      setPlatformServiceSecret(HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT, encoded, { service: HYPERWEB_CHAT_KEY_SERVICE });
     }
     changed = true;
   }
@@ -19435,7 +19435,8 @@ ipcMain.handle('browser:settingsDangerResetHyperwebIdentity', async (_event, pay
   if (phrase !== confirmTypedResetPhrase('RESET')) {
     return { ok: false, message: 'Type RESET to confirm.' };
   }
-  keychain.deleteSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_IDENTITY_SERVICE });
+  deletePlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_IDENTITY_SERVICE });
+  deletePlatformServiceSecret(HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_CHAT_KEY_SERVICE });
   const state = ensureHyperwebSocialState();
   state.identity = createDefaultHyperwebSocialState().identity;
   writeHyperwebSocialState(state);
