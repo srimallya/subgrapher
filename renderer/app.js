@@ -90,6 +90,10 @@ const state = {
   hyperwebChatConversations: [],
   hyperwebChatRooms: [],
   hyperwebChatMembers: [],
+  hyperwebChatThreadId: '',
+  hyperwebChatThreadPolicy: { retention: 'off' },
+  hyperwebChatActivePresence: null,
+  hyperwebChatLivePeerCount: 0,
   hyperwebChatPendingFile: null,
   hyperwebReferenceExpandedKeys: new Set(),
   hyperwebPostSearchQuery: '',
@@ -6917,6 +6921,24 @@ function setupBrowserEvents() {
       }
     });
   }
+  if (typeof api.onHyperwebOpenThread === 'function') {
+    api.onHyperwebOpenThread((payload) => {
+      const mode = String((payload && payload.mode) || 'dm').trim().toLowerCase() === 'room' ? 'room' : 'dm';
+      const peerId = String((payload && payload.peer_id) || '').trim();
+      const roomId = String((payload && payload.room_id) || '').trim();
+      setAppView('hyperweb').then(async () => {
+        state.hyperwebActiveTab = 'chat';
+        state.hyperwebChatMode = mode;
+        if (mode === 'room') {
+          state.hyperwebChatRoomId = roomId;
+        } else {
+          state.hyperwebChatPeerId = peerId;
+        }
+        renderAppView();
+        await refreshHyperwebChatData();
+      }).catch(() => {});
+    });
+  }
   if (typeof api.onAudible === 'function') {
     api.onAudible((payload) => {
       const audible = !!(payload && payload.audible);
@@ -7583,8 +7605,10 @@ function renderHyperwebIdentityLine() {
 function hyperwebChatMemberLabel(member) {
   if (!member || typeof member !== 'object') return 'member';
   const name = String(member.display_name || member.member_id || 'member').trim();
-  const online = !!member.is_online;
-  return `${name}${online ? ' (online)' : ''}`;
+  const presence = String(member.presence_status || (member.is_online ? 'online' : 'offline')).trim().toLowerCase();
+  if (presence === 'online') return `${name} (online)`;
+  if (presence === 'seen_recently') return `${name} (seen recently)`;
+  return `${name} (offline)`;
 }
 
 function getHyperwebSelectableDmPeers() {
@@ -7648,6 +7672,28 @@ function renderHyperwebChatLayout() {
   const isDm = state.hyperwebChatMode === 'dm';
   layout.classList.toggle('is-dm', isDm);
   layout.classList.toggle('is-room', !isDm);
+}
+
+function renderHyperwebChatThreadHeader() {
+  const node = e('hyperweb-chat-thread-meta');
+  const retentionNode = e('hyperweb-chat-thread-retention');
+  if (!node) return;
+  const mode = state.hyperwebChatMode === 'room' ? 'room' : 'dm';
+  if (mode === 'dm') {
+    const peerName = resolveHyperwebPeerDisplayName(state.hyperwebChatPeerId || '');
+    const presence = state.hyperwebChatActivePresence && state.hyperwebChatActivePresence.presence_status
+      ? String(state.hyperwebChatActivePresence.presence_status)
+      : 'offline';
+    const presenceLabel = presence === 'online'
+      ? 'online'
+      : (presence === 'seen_recently' ? 'seen recently' : 'offline');
+    node.textContent = peerName ? `${peerName} · ${presenceLabel}` : 'Choose a peer.';
+  } else {
+    const room = (Array.isArray(state.hyperwebChatRooms) ? state.hyperwebChatRooms : []).find((item) => String((item && item.room_id) || '') === String(state.hyperwebChatRoomId || ''));
+    const roomName = String((room && room.room_name) || state.hyperwebChatRoomId || 'Room');
+    node.textContent = `${roomName} · live peers ${Number(state.hyperwebChatLivePeerCount || 0)}`;
+  }
+  if (retentionNode) retentionNode.value = String(((state.hyperwebChatThreadPolicy || {}).retention) || 'off');
 }
 
 function renderHyperwebChatSelectors() {
@@ -7738,6 +7784,7 @@ function renderHyperwebDmConversationList() {
 
 function renderHyperwebChatThread() {
   const holder = e('hyperweb-chat-thread');
+  renderHyperwebChatThreadHeader();
   if (!holder) return;
   if (state.hyperwebChatMode === 'dm' && !String(state.hyperwebChatPeerId || '').trim()) {
     holder.innerHTML = '<div class="muted small">Choose a peer to continue a chat.</div>';
@@ -7756,7 +7803,9 @@ function renderHyperwebChatThread() {
     const file = item && item.file ? item.file : null;
     const receipt = item && item.read_by && Object.keys(item.read_by || {}).length > 0
       ? 'read'
-      : ((item && item.delivered_by && Object.keys(item.delivered_by || {}).length > 0) ? 'delivered' : 'sent');
+      : ((item && item.delivered_by && Object.keys(item.delivered_by || {}).length > 0) ? 'delivered' : String((item && item.status) || 'queued').replace(/_/g, ' '));
+    const canUndo = outgoing && (receipt === 'sent to mesh' || receipt === 'queued');
+    const messageId = escapeHtml(String((item && item.message_id) || ''));
     return `
       <div class="hyperweb-chat-item ${outgoing ? 'out' : 'in'}">
         <div class="hyperweb-chat-meta">
@@ -7765,10 +7814,40 @@ function renderHyperwebChatThread() {
         </div>
         ${text ? `<div class="hyperweb-chat-text">${text}</div>` : ''}
         ${file ? `<div class="hyperweb-chat-file"><a href="data:${escapeHtml(String(file.mime || 'application/octet-stream'))};base64,${escapeHtml(String(file.data_base64 || ''))}" download="${escapeHtml(String(file.name || 'file.bin'))}">Download ${escapeHtml(String(file.name || 'file.bin'))}</a> (${escapeHtml(String(file.size || 0))} bytes)</div>` : ''}
+        <div class="hyperweb-chat-item-actions">
+          <button class="hyperweb-chat-delete-btn" data-message-id="${messageId}">Delete</button>
+          ${canUndo ? `<button class="hyperweb-chat-undo-btn" data-message-id="${messageId}">Undo send</button>` : ''}
+        </div>
       </div>
     `;
   }).join('');
   holder.scrollTop = holder.scrollHeight;
+  holder.querySelectorAll('.hyperweb-chat-delete-btn').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!api.hyperwebChatDeleteMessage) return;
+      const messageId = String(button.getAttribute('data-message-id') || '').trim();
+      if (!messageId) return;
+      const res = await api.hyperwebChatDeleteMessage(messageId);
+      if (!res || !res.ok) {
+        setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to delete message.');
+        return;
+      }
+      await refreshHyperwebChatData();
+    });
+  });
+  holder.querySelectorAll('.hyperweb-chat-undo-btn').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!api.hyperwebChatDeleteMessage) return;
+      const messageId = String(button.getAttribute('data-message-id') || '').trim();
+      if (!messageId) return;
+      const res = await api.hyperwebChatDeleteMessage(messageId);
+      if (!res || !res.ok) {
+        setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to undo message.');
+        return;
+      }
+      await refreshHyperwebChatData();
+    });
+  });
 }
 
 async function refreshHyperwebChatConversations() {
@@ -7804,10 +7883,18 @@ async function refreshHyperwebChatHistory() {
   state.hyperwebChatMessages = Array.isArray(res.messages) ? res.messages : [];
   state.hyperwebChatRooms = Array.isArray(res.rooms) ? res.rooms : state.hyperwebChatRooms;
   state.hyperwebChatMembers = Array.isArray(res.members) ? res.members : state.hyperwebChatMembers;
+  state.hyperwebChatThreadId = String(res.thread_id || '').trim();
+  state.hyperwebChatThreadPolicy = res.thread_policy && typeof res.thread_policy === 'object'
+    ? res.thread_policy
+    : { retention: 'off' };
+  state.hyperwebChatActivePresence = res.active_presence && typeof res.active_presence === 'object'
+    ? res.active_presence
+    : null;
+  state.hyperwebChatLivePeerCount = Number(res.live_peer_count || 0);
   renderHyperwebChatSelectors();
   renderHyperwebDmConversationList();
   renderHyperwebChatThread();
-  setStatusText('hyperweb-chat-status', `Messages: ${state.hyperwebChatMessages.length}`);
+  setStatusText('hyperweb-chat-status', `Messages: ${state.hyperwebChatMessages.length} · live peers ${state.hyperwebChatLivePeerCount}`);
   if (api.hyperwebChatMarkRead && state.hyperwebChatMessages.length > 0) {
     const unread = state.hyperwebChatMessages
       .filter((item) => String((item && item.direction) || '') === 'in')
@@ -8197,7 +8284,7 @@ async function refreshHyperwebFeedAndReferences() {
     } else {
       state.hyperwebFeed = Array.isArray(feed.posts) ? feed.posts : [];
       renderHyperwebFeedItems(state.hyperwebFeed);
-      setStatusText('hyperweb-feed-status', `Posts: ${state.hyperwebFeed.length} · peers ${Number(feed.peer_count || 0)}`);
+      setStatusText('hyperweb-feed-status', `Posts: ${state.hyperwebFeed.length} · live peers ${Number(feed.peer_count || 0)}`);
     }
   }
   await refreshHyperwebReferences();
@@ -9785,7 +9872,7 @@ async function refreshHyperwebStatus() {
   const relay = String(res.relay_url || '');
   const mode = res.connected ? 'connected' : 'disconnected';
   const signalNote = res.signaling_available ? 'signaling ready' : 'signaling missing';
-  statusNode.textContent = `Hyperweb ${mode} · peers ${peerCount} · ${signalNote}${relay ? ` · relay ${relay}` : ''}`;
+  statusNode.textContent = `Hyperweb ${mode} · live peers ${peerCount} · ${signalNote}${relay ? ` · relay ${relay}` : ''}`;
 }
 
 function showAboutModal(show) {
@@ -11205,6 +11292,31 @@ function bindControls() {
     }
     state.hyperwebChatMode = 'room';
     state.hyperwebChatRoomId = String(res.room.room_id || '');
+    await refreshHyperwebChatData();
+  });
+  e('hyperweb-chat-thread-delete-btn')?.addEventListener('click', async () => {
+    if (!api.hyperwebChatDeleteThread) return;
+    const threadId = String(state.hyperwebChatThreadId || '').trim();
+    if (!threadId) return;
+    const res = await api.hyperwebChatDeleteThread(threadId);
+    if (!res || !res.ok) {
+      setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to delete thread.');
+      return;
+    }
+    state.hyperwebChatMessages = [];
+    await refreshHyperwebChatData();
+  });
+  e('hyperweb-chat-thread-retention')?.addEventListener('change', async (event) => {
+    if (!api.hyperwebChatThreadPolicySet) return;
+    const threadId = String(state.hyperwebChatThreadId || '').trim();
+    const retention = String(event.target && event.target.value ? event.target.value : 'off').trim();
+    if (!threadId) return;
+    const res = await api.hyperwebChatThreadPolicySet(threadId, retention);
+    if (!res || !res.ok) {
+      setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to update thread auto-delete.');
+      renderHyperwebChatThreadHeader();
+      return;
+    }
     await refreshHyperwebChatData();
   });
   e('hyperweb-chat-file-btn')?.addEventListener('click', () => {

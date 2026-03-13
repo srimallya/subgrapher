@@ -85,6 +85,8 @@ const HYPERWEB_INVITE_PROTO = 'subgrapher';
 const HYPERWEB_INVITE_ROUTE = 'hyperweb-invite';
 const HYPERWEB_PUBLIC_LOBBY_ID = 'public-lobby';
 const HYPERWEB_PUBLIC_LOBBY_NAME = 'Global Lobby';
+const HYPERWEB_PRESENCE_RECENT_WINDOW_MS = 10 * 60 * 1000;
+const HYPERWEB_THREAD_RETENTION_PRESETS = new Set(['off', '24h', '7d', '30d']);
 const HYPERWEB_INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const HYPERWEB_MODERATION_HIDE_SCORE = -12;
 const HYPERWEB_MODERATION_HIDE_MIN_DOWNVOTERS = 8;
@@ -283,6 +285,7 @@ const luminoCrawler = new LuminoCrawler({
 });
 let pendingInviteToken = '';
 let hyperwebSocialState = null;
+const shownHyperwebNotificationIds = new Set();
 const appDataProtectionState = {
   locked: false,
   key: null,
@@ -420,6 +423,7 @@ hyperwebManager.on('protocol', (packet) => {
     });
     if (!persist || !persist.ok || persist.deduped) return;
     upsertHyperwebChatReceipt(signed.message_id, signed.from_peer_id, 'delivered');
+    maybeNotifyIncomingHyperwebMessage(persist.message || {});
     sendBrowserEvent('browser:hyperwebChat', {
       event: 'message',
       message: persist.message,
@@ -5253,6 +5257,21 @@ async function openMailThreadFromMain(payload = {}) {
   setTimeout(() => publishMailEvent(route), 80);
 }
 
+async function openHyperwebThreadFromMain(payload = {}) {
+  const route = {
+    type: 'open_hyperweb_thread',
+    mode: String((payload && payload.mode) || 'dm').trim().toLowerCase() === 'room' ? 'room' : 'dm',
+    peer_id: String((payload && payload.peer_id) || '').trim().toUpperCase(),
+    room_id: String((payload && payload.room_id) || '').trim(),
+  };
+  await focusMainWindow();
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && mainWindow.webContents.isLoadingMainFrame()) {
+    mainWindow.webContents.once('did-finish-load', () => sendBrowserEvent('browser:hyperwebOpenThread', route));
+    return;
+  }
+  setTimeout(() => sendBrowserEvent('browser:hyperwebOpenThread', route), 80);
+}
+
 function showNewMailNotification(group = {}, account = {}) {
   if (typeof Notification !== 'function') return false;
   if (typeof Notification.isSupported === 'function' && !Notification.isSupported()) return false;
@@ -5277,6 +5296,44 @@ function showNewMailNotification(group = {}, account = {}) {
         mailbox_path: String((latest && latest.mailbox) || '').trim(),
         smart_view: '',
         thread_id: String(group.thread_id || '').trim(),
+      }).catch(() => {});
+    });
+    notification.show();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function showHyperwebChatNotification(message = {}) {
+  if (typeof Notification !== 'function') return false;
+  if (typeof Notification.isSupported === 'function' && !Notification.isSupported()) return false;
+  const messageId = String((message && message.message_id) || '').trim();
+  if (!messageId) return false;
+  if (shownHyperwebNotificationIds.has(messageId)) return false;
+  shownHyperwebNotificationIds.add(messageId);
+  if (shownHyperwebNotificationIds.size > 4000) {
+    const first = shownHyperwebNotificationIds.values().next();
+    if (first && !first.done) shownHyperwebNotificationIds.delete(first.value);
+  }
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) return false;
+  const mode = String((message && message.mode) || 'dm').trim().toLowerCase() === 'room' ? 'room' : 'dm';
+  const fromName = String((message && message.from_name) || (message && message.from_peer_id) || 'Trusted peer').trim();
+  const roomName = String((message && message.room_name) || (message && message.room_id) || 'Room').trim();
+  const title = mode === 'room' ? `${roomName} · ${fromName}` : fromName;
+  const body = String((message && message.text) || '').trim()
+    || ((message && message.file) ? `Sent ${String((message.file && message.file.name) || 'a file')}` : 'New message');
+  try {
+    const notification = new Notification({
+      title,
+      body: body.slice(0, 180),
+      silent: false,
+    });
+    notification.on('click', () => {
+      openHyperwebThreadFromMain({
+        mode,
+        peer_id: String((message && message.from_peer_id) || '').trim().toUpperCase(),
+        room_id: String((message && message.room_id) || '').trim(),
       }).catch(() => {});
     });
     notification.show();
@@ -8129,6 +8186,10 @@ function createDefaultHyperwebSocialState() {
     chat_messages: [],
     chat_receipts: {},
     chat_rooms: {},
+    presence_by_peer: {},
+    thread_policies: {},
+    message_deletes: {},
+    thread_deletes: {},
     last_compaction_at: 0,
   };
 }
@@ -8505,6 +8566,71 @@ function normalizeChatFilePayload(file = {}) {
   };
 }
 
+function computeHyperwebThreadId(mode = 'dm', peerId = '', roomId = '', localId = '') {
+  const normalizedMode = String(mode || 'dm').trim().toLowerCase() === 'room' ? 'room' : 'dm';
+  if (normalizedMode === 'room') {
+    const targetRoomId = String(roomId || '').trim() || HYPERWEB_PUBLIC_LOBBY_ID;
+    return `room:${targetRoomId}`;
+  }
+  const ids = [String(localId || '').trim().toUpperCase(), String(peerId || '').trim().toUpperCase()]
+    .filter(Boolean)
+    .sort();
+  return ids.length === 2 ? `dm:${ids.join(':')}` : '';
+}
+
+function normalizeHyperwebThreadRetention(value = 'off') {
+  const raw = String(value || 'off').trim().toLowerCase();
+  return HYPERWEB_THREAD_RETENTION_PRESETS.has(raw) ? raw : 'off';
+}
+
+function retentionPresetToMs(value = 'off') {
+  const normalized = normalizeHyperwebThreadRetention(value);
+  if (normalized === '24h') return 24 * 60 * 60 * 1000;
+  if (normalized === '7d') return 7 * 24 * 60 * 60 * 1000;
+  if (normalized === '30d') return 30 * 24 * 60 * 60 * 1000;
+  return 0;
+}
+
+function markHyperwebPresence(state, peerId = '', ts = 0, source = 'activity') {
+  const id = String(peerId || '').trim().toUpperCase();
+  if (!id) return;
+  if (!state.presence_by_peer || typeof state.presence_by_peer !== 'object') state.presence_by_peer = {};
+  const nextTs = Number(ts || nowTs()) || nowTs();
+  const existing = (state.presence_by_peer[id] && typeof state.presence_by_peer[id] === 'object')
+    ? state.presence_by_peer[id]
+    : {};
+  state.presence_by_peer[id] = {
+    last_seen_at: Math.max(Number(existing.last_seen_at || 0), nextTs),
+    source: String(source || existing.source || 'activity'),
+  };
+}
+
+function maybeNotifyIncomingHyperwebMessage(item = {}) {
+  const message = (item && typeof item === 'object') ? item : {};
+  if (String((message && message.visibility) || 'private') !== 'private') return false;
+  if (String((message && message.direction) || '').trim().toLowerCase() !== 'in') return false;
+  const state = ensureHyperwebSocialState();
+  const memberDirectory = new Map();
+  listHyperwebMembers().forEach((member) => {
+    const id = String((member && member.member_id) || '').trim().toUpperCase();
+    if (!id) return;
+    memberDirectory.set(id, member);
+  });
+  const room = String((message && message.room_id) || '').trim()
+    ? ((state.chat_rooms && state.chat_rooms[String(message.room_id || '').trim()]) || null)
+    : null;
+  return showHyperwebChatNotification({
+    message_id: String((message && message.message_id) || '').trim(),
+    mode: String((message && message.mode) || 'dm'),
+    room_id: String((message && message.room_id) || '').trim(),
+    room_name: String((room && room.room_name) || ''),
+    from_peer_id: String((message && message.from_peer_id) || '').trim().toUpperCase(),
+    from_name: String((((memberDirectory.get(String((message && message.from_peer_id) || '').trim().toUpperCase()) || {}).display_name) || String((message && message.from_peer_id) || '').trim())).trim(),
+    text: String((message && message.text) || ''),
+    file: message && message.file ? message.file : null,
+  });
+}
+
 function persistHyperwebChatMessage(record = {}) {
   const state = ensureHyperwebSocialState();
   const messageId = String(record.message_id || '').trim();
@@ -8730,6 +8856,10 @@ function ensureHyperwebSocialState() {
   if (!Array.isArray(hyperwebSocialState.chat_messages)) hyperwebSocialState.chat_messages = [];
   if (!hyperwebSocialState.chat_receipts || typeof hyperwebSocialState.chat_receipts !== 'object') hyperwebSocialState.chat_receipts = {};
   if (!hyperwebSocialState.chat_rooms || typeof hyperwebSocialState.chat_rooms !== 'object') hyperwebSocialState.chat_rooms = {};
+  if (!hyperwebSocialState.presence_by_peer || typeof hyperwebSocialState.presence_by_peer !== 'object') hyperwebSocialState.presence_by_peer = {};
+  if (!hyperwebSocialState.thread_policies || typeof hyperwebSocialState.thread_policies !== 'object') hyperwebSocialState.thread_policies = {};
+  if (!hyperwebSocialState.message_deletes || typeof hyperwebSocialState.message_deletes !== 'object') hyperwebSocialState.message_deletes = {};
+  if (!hyperwebSocialState.thread_deletes || typeof hyperwebSocialState.thread_deletes !== 'object') hyperwebSocialState.thread_deletes = {};
   return hyperwebSocialState;
 }
 
@@ -8756,6 +8886,18 @@ function rebuildHyperwebSocialMaterialized(state = null) {
   const repliesByPost = {};
   const votesByTarget = {};
   const tombstones = {};
+  const chatMessages = [];
+  const chatReceipts = {};
+  const chatRooms = {};
+  const presenceByPeer = {};
+  const threadPolicies = {};
+  const messageDeletes = {};
+  const threadDeletes = {};
+  const localId = String((((next || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
+  const legacyChatMessages = Array.isArray(next.chat_messages) ? next.chat_messages.slice() : [];
+  const legacyReceipts = (next.chat_receipts && typeof next.chat_receipts === 'object') ? { ...next.chat_receipts } : {};
+  const legacyRooms = (next.chat_rooms && typeof next.chat_rooms === 'object') ? { ...next.chat_rooms } : {};
+  const legacyPresence = (next.presence_by_peer && typeof next.presence_by_peer === 'object') ? { ...next.presence_by_peer } : {};
 
   const sorted = (Array.isArray(next.hyperweb_social_log) ? next.hyperweb_social_log : [])
     .slice()
@@ -8776,6 +8918,7 @@ function rebuildHyperwebSocialMaterialized(state = null) {
         created_at: Number(payload.created_at || event.ts || nowTs()),
         search_blob: `${String(payload.body || '')} ${String(payload.author_alias || '')}`.replace(/\s+/g, ' ').trim(),
       };
+      markHyperwebPresence({ presence_by_peer: presenceByPeer }, String(payload.author_fingerprint || ''), Number(payload.created_at || event.ts || nowTs()), 'post');
       return;
     }
     if (type === 'social_reply') {
@@ -8792,6 +8935,7 @@ function rebuildHyperwebSocialMaterialized(state = null) {
         created_at: Number(payload.created_at || event.ts || nowTs()),
         search_blob: `${String(payload.body || '')} ${String(payload.author_alias || '')}`.replace(/\s+/g, ' ').trim(),
       });
+      markHyperwebPresence({ presence_by_peer: presenceByPeer }, String(payload.author_fingerprint || ''), Number(payload.created_at || event.ts || nowTs()), 'reply');
       return;
     }
     if (type === 'social_vote') {
@@ -8801,6 +8945,7 @@ function rebuildHyperwebSocialMaterialized(state = null) {
       if (!targetId || !actor || (value !== 1 && value !== -1)) return;
       if (!votesByTarget[targetId]) votesByTarget[targetId] = {};
       votesByTarget[targetId][actor] = value;
+      markHyperwebPresence({ presence_by_peer: presenceByPeer }, actor, Number(payload.updated_at || event.ts || nowTs()), 'vote');
       return;
     }
     if (type === 'social_tombstone') {
@@ -8811,13 +8956,206 @@ function rebuildHyperwebSocialMaterialized(state = null) {
         ts: Number(event.ts || nowTs()),
         reason: String(payload.reason || 'moderation'),
       };
+      markHyperwebPresence({ presence_by_peer: presenceByPeer }, String(event.signer_fingerprint || ''), Number(event.ts || nowTs()), 'tombstone');
+      return;
+    }
+    if (type === 'social_chat_message_public' || type === 'social_chat_message') {
+      const messageId = String(payload.message_id || event.event_id || '').trim();
+      if (!messageId) return;
+      const fromPeerId = String(payload.author_fingerprint || event.signer_fingerprint || '').trim().toUpperCase();
+      const ts = Number(payload.created_at || event.ts || nowTs());
+      const threadId = computeHyperwebThreadId('room', '', HYPERWEB_PUBLIC_LOBBY_ID, localId);
+      chatMessages.push({
+        message_id: messageId,
+        logical_id: messageId,
+        thread_id: threadId,
+        room_id: HYPERWEB_PUBLIC_LOBBY_ID,
+        mode: 'room',
+        from_peer_id: fromPeerId,
+        to_peer_id: HYPERWEB_PUBLIC_LOBBY_ID,
+        recipients: [],
+        ts,
+        text: String(payload.body || ''),
+        file: null,
+        encrypted_text: '',
+        signature: String(event.signature || ''),
+        direction: fromPeerId === localId ? 'out' : 'in',
+        status: 'sent_to_mesh',
+        visibility: 'public',
+      });
+      chatRooms[HYPERWEB_PUBLIC_LOBBY_ID] = buildPublicLobbyRoom();
+      markHyperwebPresence({ presence_by_peer: presenceByPeer }, fromPeerId, ts, 'public_chat');
+      return;
+    }
+    if (type === 'social_chat_message_private') {
+      const messageId = String(payload.message_id || event.event_id || '').trim();
+      const authorId = String(payload.author_fingerprint || event.signer_fingerprint || '').trim().toUpperCase();
+      const ts = Number(payload.created_at || event.ts || nowTs());
+      const mode = String(payload.mode || 'dm').trim().toLowerCase() === 'room' ? 'room' : 'dm';
+      const roomId = String(payload.room_id || '').trim();
+      const recipientIds = Array.isArray(payload.recipient_ids)
+        ? payload.recipient_ids.map((id) => String(id || '').trim().toUpperCase()).filter(Boolean)
+        : [];
+      const envelopes = (payload.recipient_payloads && typeof payload.recipient_payloads === 'object') ? payload.recipient_payloads : {};
+      const envelope = localId ? String(envelopes[localId] || '') : '';
+      if (!messageId || !authorId) return;
+      if (localId && authorId !== localId && !envelope) return;
+      let decryptedPayload = null;
+      if (envelope) {
+        const decrypted = decryptHyperwebChatEnvelope(envelope);
+        if (!decrypted || !decrypted.ok) return;
+        decryptedPayload = (decrypted.payload && typeof decrypted.payload === 'object') ? decrypted.payload : {};
+      } else if (authorId === localId) {
+        const ownEnvelope = String(envelopes[authorId] || '').trim();
+        const decrypted = ownEnvelope ? decryptHyperwebChatEnvelope(ownEnvelope) : null;
+        decryptedPayload = decrypted && decrypted.ok && decrypted.payload && typeof decrypted.payload === 'object'
+          ? decrypted.payload
+          : {};
+      }
+      const targetPeerId = mode === 'dm'
+        ? recipientIds.find((id) => id !== authorId) || ''
+        : '';
+      const threadId = String(payload.thread_id || computeHyperwebThreadId(mode, targetPeerId, roomId, authorId)).trim();
+      const file = normalizeChatFilePayload((decryptedPayload && decryptedPayload.file) || {}) || null;
+      chatMessages.push({
+        message_id: messageId,
+        logical_id: String(payload.logical_id || messageId).trim(),
+        thread_id: threadId,
+        room_id: roomId,
+        mode,
+        from_peer_id: authorId,
+        to_peer_id: mode === 'dm' ? targetPeerId : roomId,
+        recipients: recipientIds,
+        ts,
+        text: String((decryptedPayload && decryptedPayload.text) || ''),
+        file,
+        encrypted_text: envelope || String(envelopes[authorId] || ''),
+        signature: String(event.signature || ''),
+        direction: authorId === localId ? 'out' : 'in',
+        status: 'sent_to_mesh',
+        visibility: 'private',
+      });
+      if (mode === 'room' && roomId) {
+        const existingRoom = chatRooms[roomId] || legacyRooms[roomId] || {};
+        chatRooms[roomId] = {
+          room_id: roomId,
+          room_name: String(payload.room_name || existingRoom.room_name || roomId),
+          members: Array.from(new Set([authorId, ...recipientIds].filter(Boolean))),
+          updated_at: ts,
+          created_at: Number(existingRoom.created_at || ts),
+        };
+      }
+      markHyperwebPresence({ presence_by_peer: presenceByPeer }, authorId, ts, 'private_chat');
+      return;
+    }
+    if (type === 'social_chat_receipt') {
+      const messageId = String(payload.message_id || '').trim();
+      const actorId = String(payload.actor_fingerprint || event.signer_fingerprint || '').trim().toUpperCase();
+      const kind = String(payload.receipt_kind || '').trim().toLowerCase() === 'read' ? 'read_by' : 'delivered_by';
+      if (!messageId || !actorId) return;
+      if (!chatReceipts[messageId] || typeof chatReceipts[messageId] !== 'object') chatReceipts[messageId] = {};
+      if (!chatReceipts[messageId][kind] || typeof chatReceipts[messageId][kind] !== 'object') chatReceipts[messageId][kind] = {};
+      chatReceipts[messageId][kind][actorId] = Number(payload.created_at || event.ts || nowTs());
+      markHyperwebPresence({ presence_by_peer: presenceByPeer }, actorId, Number(payload.created_at || event.ts || nowTs()), 'receipt');
+      return;
+    }
+    if (type === 'social_chat_delete') {
+      const messageId = String(payload.message_id || '').trim();
+      if (!messageId) return;
+      messageDeletes[messageId] = {
+        message_id: messageId,
+        deleted_by: String(payload.actor_fingerprint || event.signer_fingerprint || '').trim().toUpperCase(),
+        deleted_at: Number(payload.created_at || event.ts || nowTs()),
+      };
+      return;
+    }
+    if (type === 'social_thread_delete') {
+      const threadId = String(payload.thread_id || '').trim();
+      if (!threadId) return;
+      threadDeletes[threadId] = {
+        thread_id: threadId,
+        deleted_by: String(payload.actor_fingerprint || event.signer_fingerprint || '').trim().toUpperCase(),
+        deleted_at: Number(payload.created_at || event.ts || nowTs()),
+      };
+      return;
+    }
+    if (type === 'social_thread_policy') {
+      const threadId = String(payload.thread_id || '').trim();
+      if (!threadId) return;
+      threadPolicies[threadId] = {
+        thread_id: threadId,
+        retention: normalizeHyperwebThreadRetention(payload.retention || 'off'),
+        updated_by: String(payload.actor_fingerprint || event.signer_fingerprint || '').trim().toUpperCase(),
+        updated_at: Number(payload.created_at || event.ts || nowTs()),
+      };
     }
   });
+
+  const mergedById = new Map();
+  legacyChatMessages.forEach((item) => {
+    const id = String((item && item.message_id) || '').trim();
+    if (!id || mergedById.has(id)) return;
+    mergedById.set(id, {
+      ...item,
+      thread_id: String((item && item.thread_id) || computeHyperwebThreadId(
+        String((item && item.mode) || 'dm'),
+        String((item && item.to_peer_id) || ''),
+        String((item && item.room_id) || ''),
+        String((item && item.from_peer_id) || '')
+      )).trim(),
+      visibility: String((item && item.visibility) || (String((item && item.room_id) || '') === HYPERWEB_PUBLIC_LOBBY_ID ? 'public' : 'private')),
+    });
+  });
+  chatMessages.forEach((item) => {
+    const id = String((item && item.message_id) || '').trim();
+    if (!id) return;
+    mergedById.set(id, item);
+  });
+
+  Object.entries(legacyReceipts).forEach(([messageId, receipt]) => {
+    if (!chatReceipts[messageId]) chatReceipts[messageId] = receipt;
+  });
+  Object.entries(legacyPresence).forEach(([peerId, info]) => {
+    if (!presenceByPeer[peerId]) presenceByPeer[peerId] = info;
+  });
+  Object.entries(legacyRooms).forEach(([roomId, room]) => {
+    if (!chatRooms[roomId]) chatRooms[roomId] = room;
+  });
+
+  Object.entries(next.known_peers || {}).forEach(([peerId, peer]) => {
+    markHyperwebPresence({ presence_by_peer: presenceByPeer }, peerId, Number((peer && peer.updated_at) || 0), 'known_peer');
+  });
+  if (localId) markHyperwebPresence({ presence_by_peer: presenceByPeer }, localId, nowTs(), 'local');
+
+  const filteredMessages = Array.from(mergedById.values())
+    .filter((item) => item && typeof item === 'object')
+    .filter((item) => {
+      const messageId = String((item && item.message_id) || '').trim();
+      const threadId = String((item && item.thread_id) || '').trim();
+      if (!messageId) return false;
+      if (messageDeletes[messageId]) return false;
+      if (threadId && threadDeletes[threadId]) return false;
+      const policy = threadId ? threadPolicies[threadId] : null;
+      const retentionMs = policy ? retentionPresetToMs(policy.retention) : 0;
+      if (retentionMs > 0) {
+        const createdAt = Number((item && item.ts) || 0);
+        if (createdAt > 0 && (createdAt + retentionMs) <= nowTs()) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => Number((a && a.ts) || 0) - Number((b && b.ts) || 0));
 
   next.posts_by_id = posts;
   next.replies_by_post_id = repliesByPost;
   next.votes_by_target = votesByTarget;
   next.tombstones = tombstones;
+  next.chat_messages = filteredMessages;
+  next.chat_receipts = chatReceipts;
+  next.chat_rooms = chatRooms;
+  next.presence_by_peer = presenceByPeer;
+  next.thread_policies = threadPolicies;
+  next.message_deletes = messageDeletes;
+  next.thread_deletes = threadDeletes;
   next.last_compaction_at = nowTs();
   return next;
 }
@@ -8834,9 +9172,19 @@ function appendHyperwebSocialEvent(event, options = {}) {
   if (state.hyperweb_social_log.length > 6000) {
     state.hyperweb_social_log = state.hyperweb_social_log.slice(-6000);
   }
+  const type = String(item.type || '').trim().toLowerCase();
   rebuildHyperwebSocialMaterialized(state);
   maybeApplyHyperwebModeration(state);
   writeHyperwebSocialState(state);
+  if (type === 'social_chat_message_private') {
+    const payload = (item.payload && typeof item.payload === 'object') ? item.payload : {};
+    const messageId = String(payload.message_id || item.event_id || '').trim();
+    const materialized = (Array.isArray(state.chat_messages) ? state.chat_messages : []).find((row) => String((row && row.message_id) || '').trim() === messageId);
+    if (materialized) maybeNotifyIncomingHyperwebMessage(materialized);
+  }
+  if (type !== 'social_chat_receipt') {
+    emitPendingDeliveredReceipts();
+  }
   if (!options.skipBroadcast) {
     hyperwebManager.broadcastProtocol({
       type: `hyperweb:${String(item.type || '').trim().toLowerCase()}`,
@@ -9510,17 +9858,33 @@ function runHyperwebPostSearch(query, options = {}) {
 function listHyperwebMembers() {
   const state = ensureHyperwebSocialState();
   const onlineSet = getHyperwebOnlinePeerIds();
+  const presenceByPeer = (state.presence_by_peer && typeof state.presence_by_peer === 'object') ? state.presence_by_peer : {};
   const localIdentity = state.identity || {};
   const localId = String(localIdentity.fingerprint || '').trim().toUpperCase();
   const localName = getConfiguredHyperwebAlias(readSettings(), localId) || 'You';
   const membersById = new Map();
 
+  const resolvePresence = (id) => {
+    const normalizedId = String(id || '').trim().toUpperCase();
+    const lastSeenAt = Number(((presenceByPeer[normalizedId] || {}).last_seen_at) || 0);
+    if (normalizedId && (normalizedId === localId || onlineSet.has(normalizedId))) {
+      return { presence_status: 'online', is_online: true, last_seen_at: nowTs() };
+    }
+    if (lastSeenAt > 0 && (nowTs() - lastSeenAt) <= HYPERWEB_PRESENCE_RECENT_WINDOW_MS) {
+      return { presence_status: 'seen_recently', is_online: false, last_seen_at: lastSeenAt };
+    }
+    return { presence_status: 'offline', is_online: false, last_seen_at: lastSeenAt };
+  };
+
   if (localId) {
+    const presence = resolvePresence(localId);
     membersById.set(localId, {
       member_id: localId,
       display_name: localName,
       is_self: true,
       is_online: true,
+      presence_status: presence.presence_status,
+      last_seen_at: presence.last_seen_at,
       source: 'local_identity',
       search_blob: `${localName} ${localId}`.toLowerCase(),
     });
@@ -9529,11 +9893,14 @@ function listHyperwebMembers() {
   Object.entries(state.known_peers || {}).forEach(([fingerprint, peer]) => {
     const id = String(fingerprint || '').trim().toUpperCase();
     if (!id) return;
+    const presence = resolvePresence(id);
     membersById.set(id, {
       member_id: id,
       display_name: String((peer && peer.alias) || `member-${id.slice(0, 6)}`),
       is_self: id === localId,
-      is_online: id === localId || onlineSet.has(id),
+      is_online: presence.is_online,
+      presence_status: presence.presence_status,
+      last_seen_at: presence.last_seen_at,
       source: 'hyperweb',
       search_blob: String((peer && peer.alias) || id).toLowerCase(),
     });
@@ -9631,31 +9998,11 @@ function buildPublicLobbyRoom() {
 }
 
 function resolvePublicLobbyMessages(limit = 200) {
-  const localId = currentHyperwebMemberId();
-  return (Array.isArray(ensureHyperwebSocialState().hyperweb_social_log) ? ensureHyperwebSocialState().hyperweb_social_log : [])
-    .filter((event) => String((event && event.type) || '').trim().toLowerCase() === 'social_chat_message')
+  const state = ensureHyperwebSocialState();
+  return (Array.isArray(state.chat_messages) ? state.chat_messages : [])
+    .filter((item) => String((item && item.room_id) || '').trim() === HYPERWEB_PUBLIC_LOBBY_ID)
     .sort((a, b) => Number((a && a.ts) || 0) - Number((b && b.ts) || 0))
-    .slice(-Math.max(1, Math.min(500, Number(limit || 200) || 200)))
-    .map((event) => {
-      const payload = (event && event.payload && typeof event.payload === 'object') ? event.payload : {};
-      const fromPeerId = String((payload && payload.author_fingerprint) || '').trim().toUpperCase();
-      return {
-        message_id: String((payload && payload.message_id) || (event && event.event_id) || ''),
-        logical_id: String((payload && payload.message_id) || (event && event.event_id) || ''),
-        room_id: HYPERWEB_PUBLIC_LOBBY_ID,
-        mode: 'room',
-        from_peer_id: fromPeerId,
-        to_peer_id: HYPERWEB_PUBLIC_LOBBY_ID,
-        recipients: [],
-        ts: Number((payload && payload.created_at) || (event && event.ts) || nowTs()),
-        text: String((payload && payload.body) || ''),
-        file: null,
-        direction: fromPeerId === localId ? 'out' : 'in',
-        status: 'sent',
-        delivered_by: {},
-        read_by: {},
-      };
-    });
+    .slice(-Math.max(1, Math.min(500, Number(limit || 200) || 200)));
 }
 
 function createHyperwebChatRoom(input = {}) {
@@ -9697,6 +10044,15 @@ function sendHyperwebChatAck(toPeerId = '', messageId = '', logicalId = '', room
   const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
   const peer = String(toPeerId || '').trim().toUpperCase();
   if (!localId || !peer || !messageId) return { ok: false, message: 'ack target is invalid.' };
+  const event = makeSignedSocialEvent('social_chat_receipt', {
+    message_id: String(messageId || '').trim(),
+    logical_id: String(logicalId || messageId).trim(),
+    room_id: String(roomId || '').trim(),
+    actor_fingerprint: localId,
+    receipt_kind: String(ackType || 'read').trim().toLowerCase() === 'delivered' ? 'delivered' : 'read',
+    created_at: nowTs(),
+  });
+  appendHyperwebSocialEvent(event);
   const payload = {
     type: 'hyperweb:chat_ack',
     to_peer_id: peer,
@@ -9712,7 +10068,7 @@ function sendHyperwebChatAck(toPeerId = '', messageId = '', logicalId = '', room
   payload.signature = signHyperwebPayload(buildHyperwebChatSignedPayload(payload));
   const transportPeerId = resolveHyperwebTransportPeerId(peer);
   const sent = transportPeerId ? hyperwebManager.sendProtocolToPeer(transportPeerId, payload) : false;
-  return { ok: !!sent };
+  return { ok: true, realtime_sent: !!sent };
 }
 
 function hyperwebChatSend(peerId = '', text = '', options = {}) {
@@ -9727,7 +10083,7 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
   if (mode === 'room' && roomId === HYPERWEB_PUBLIC_LOBBY_ID) {
     if (file) return { ok: false, message: 'Public lobby supports text messages only.' };
     const author = getLocalHyperwebAuthor();
-    const event = makeSignedSocialEvent('social_chat_message', {
+    const event = makeSignedSocialEvent('social_chat_message_public', {
       message_id: makeId('hwlobby'),
       room_id: HYPERWEB_PUBLIC_LOBBY_ID,
       body: plainText.slice(0, 5000),
@@ -9771,25 +10127,50 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
   const ts = nowTs();
   const payloadObj = { text: plainText };
   if (file) payloadObj.file = file;
-
+  const threadId = computeHyperwebThreadId(mode, recipients[0] || peerId, roomId, localId);
+  const recipientPayloads = {};
   const failures = [];
-  recipients.forEach((recipientId) => {
-    const peer = state.known_peers && state.known_peers[recipientId] ? state.known_peers[recipientId] : null;
+  [localId, ...recipients].forEach((recipientId) => {
+    const targetId = String(recipientId || '').trim().toUpperCase();
+    const author = getLocalHyperwebAuthor();
+    const peer = targetId === localId
+      ? { chat_pubkey: String(author.chat_pubkey || '') }
+      : (state.known_peers && state.known_peers[targetId] ? state.known_peers[targetId] : null);
     const recipientChatPub = String((peer && peer.chat_pubkey) || '').trim();
-    if (!peer || !peer.pubkey || !recipientChatPub) {
-      failures.push({ peer_id: recipientId, reason: 'missing_peer_keys' });
-      return;
-    }
-    const transportPeerId = resolveHyperwebTransportPeerId(recipientId);
-    if (!transportPeerId) {
-      failures.push({ peer_id: recipientId, reason: 'channel_closed' });
+    if (!recipientChatPub) {
+      if (targetId !== localId) failures.push({ peer_id: targetId, reason: 'missing_peer_keys' });
       return;
     }
     const encrypted = encryptHyperwebChatEnvelope(payloadObj, recipientChatPub);
     if (!encrypted || !encrypted.ok) {
-      failures.push({ peer_id: recipientId, reason: (encrypted && encrypted.message) || 'encrypt_failed' });
+      if (targetId !== localId) failures.push({ peer_id: targetId, reason: (encrypted && encrypted.message) || 'encrypt_failed' });
       return;
     }
+    recipientPayloads[targetId] = String(encrypted.text || '');
+  });
+  if (!recipientPayloads[localId]) {
+    return { ok: false, message: 'Unable to prepare a local encrypted copy for this message.' };
+  }
+  const event = makeSignedSocialEvent('social_chat_message_private', {
+    message_id: messageId,
+    logical_id: logicalId,
+    thread_id: threadId,
+    room_id: roomId,
+    room_name: String((state.chat_rooms && state.chat_rooms[roomId] && state.chat_rooms[roomId].room_name) || roomId || ''),
+    mode,
+    author_fingerprint: localId,
+    recipient_ids: recipients,
+    recipient_payloads: recipientPayloads,
+    created_at: ts,
+  });
+  const appended = appendHyperwebSocialEvent(event);
+  if (!appended || !appended.ok) {
+    return { ok: false, message: 'Unable to queue message for delivery.' };
+  }
+  const realtimeSentTo = [];
+  recipients.forEach((recipientId) => {
+    const transportPeerId = resolveHyperwebTransportPeerId(recipientId);
+    if (!transportPeerId) return;
     const payload = {
       type: 'hyperweb:chat_message',
       to_peer_id: recipientId,
@@ -9798,45 +10179,14 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
       message_id: messageId,
       logical_id: logicalId,
       ts,
-      text: String(encrypted.text || ''),
+      text: String(recipientPayloads[recipientId] || ''),
       mode,
       file_name: file ? String(file.name || '') : '',
       file_mime: file ? String(file.mime || '') : '',
       file_size: file ? Number(file.size || 0) : 0,
     };
     payload.signature = signHyperwebPayload(buildHyperwebChatSignedPayload(payload));
-    const sent = hyperwebManager.sendProtocolToPeer(transportPeerId, payload);
-    if (!sent) failures.push({ peer_id: recipientId, reason: 'channel_closed' });
-  });
-
-  const sentCount = recipients.length - failures.length;
-  if (sentCount <= 0) {
-    const failureSummary = failures
-      .map((row) => {
-        const peerLabel = String(row.peer_id || 'peer').trim();
-        const reason = String(row.reason || 'unknown').trim().toLowerCase();
-        if (reason === 'missing_peer_keys') return `${peerLabel}: missing peer keys`;
-        if (reason === 'channel_closed') return `${peerLabel}: channel not open`;
-        if (reason === 'encrypt_failed') return `${peerLabel}: encryption failed`;
-        return `${peerLabel}: ${reason}`;
-      })
-      .join('; ');
-    return { ok: false, message: failureSummary ? `Unable to deliver message to selected recipient(s). ${failureSummary}` : 'Unable to deliver message to selected recipient(s).', failures };
-  }
-
-  const persisted = persistHyperwebChatMessage({
-    message_id: messageId,
-    logical_id: logicalId,
-    room_id: roomId,
-    mode,
-    from_peer_id: localId,
-    to_peer_id: mode === 'dm' ? recipients[0] : localId,
-    recipients,
-    ts,
-    text: plainText,
-    file,
-    direction: 'out',
-    status: 'sent',
+    if (hyperwebManager.sendProtocolToPeer(transportPeerId, payload)) realtimeSentTo.push(recipientId);
   });
   if (mode === 'room' && roomId) {
     const existing = state.chat_rooms[roomId] || {
@@ -9855,9 +10205,11 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
     ok: true,
     message_id: messageId,
     logical_id: logicalId,
-    sent_to: recipients.filter((peer) => !failures.find((row) => row.peer_id === peer)),
+    sent_to: recipients,
+    queued: true,
+    realtime_sent_to: realtimeSentTo,
     failures,
-    message: persisted && persisted.message ? persisted.message : null,
+    message: null,
   };
 }
 
@@ -9866,6 +10218,86 @@ function writeJsonAtomic(filePath, payloadObj) {
   const temp = path.join(dir, `${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}`);
   fs.writeFileSync(temp, JSON.stringify(payloadObj, null, 2), 'utf8');
   fs.renameSync(temp, filePath);
+}
+
+function deleteHyperwebChatMessage(messageId = '') {
+  const state = ensureHyperwebSocialState();
+  const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
+  const targetId = String(messageId || '').trim();
+  if (!localId || !targetId) return { ok: false, message: 'message_id is required.' };
+  const target = (Array.isArray(state.chat_messages) ? state.chat_messages : []).find((item) => String((item && item.message_id) || '').trim() === targetId);
+  if (!target) return { ok: false, message: 'Message not found.' };
+  if (String((target && target.from_peer_id) || '').trim().toUpperCase() !== localId) {
+    return { ok: false, message: 'Only the message author can delete it.' };
+  }
+  const event = makeSignedSocialEvent('social_chat_delete', {
+    message_id: targetId,
+    thread_id: String((target && target.thread_id) || '').trim(),
+    actor_fingerprint: localId,
+    created_at: nowTs(),
+  });
+  const appended = appendHyperwebSocialEvent(event);
+  if (!appended || !appended.ok) return { ok: false, message: 'Unable to delete message.' };
+  return { ok: true, message_id: targetId };
+}
+
+function deleteHyperwebChatThread(threadId = '') {
+  const state = ensureHyperwebSocialState();
+  const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
+  const targetThreadId = String(threadId || '').trim();
+  if (!localId || !targetThreadId) return { ok: false, message: 'thread_id is required.' };
+  const event = makeSignedSocialEvent('social_thread_delete', {
+    thread_id: targetThreadId,
+    actor_fingerprint: localId,
+    created_at: nowTs(),
+  });
+  const appended = appendHyperwebSocialEvent(event);
+  if (!appended || !appended.ok) return { ok: false, message: 'Unable to delete thread.' };
+  return { ok: true, thread_id: targetThreadId };
+}
+
+function setHyperwebThreadPolicy(threadId = '', retention = 'off') {
+  const state = ensureHyperwebSocialState();
+  const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
+  const targetThreadId = String(threadId || '').trim();
+  const nextRetention = normalizeHyperwebThreadRetention(retention);
+  if (!localId || !targetThreadId) return { ok: false, message: 'thread_id is required.' };
+  const event = makeSignedSocialEvent('social_thread_policy', {
+    thread_id: targetThreadId,
+    retention: nextRetention,
+    actor_fingerprint: localId,
+    created_at: nowTs(),
+  });
+  const appended = appendHyperwebSocialEvent(event);
+  if (!appended || !appended.ok) return { ok: false, message: 'Unable to update thread policy.' };
+  return { ok: true, thread_id: targetThreadId, retention: nextRetention };
+}
+
+function emitPendingDeliveredReceipts() {
+  const state = ensureHyperwebSocialState();
+  const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
+  if (!localId) return 0;
+  let emitted = 0;
+  (Array.isArray(state.chat_messages) ? state.chat_messages : []).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    if (String((item && item.visibility) || 'private') !== 'private') return;
+    if (String((item && item.direction) || '').trim().toLowerCase() !== 'in') return;
+    const messageId = String((item && item.message_id) || '').trim();
+    if (!messageId) return;
+    const receipt = (state.chat_receipts && state.chat_receipts[messageId]) || {};
+    if (receipt && receipt.delivered_by && receipt.delivered_by[localId]) return;
+    const event = makeSignedSocialEvent('social_chat_receipt', {
+      message_id: messageId,
+      logical_id: String((item && item.logical_id) || messageId).trim(),
+      room_id: String((item && item.room_id) || '').trim(),
+      actor_fingerprint: localId,
+      receipt_kind: 'delivered',
+      created_at: nowTs(),
+    });
+    const appended = appendHyperwebSocialEvent(event);
+    if (appended && appended.ok) emitted += 1;
+  });
+  return emitted;
 }
 
 function publishSnapshotFromReference(srId) {
@@ -19093,9 +19525,19 @@ ipcMain.handle('browser:hyperwebChatSend', async (_event, payload) => {
 ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
   const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
+  emitPendingDeliveredReceipts();
   const peerId = String((payload && payload.peer_id) || '').trim().toUpperCase();
   const roomId = String((payload && payload.room_id) || '').trim();
   const limit = Number((payload && payload.limit) || 200);
+  const localId = currentHyperwebMemberId();
+  const threadId = roomId
+    ? computeHyperwebThreadId('room', '', roomId, localId)
+    : computeHyperwebThreadId('dm', peerId, '', localId);
+  const state = ensureHyperwebSocialState();
+  const members = listHyperwebMembers();
+  const activePresence = peerId
+    ? (members.find((member) => String((member && member.member_id) || '').trim().toUpperCase() === peerId) || null)
+    : null;
   const messages = resolveHyperwebChatThreadMessages({
     peer_id: peerId,
     room_id: roomId,
@@ -19106,7 +19548,12 @@ ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
     ok: true,
     messages,
     rooms: (rooms && rooms.ok) ? rooms.rooms : [],
-    members: listHyperwebMembers(),
+    members,
+    thread_id: threadId,
+    thread_policy: (state.thread_policies && state.thread_policies[threadId]) ? state.thread_policies[threadId] : { thread_id: threadId, retention: 'off' },
+    thread_deleted: !!(state.thread_deletes && state.thread_deletes[threadId]),
+    active_presence: activePresence,
+    live_peer_count: Number((hyperwebManager.getStatus() && hyperwebManager.getStatus().peer_count) || 0),
   };
 });
 
@@ -19158,6 +19605,27 @@ ipcMain.handle('browser:hyperwebChatRoomCreate', async (_event, payload) => {
     room_name: roomName,
     member_ids: memberIds,
   });
+});
+
+ipcMain.handle('browser:hyperwebChatDeleteMessage', async (_event, payload) => {
+  const auth = requireHyperwebIdentity();
+  if (!auth.ok) return auth;
+  return deleteHyperwebChatMessage(String((payload && payload.message_id) || '').trim());
+});
+
+ipcMain.handle('browser:hyperwebChatDeleteThread', async (_event, payload) => {
+  const auth = requireHyperwebIdentity();
+  if (!auth.ok) return auth;
+  return deleteHyperwebChatThread(String((payload && payload.thread_id) || '').trim());
+});
+
+ipcMain.handle('browser:hyperwebChatThreadPolicySet', async (_event, payload) => {
+  const auth = requireHyperwebIdentity();
+  if (!auth.ok) return auth;
+  return setHyperwebThreadPolicy(
+    String((payload && payload.thread_id) || '').trim(),
+    String((payload && payload.retention) || 'off').trim()
+  );
 });
 
 ipcMain.handle('browser:hyperwebChatRoomsList', async () => {

@@ -1579,6 +1579,21 @@ summary:focus-visible {
   min-height: 0;
 }
 
+.hyperweb-chat-thread-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.hyperweb-chat-thread-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .hyperweb-compose {
   margin-top: auto;
   padding: 10px 12px;
@@ -1679,6 +1694,18 @@ summary:focus-visible {
 .hyperweb-item-meta,
 .history-item-meta {
   color: var(--muted);
+  font-size: 12px;
+}
+
+.hyperweb-chat-item-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.hyperweb-chat-item-actions button {
+  padding: 4px 8px;
   font-size: 12px;
 }
 
@@ -2459,6 +2486,16 @@ body.chat-collapsed #chat-panel-resizer {
 
   .hyperweb-chat-toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hyperweb-chat-thread-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .hyperweb-chat-thread-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .hyperweb-chat-layout.is-dm {

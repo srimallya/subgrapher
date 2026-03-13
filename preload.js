@@ -265,6 +265,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     hyperwebChatHistory: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatHistory', payload || {}),
     hyperwebChatMarkRead: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatMarkRead', payload || {}),
     hyperwebChatRoomCreate: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatRoomCreate', payload || {}),
+    hyperwebChatDeleteMessage: (messageId = '') => ipcRenderer.invoke('browser:hyperwebChatDeleteMessage', { message_id: messageId }),
+    hyperwebChatDeleteThread: (threadId = '') => ipcRenderer.invoke('browser:hyperwebChatDeleteThread', { thread_id: threadId }),
+    hyperwebChatThreadPolicySet: (threadId = '', retention = 'off') => ipcRenderer.invoke('browser:hyperwebChatThreadPolicySet', { thread_id: threadId, retention }),
     hyperwebChatRoomsList: () => ipcRenderer.invoke('browser:hyperwebChatRoomsList'),
     hyperwebShareReference: (srId, recipientIds = []) => ipcRenderer.invoke('browser:hyperwebShareReference', {
       sr_id: srId,
@@ -310,6 +313,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onHyperwebChat: (callback) => {
       ipcRenderer.removeAllListeners('browser:hyperwebChat');
       ipcRenderer.on('browser:hyperwebChat', (_event, data) => callback(data));
+    },
+    onHyperwebOpenThread: (callback) => {
+      ipcRenderer.removeAllListeners('browser:hyperwebOpenThread');
+      ipcRenderer.on('browser:hyperwebOpenThread', (_event, data) => callback(data));
     },
     onShortcutCommand: (callback) => {
       ipcRenderer.removeAllListeners('browser:shortcut-command');
