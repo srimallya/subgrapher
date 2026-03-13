@@ -359,6 +359,14 @@ hyperwebManager.on('status', (status) => {
     trustCommonsRuntime.lastError = String(status.last_error || '');
   }
 });
+hyperwebManager.on('peer_seen', () => {
+  const state = ensureHyperwebSocialState();
+  const identity = (state && state.identity && typeof state.identity === 'object') ? state.identity : {};
+  if (String(identity.fingerprint || '').trim()) {
+    broadcastHyperwebInviteHandshake();
+  }
+  hyperwebManager.announcePublicIndex().catch(() => {});
+});
 hyperwebManager.on('protocol', (packet) => {
   const peerId = String((packet && packet.peer_id) || '').trim().toUpperCase();
   const message = packet && packet.message && typeof packet.message === 'object' ? packet.message : {};
@@ -392,6 +400,10 @@ hyperwebManager.on('protocol', (packet) => {
       : null;
     if (!known || !known.pubkey) return;
     if (!verifyHyperwebPayload(signed, signature, String(known.pubkey || ''))) return;
+    known.relay_peer_id = peerId;
+    known.updated_at = nowTs();
+    writeHyperwebSocialState(state);
+    hyperwebSocialState = state;
     const ackKind = String(message.ack_type || 'delivered').trim().toLowerCase() === 'read' ? 'read' : 'delivered';
     upsertHyperwebChatReceipt(signed.message_id, signed.from_peer_id, ackKind);
     sendBrowserEvent('browser:hyperwebChat', {
@@ -415,6 +427,10 @@ hyperwebManager.on('protocol', (packet) => {
       : null;
     if (!known || !known.pubkey) return;
     if (!verifyHyperwebPayload(signed, signature, String(known.pubkey || ''))) return;
+    known.relay_peer_id = peerId;
+    known.updated_at = nowTs();
+    writeHyperwebSocialState(state);
+    hyperwebSocialState = state;
 
     const decrypted = decryptHyperwebChatEnvelope(signed.text);
     if (!decrypted || !decrypted.ok) return;
@@ -456,7 +472,8 @@ hyperwebManager.on('protocol', (packet) => {
       ack_type: 'delivered',
     };
     ackPayload.signature = signHyperwebPayload(buildHyperwebChatSignedPayload(ackPayload));
-    hyperwebManager.sendProtocolToPeer(signed.from_peer_id, ackPayload);
+    const transportPeerId = resolveHyperwebTransportPeerId(signed.from_peer_id);
+    if (transportPeerId) hyperwebManager.sendProtocolToPeer(transportPeerId, ackPayload);
     return;
   }
   const event = (message.event && typeof message.event === 'object') ? message.event : null;
@@ -9400,22 +9417,30 @@ async function runHyperwebReferenceSearch(query, options = {}) {
 
   let remoteResults = [];
   const status = hyperwebManager.getStatus();
-  if (q && status && status.connected && Number(status.peer_count || 0) > 0) {
+  const remotePeers = hyperwebManager.listPeers();
+  const connectedRemotePeers = Array.isArray(remotePeers) ? remotePeers : [];
+  if (status && status.connected && connectedRemotePeers.length > 0 && q) {
     const remote = await hyperwebManager.query(q, { limit, timeout_ms: 1400 });
     if (remote && remote.ok && Array.isArray(remote.suggestions)) {
       remoteResults = remote.suggestions.map((item) => {
+        const routing = resolveHyperwebPeerRouting(String(item.peer_id || '').trim());
         const payload = item.reference_payload && typeof item.reference_payload === 'object'
           ? item.reference_payload
           : item;
         const blob = buildPublicReferenceSearchBlob(payload);
+        const logicalPeerId = String((routing && routing.logical_peer_id) || item.peer_id || '').trim().toUpperCase();
+        const transportPeerId = String((routing && routing.transport_peer_id) || item.transport_peer_id || item.peer_id || '').trim().toUpperCase();
+        const displayPeerName = String(
+          ((routing && routing.peer && routing.peer.alias) || item.peer_name || item.peer_id || 'peer')
+        ).trim();
         return {
-          reference_key: `remote:${String(item.peer_id || '')}:${String(item.reference_id || '')}:${String(item.suggestion_id || '')}`,
+          reference_key: `remote:${transportPeerId}:${String(item.reference_id || '')}:${String(item.suggestion_id || '')}`,
           snapshot_id: String(item.snapshot_id || ''),
           reference_id: String(item.reference_id || ''),
           title: String(item.title || 'Untitled'),
           intent: String(item.intent || ''),
-          peer_id: String(item.peer_id || '').trim().toUpperCase(),
-          peer_name: String(item.peer_name || item.peer_id || 'peer'),
+          peer_id: logicalPeerId,
+          peer_name: displayPeerName || logicalPeerId || 'peer',
           tags: Array.isArray(item.tags) ? item.tags : [],
           status: String(item.status || 'visible'),
           published_at: Number(item.published_at || item.updated_at || 0),
@@ -9432,10 +9457,67 @@ async function runHyperwebReferenceSearch(query, options = {}) {
             || 'No summary available.',
           content_excerpt: normalizePublicSummaryText(blob, 520),
           search_blob: blob,
-          import_payload: item,
+          import_payload: {
+            ...item,
+            peer_id: transportPeerId,
+            transport_peer_id: transportPeerId,
+            peer_name: displayPeerName || logicalPeerId || 'peer',
+          },
         };
       }).filter((item) => (!authorFilter ? true : String(item.peer_id || '').toUpperCase() === authorFilter));
     }
+  } else if (status && status.connected && connectedRemotePeers.length > 0) {
+    remoteResults = connectedRemotePeers.flatMap((peer) => {
+      const routing = resolveHyperwebPeerRouting(String((peer && peer.peer_id) || '').trim());
+      const logicalPeerId = String((routing && routing.logical_peer_id) || (peer && peer.peer_id) || '').trim().toUpperCase();
+      const transportPeerId = String((routing && routing.transport_peer_id) || (peer && peer.peer_id) || '').trim().toUpperCase();
+      const displayPeerName = String(
+        ((routing && routing.peer && routing.peer.alias) || (peer && peer.display_name) || logicalPeerId || 'peer')
+      ).trim();
+      if (authorFilter && logicalPeerId !== authorFilter) return [];
+      const publicIndex = Array.isArray(peer && peer.public_index) ? peer.public_index : [];
+      return publicIndex.map((item) => {
+        const referenceId = String((item && item.id) || '').trim();
+        const title = String((item && item.title) || 'Untitled');
+        const intent = String((item && item.intent) || '');
+        const tags = Array.isArray(item && item.tags) ? item.tags : [];
+        const updatedAt = Number((item && item.updated_at) || 0);
+        const blob = buildPublicReferenceSearchBlob({
+          title,
+          intent,
+          tags,
+        });
+        return {
+          reference_key: `remote-index:${transportPeerId}:${referenceId}`,
+          snapshot_id: '',
+          reference_id: referenceId,
+          title,
+          intent,
+          peer_id: logicalPeerId,
+          peer_name: displayPeerName || logicalPeerId || 'peer',
+          tags,
+          status: 'visible',
+          published_at: updatedAt,
+          updated_at: updatedAt,
+          votes: { up: 0, down: 0, total: 0, net: 0 },
+          score: 0.3,
+          score_breakdown: { score: 0.3, keyword: 0, semantic: 0 },
+          summary_text: 'Remote public reference. Import to fetch the full payload.',
+          content_excerpt: normalizePublicSummaryText(blob, 520),
+          search_blob: blob,
+          import_payload: {
+            peer_id: transportPeerId,
+            transport_peer_id: transportPeerId,
+            peer_name: displayPeerName || logicalPeerId || 'peer',
+            reference_id: referenceId,
+            title,
+            intent,
+            tags,
+            source_type: 'hyperweb_candidate',
+          },
+        };
+      });
+    });
   }
 
   const dedupe = new Set();
@@ -9624,16 +9706,45 @@ function getHyperwebOnlinePeerIds() {
   return online;
 }
 
-function resolveHyperwebTransportPeerId(recipientId = '') {
-  const target = String(recipientId || '').trim().toUpperCase();
-  if (!target) return '';
+function resolveHyperwebPeerRouting(peerId = '') {
+  const target = String(peerId || '').trim().toUpperCase();
+  if (!target) {
+    return {
+      logical_peer_id: '',
+      transport_peer_id: '',
+      peer: null,
+    };
+  }
   const state = ensureHyperwebSocialState();
-  const peer = state.known_peers && state.known_peers[target] ? state.known_peers[target] : null;
-  const relayPeerId = String((peer && peer.relay_peer_id) || '').trim().toUpperCase();
-  if (!relayPeerId) return '';
   const peers = hyperwebManager.listPeers();
-  const connected = (Array.isArray(peers) ? peers : []).find((row) => String((row && row.peer_id) || '').trim().toUpperCase() === relayPeerId);
-  return connected ? relayPeerId : '';
+  const relayIds = new Set((Array.isArray(peers) ? peers : []).map((peer) => String((peer && peer.peer_id) || '').trim().toUpperCase()).filter(Boolean));
+  const exact = state.known_peers && state.known_peers[target] ? state.known_peers[target] : null;
+  if (exact) {
+    const relayPeerId = String((exact && exact.relay_peer_id) || '').trim().toUpperCase();
+    return {
+      logical_peer_id: target,
+      transport_peer_id: relayIds.has(relayPeerId) ? relayPeerId : (relayIds.has(target) ? target : ''),
+      peer: exact,
+    };
+  }
+  for (const [fingerprint, peer] of Object.entries(state.known_peers || {})) {
+    const relayPeerId = String((peer && peer.relay_peer_id) || '').trim().toUpperCase();
+    if (!relayPeerId || relayPeerId !== target) continue;
+    return {
+      logical_peer_id: String(fingerprint || '').trim().toUpperCase(),
+      transport_peer_id: target,
+      peer,
+    };
+  }
+  return {
+    logical_peer_id: target,
+    transport_peer_id: relayIds.has(target) ? target : '',
+    peer: null,
+  };
+}
+
+function resolveHyperwebTransportPeerId(recipientId = '') {
+  return String((resolveHyperwebPeerRouting(recipientId) || {}).transport_peer_id || '').trim().toUpperCase();
 }
 
 function broadcastHyperwebInviteHandshake() {
@@ -9703,7 +9814,8 @@ function sendHyperwebChatAck(toPeerId = '', messageId = '', logicalId = '', room
     ack_type: String(ackType || 'read').trim().toLowerCase() === 'delivered' ? 'delivered' : 'read',
   };
   payload.signature = signHyperwebPayload(buildHyperwebChatSignedPayload(payload));
-  const sent = hyperwebManager.sendProtocolToPeer(peer, payload);
+  const transportPeerId = resolveHyperwebTransportPeerId(peer);
+  const sent = transportPeerId ? hyperwebManager.sendProtocolToPeer(transportPeerId, payload) : false;
   return { ok: !!sent };
 }
 

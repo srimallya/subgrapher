@@ -161,6 +161,7 @@ class HyperwebManager extends EventEmitter {
       display_name: item.displayName || item.peerId,
       channel_open: !!item.channelOpen,
       has_index: Array.isArray(item.publicIndex) && item.publicIndex.length > 0,
+      public_index: Array.isArray(item.publicIndex) ? item.publicIndex : [],
       last_seen_at: Number(item.lastSeenAt || 0),
     }));
   }
@@ -285,6 +286,10 @@ class HyperwebManager extends EventEmitter {
         const state = this._ensurePeerState(peerId);
         if (state) state.displayName = normalizeText(peer && peer.display_name) || peerId;
         await this._ensureRtcConnection(peerId, { initiator: true });
+        this.emit('peer_seen', {
+          peer_id: peerId,
+          display_name: normalizeText(peer && peer.display_name) || peerId,
+        });
       }
     });
 
@@ -294,6 +299,10 @@ class HyperwebManager extends EventEmitter {
       const state = this._ensurePeerState(peerId);
       if (state) state.displayName = normalizeText(payload && payload.display_name) || peerId;
       await this._ensureRtcConnection(peerId, { initiator: this.peerId < peerId });
+      this.emit('peer_seen', {
+        peer_id: peerId,
+        display_name: normalizeText(payload && payload.display_name) || peerId,
+      });
     });
 
     socket.on('hyperweb:peer_left', (payload) => {
@@ -556,7 +565,7 @@ class HyperwebManager extends EventEmitter {
       };
     }
 
-    const peerId = normalizeText(suggestion.peer_id);
+    const peerId = normalizeText(suggestion.transport_peer_id || suggestion.peer_id);
     const referenceId = normalizeText(suggestion.reference_id);
     if (!peerId || !referenceId) {
       return { ok: false, message: 'Selected suggestion does not include source peer metadata.' };
