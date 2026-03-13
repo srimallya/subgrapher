@@ -814,7 +814,7 @@
       <details class="settings-section settings-accordion" id="settings-diagnostics" data-settings-section="diagnostics">
         <summary>Diagnostics</summary>
         <div class="settings-section-content">
-        <div class="settings-grid settings-grid-3">
+        <div class="settings-grid settings-grid-2">
           <div class="settings-readout">
             <h4>TrustCommons</h4>
             <pre id="settings-diagnostics-trustcommons"></pre>
@@ -827,12 +827,41 @@
             <h4>Identity</h4>
             <pre id="settings-diagnostics-identity"></pre>
           </div>
+          <div class="settings-readout">
+            <h4>Python Runtime</h4>
+            <pre id="settings-diagnostics-python"></pre>
+            <div class="settings-inline-actions">
+              <button id="settings-python-download-btn" type="button">Download Python</button>
+            </div>
+          </div>
         </div>
         <div class="settings-inline-actions">
           <button id="settings-refresh-diagnostics-btn">Refresh Diagnostics</button>
           <button id="settings-trustcommons-connect-btn">TrustCommons Connect</button>
           <button id="settings-hyperweb-connect-btn">Hyperweb Connect</button>
           <button id="settings-hyperweb-disconnect-btn">Hyperweb Disconnect</button>
+        </div>
+        </div>
+      </details>
+
+      <details class="settings-section settings-accordion" id="settings-hyperweb-invites" data-settings-section="hyperweb-invites">
+        <summary>Hyperweb Invites</summary>
+        <div class="settings-section-content">
+        <p class="muted small">Generate a manual invite key, copy it, and paste a key from another Subgrapher user to add them as a chat peer.</p>
+        <div class="settings-grid settings-grid-1">
+          <label class="settings-field">Your Invite Key
+            <textarea id="settings-hyperweb-invite-output" rows="4" readonly placeholder="Generate a key to share with another Subgrapher user"></textarea>
+          </label>
+          <div class="settings-inline-actions">
+            <button id="settings-hyperweb-invite-generate-btn" type="button">Generate Key</button>
+            <button id="settings-hyperweb-invite-copy-btn" type="button">Copy Key</button>
+          </div>
+          <label class="settings-field">Received Invite Key
+            <textarea id="settings-hyperweb-invite-input" rows="4" placeholder="Paste a key or subgrapher://hyperweb-invite link"></textarea>
+          </label>
+          <div class="settings-inline-actions">
+            <button id="settings-hyperweb-invite-accept-btn" type="button">Accept Key</button>
+          </div>
         </div>
         </div>
       </details>

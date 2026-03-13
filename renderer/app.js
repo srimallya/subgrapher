@@ -2,6 +2,7 @@
 
 const electronApi = window.electronAPI || null;
 const api = electronApi && electronApi.browser;
+const PYTHON_WINDOWS_DOWNLOAD_URL = 'https://www.python.org/downloads/windows/';
 
 const state = {
   references: [],
@@ -8977,9 +8978,42 @@ function renderSettingsDiagnostics() {
   const trust = e('settings-diagnostics-trustcommons');
   const hyper = e('settings-diagnostics-hyperweb');
   const identity = e('settings-diagnostics-identity');
+  const python = e('settings-diagnostics-python');
+  const pythonDownloadBtn = e('settings-python-download-btn');
   if (trust) trust.textContent = JSON.stringify((diag && diag.trustcommons) || {}, null, 2);
   if (hyper) hyper.textContent = JSON.stringify((diag && diag.hyperweb) || {}, null, 2);
   if (identity) identity.textContent = JSON.stringify((diag && diag.hyperweb_identity) || {}, null, 2);
+  if (python) {
+    const tool = (diag && diag.python && diag.python.tool && typeof diag.python.tool === 'object')
+      ? diag.python.tool
+      : {};
+    const lines = [];
+    lines.push(`available: ${tool.ok ? 'yes' : 'no'}`);
+    if (tool.version) lines.push(`version: ${tool.version}`);
+    if (tool.python_bin) lines.push(`binary: ${tool.python_bin}`);
+    if (tool.source) lines.push(`source: ${tool.source}`);
+    if (tool.message) lines.push(`note: ${tool.message}`);
+    if (!tool.ok && electronApi && electronApi.platform === 'win32') {
+      lines.push('recommended: install Python 3.11 x64 and make sure python or python3 is available in PATH');
+    }
+    python.textContent = lines.join('\n');
+  }
+  if (pythonDownloadBtn) {
+    pythonDownloadBtn.hidden = !(electronApi && electronApi.platform === 'win32');
+  }
+}
+
+function normalizeHyperwebInviteTokenInput(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    const token = String(parsed.searchParams.get('token') || '').trim();
+    if (token) return token;
+  } catch (_) {
+    // treat as raw token
+  }
+  return raw;
 }
 
 function renderTelegramSettingsStatus() {
@@ -10869,6 +10903,74 @@ function bindControls() {
   });
 
   e('settings-refresh-diagnostics-btn')?.addEventListener('click', async () => {
+    const diagnostics = await api.settingsDiagnostics();
+    if (diagnostics && diagnostics.ok) {
+      state.settingsDiagnostics = diagnostics;
+      renderSettingsDiagnostics();
+    }
+  });
+
+  e('settings-python-download-btn')?.addEventListener('click', async () => {
+    if (!api || typeof api.openExternal !== 'function') return;
+    await api.openExternal(PYTHON_WINDOWS_DOWNLOAD_URL);
+  });
+
+  e('settings-hyperweb-invite-generate-btn')?.addEventListener('click', async () => {
+    if (!api || typeof api.hyperwebCreateInvite !== 'function') return;
+    const res = await api.hyperwebCreateInvite();
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to generate invite key.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const output = e('settings-hyperweb-invite-output');
+    if (output) output.value = String((res && res.token) || '').trim();
+    state.settingsSaveState = 'Invite key generated.';
+    renderSettingsStatusLine();
+  });
+
+  e('settings-hyperweb-invite-copy-btn')?.addEventListener('click', async () => {
+    const output = e('settings-hyperweb-invite-output');
+    const token = String((output && output.value) || '').trim();
+    if (!token) {
+      state.settingsSaveState = 'Generate an invite key first.';
+      renderSettingsStatusLine();
+      return;
+    }
+    try {
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(token);
+      } else {
+        window.prompt('Copy invite key:', token);
+      }
+      state.settingsSaveState = 'Invite key copied.';
+    } catch (_) {
+      window.prompt('Copy invite key:', token);
+      state.settingsSaveState = 'Invite key ready to copy.';
+    }
+    renderSettingsStatusLine();
+  });
+
+  e('settings-hyperweb-invite-accept-btn')?.addEventListener('click', async () => {
+    if (!api || typeof api.hyperwebAcceptInvite !== 'function') return;
+    const input = e('settings-hyperweb-invite-input');
+    const token = normalizeHyperwebInviteTokenInput((input && input.value) || '');
+    if (!token) {
+      state.settingsSaveState = 'Paste an invite key first.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const res = await api.hyperwebAcceptInvite(token);
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to accept invite key.';
+      renderSettingsStatusLine();
+      return;
+    }
+    if (input) input.value = '';
+    state.settingsSaveState = 'Invite key accepted. Peer added to Hyperweb.';
+    renderSettingsStatusLine();
+    await refreshHyperwebChatData();
+    await refreshHyperwebStatus();
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
       state.settingsDiagnostics = diagnostics;

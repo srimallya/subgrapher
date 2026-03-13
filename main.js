@@ -19419,12 +19419,14 @@ ipcMain.handle('browser:settingsDiagnostics', async () => {
   const trustcommons = getTrustCommonsStatus();
   const hyperweb = hyperwebManager.getStatus();
   const identity = getHyperwebIdentityDiagnostics();
+  const python = await getPythonRuntimeResolver().diagnostics({ bypassCache: true });
   return {
     ok: true,
     settings,
     trustcommons,
     hyperweb,
     hyperweb_identity: identity,
+    python,
   };
 });
 

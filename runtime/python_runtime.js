@@ -79,6 +79,13 @@ class PythonRuntimeResolver {
     return listUnique(candidates);
   }
 
+  _systemCandidates() {
+    if (process.platform === 'win32') {
+      return ['python3', 'python'];
+    }
+    return ['python3', 'python'];
+  }
+
   async _checkCandidate(pythonBin, source, role, extraMessage = '') {
     const check = await checkPythonRuntime({ pythonBin, timeoutMs: 6_000 });
     return {
@@ -143,16 +150,19 @@ class PythonRuntimeResolver {
       bundledErrors.push(`bundled runtime missing at ${bundledRoot}`);
     }
 
-    const fallbackPrefix = packaged
-      ? 'Bundled Python runtime unavailable; using system python3 fallback.'
-      : '';
-    const system = await this._checkCandidate('python3', 'system', normalizedRole, fallbackPrefix);
-    if (system.ok) {
-      const suffix = bundledErrors.length > 0 ? ` ${bundledErrors.join(' | ')}` : '';
-      const message = `${String(system.message || '').trim()}${suffix}`.trim();
-      const result = { ...system, message };
-      this._setCached(normalizedRole, result);
-      return result;
+    const systemCandidates = this._systemCandidates();
+    for (const candidate of systemCandidates) {
+      const fallbackPrefix = packaged
+        ? `Bundled Python runtime unavailable; using system ${candidate} fallback.`
+        : '';
+      const system = await this._checkCandidate(candidate, 'system', normalizedRole, fallbackPrefix);
+      if (system.ok) {
+        const suffix = bundledErrors.length > 0 ? ` ${bundledErrors.join(' | ')}` : '';
+        const message = `${String(system.message || '').trim()}${suffix}`.trim();
+        const result = { ...system, message };
+        this._setCached(normalizedRole, result);
+        return result;
+      }
     }
 
     const result = {
@@ -164,7 +174,7 @@ class PythonRuntimeResolver {
       message: [
         'No usable Python runtime found.',
         bundledErrors.join(' | '),
-        String(system.message || '').trim(),
+        `Tried: ${this._systemCandidates().join(', ')}`,
       ].filter(Boolean).join(' '),
     };
     this._setCached(normalizedRole, result);
