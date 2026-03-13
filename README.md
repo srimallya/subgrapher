@@ -132,8 +132,9 @@ This implementation delivers:
   - primary embeddings via LM Studio (`/v1/embeddings`), with automatic local hash-embedding fallback
   - Settings controls: `rag_enabled`, `rag_embedding_model`, `rag_top_k`, index status, and manual reindex for active workspace
 - Key/secret storage:
-  - provider keys and secure refs are implemented via OS keychain on macOS
-  - mailbox passwords are stored in the OS keychain; they are not written to the reference store
+  - provider keys and secure refs are stored via platform secure storage
+  - on macOS this uses Keychain; on Windows/Linux it uses Electron `safeStorage` with encrypted local metadata
+  - mailbox passwords are stored in secure storage; they are not written to the reference store
 - Data-at-rest protection:
   - core reference/metadata stores are encrypted at rest (AES-256-GCM envelope)
   - plaintext legacy stores are migrated on read to encrypted format

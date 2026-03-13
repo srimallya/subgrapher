@@ -85,6 +85,7 @@ const HYPERWEB_CHAT_KEY_DER_PREFIX = 'x25519-pkcs8-der:';
 const HYPERWEB_CHAT_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const APP_DATA_KEY_ACCOUNT = 'app_data_key_v1';
 const APP_DATA_KEY_SERVICE = 'com.subgrapher.appdata';
+const APP_DATA_KEY_REF = 'system:app_data_key_v1';
 const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
 const TRUSTCOMMONS_SYNC_DEFAULT_PEER_URL = 'http://127.0.0.1:42641';
 const TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC = 8;
@@ -2341,8 +2342,16 @@ function decryptEncryptedEnvelopeToJson(rawText = '', keyBuffer = null) {
 }
 
 function getPersistedAppDataKeyBase64() {
+  const storeRes = getSecureSecretStore().getSecret(APP_DATA_KEY_REF);
+  if (storeRes && storeRes.ok && storeRes.secret) return String(storeRes.secret || '').trim();
   const got = keychain.getSecret(APP_DATA_KEY_ACCOUNT, { service: APP_DATA_KEY_SERVICE });
-  if (got && got.ok && got.secret) return String(got.secret || '').trim();
+  if (got && got.ok && got.secret) {
+    const value = String(got.secret || '').trim();
+    if (value) {
+      getSecureSecretStore().setSecret(APP_DATA_KEY_REF, value);
+      return value;
+    }
+  }
   return '';
 }
 
@@ -2365,7 +2374,7 @@ function getAppDataKeyBuffer(options = {}) {
   }
   if (options.allowGenerate === false) return null;
   const next = crypto.randomBytes(32);
-  const saved = keychain.setSecret(APP_DATA_KEY_ACCOUNT, next.toString('base64'), { service: APP_DATA_KEY_SERVICE });
+  const saved = getSecureSecretStore().setSecret(APP_DATA_KEY_REF, next.toString('base64'));
   if (!saved || !saved.ok) return null;
   appDataProtectionState.key = next;
   return appDataProtectionState.key;
@@ -4230,6 +4239,105 @@ function generateProviderKeyId() {
   return normalizeProviderKeyId(`key-${nowTs().toString(36)}-${entropy}`);
 }
 
+function providerSecretRef(provider, keyId = '') {
+  const account = keychain.providerAccount(provider, keyId);
+  if (!account) return '';
+  return `provider_key:${account}`;
+}
+
+function setStoredProviderKey(provider, keyId, apiKey) {
+  const ref = providerSecretRef(provider, keyId);
+  if (!ref) return { ok: false, message: 'provider is required.' };
+  const setRes = getSecureSecretStore().setSecret(ref, String(apiKey || ''));
+  if (!setRes || !setRes.ok) {
+    return { ok: false, message: String((setRes && setRes.message) || 'Unable to store provider key.') };
+  }
+  return {
+    ok: true,
+    provider: String(provider || '').trim().toLowerCase(),
+    key_id: normalizeProviderKeyId(keyId),
+    ref,
+  };
+}
+
+function getStoredProviderKey(provider, keyId = '') {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  const normalizedKeyId = normalizeProviderKeyId(keyId);
+  if (!normalizedProvider) return { ok: false, message: 'provider is required.' };
+  const ref = providerSecretRef(normalizedProvider, normalizedKeyId);
+  if (!ref) return { ok: false, message: 'provider is required.' };
+  const storeRes = getSecureSecretStore().getSecret(ref);
+  if (storeRes && storeRes.ok && storeRes.secret) {
+    return {
+      ok: true,
+      provider: normalizedProvider,
+      key_id: normalizedKeyId,
+      apiKey: String(storeRes.secret || ''),
+      source: 'secure_store',
+    };
+  }
+  const legacyRes = keychain.getProviderKey(normalizedProvider, normalizedKeyId);
+  if (legacyRes && legacyRes.ok && legacyRes.apiKey) {
+    const migrateRes = getSecureSecretStore().setSecret(ref, String(legacyRes.apiKey || ''));
+    if (!migrateRes || !migrateRes.ok) {
+      return {
+        ok: true,
+        provider: normalizedProvider,
+        key_id: normalizedKeyId,
+        apiKey: String(legacyRes.apiKey || ''),
+        source: 'legacy_keychain',
+      };
+    }
+    return {
+      ok: true,
+      provider: normalizedProvider,
+      key_id: normalizedKeyId,
+      apiKey: String(legacyRes.apiKey || ''),
+      source: 'legacy_keychain',
+      migrated: true,
+    };
+  }
+  return {
+    ok: false,
+    message: String((storeRes && storeRes.message) || (legacyRes && legacyRes.message) || 'Provider key is not configured.'),
+  };
+}
+
+function hasStoredProviderKey(provider, keyId = '') {
+  const res = getStoredProviderKey(provider, keyId);
+  return !!(res && res.ok && res.apiKey);
+}
+
+function deleteStoredProviderKey(provider, keyId = '') {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  const normalizedKeyId = normalizeProviderKeyId(keyId);
+  if (!normalizedProvider) return { ok: false, message: 'provider is required.' };
+  const ref = providerSecretRef(normalizedProvider, normalizedKeyId);
+  const storeRes = ref ? getSecureSecretStore().clearSecret(ref) : { ok: false, message: 'provider is required.' };
+  const legacyRes = keychain.deleteProviderKey(normalizedProvider, normalizedKeyId);
+  if (storeRes && storeRes.ok) {
+    return {
+      ok: true,
+      provider: normalizedProvider,
+      key_id: normalizedKeyId,
+      cleared_legacy: !!(legacyRes && legacyRes.ok && !legacyRes.missing),
+    };
+  }
+  if (legacyRes && legacyRes.ok) {
+    return {
+      ok: true,
+      provider: normalizedProvider,
+      key_id: normalizedKeyId,
+      missing: !!(legacyRes && legacyRes.missing),
+      cleared_legacy: true,
+    };
+  }
+  return {
+    ok: false,
+    message: String((storeRes && storeRes.message) || (legacyRes && legacyRes.message) || 'Unable to delete provider key.'),
+  };
+}
+
 function getProviderProfile(settings, provider) {
   const normalizedProvider = String(provider || '').trim().toLowerCase();
   const profiles = normalizeProviderKeyProfiles(settings && settings.provider_key_profiles);
@@ -4265,7 +4373,7 @@ function ensureProviderProfileMigrated(provider) {
   if (!legacy || !legacy.ok || !legacy.apiKey) {
     return { ok: true, migrated: false, settings: current, profiles };
   }
-  const copyRes = keychain.setProviderKey(normalizedProvider, PROVIDER_PRIMARY_KEY_ID, legacy.apiKey);
+  const copyRes = setStoredProviderKey(normalizedProvider, PROVIDER_PRIMARY_KEY_ID, legacy.apiKey);
   if (!copyRes || !copyRes.ok) {
     return { ok: false, message: (copyRes && copyRes.message) || 'Unable to migrate legacy provider key.' };
   }
@@ -4318,7 +4426,7 @@ function resolveProviderApiKey(provider, keyId = '') {
         message: `Key "${requestedKeyId}" was not found for ${normalizedProvider}.`,
       };
     }
-    const keyRes = keychain.getProviderKey(normalizedProvider, requestedKeyId);
+    const keyRes = getStoredProviderKey(normalizedProvider, requestedKeyId);
     if (!keyRes || !keyRes.ok || !keyRes.apiKey) {
       return {
         ok: false,
@@ -4341,7 +4449,7 @@ function resolveProviderApiKey(provider, keyId = '') {
   }
   if (targetKeyId) {
     const keyEntry = (profile.keys || []).find((entry) => String((entry && entry.key_id) || '') === targetKeyId);
-    const keyRes = keychain.getProviderKey(normalizedProvider, targetKeyId);
+    const keyRes = getStoredProviderKey(normalizedProvider, targetKeyId);
     if (keyRes && keyRes.ok && keyRes.apiKey) {
       return {
         ok: true,
@@ -4395,7 +4503,7 @@ function buildProviderKeysState() {
         label: String((entry && entry.label) || keyId),
         created_at: Number((entry && entry.created_at) || 0),
         updated_at: Number((entry && entry.updated_at) || 0),
-        configured: !!(keyId && keychain.hasProviderKey(provider, keyId)),
+        configured: !!(keyId && hasStoredProviderKey(provider, keyId)),
       };
     });
     const resolved = resolveProviderApiKey(provider, profile.primary_key_id || '');
@@ -4444,7 +4552,7 @@ function upsertProviderKeyProfile(payload = {}) {
   const unique = ensureUniqueProviderKeyLabel(profile, keyId, label);
   if (!unique.ok) return unique;
 
-  const storeRes = keychain.setProviderKey(provider, keyId, apiKey);
+  const storeRes = setStoredProviderKey(provider, keyId, apiKey);
   if (!storeRes || !storeRes.ok) {
     return { ok: false, message: (storeRes && storeRes.message) || 'Unable to store provider key.' };
   }
@@ -4499,7 +4607,7 @@ function deleteProviderKeyProfileEntry(payload = {}) {
 
   if (!keyId) keyId = normalizeProviderKeyId(profile.primary_key_id) || pickProviderAutoPrimary(profile);
   if (!keyId && (!Array.isArray(profile.keys) || profile.keys.length === 0)) {
-    const legacyRes = keychain.deleteLegacyProviderKey(provider);
+    const legacyRes = deleteStoredProviderKey(provider);
     return {
       ok: !!(legacyRes && legacyRes.ok),
       message: legacyRes && legacyRes.ok ? '' : (legacyRes && legacyRes.message) || 'Unable to delete provider key.',
@@ -4515,7 +4623,7 @@ function deleteProviderKeyProfileEntry(payload = {}) {
     return { ok: false, message: `Key "${keyId}" was not found for ${provider}.` };
   }
 
-  const deleteRes = keychain.deleteProviderKey(provider, keyId);
+  const deleteRes = deleteStoredProviderKey(provider, keyId);
   if (!deleteRes || !deleteRes.ok) {
     return { ok: false, message: (deleteRes && deleteRes.message) || 'Unable to delete provider key.' };
   }
@@ -5104,6 +5212,65 @@ function clearSecretValueByRef(ref) {
   if (!cleanRef) return { ok: true, missing: true };
   return getSecureSecretStore().clearSecret(cleanRef);
 }
+
+function serviceSecretRef(service, account) {
+  const cleanService = String(service || '').trim();
+  const cleanAccount = String(account || '').trim();
+  if (!cleanService || !cleanAccount) return '';
+  return `service_secret:${cleanService}:${cleanAccount}`;
+}
+
+function getPlatformServiceSecret(account, options = {}) {
+  const cleanAccount = String(account || '').trim();
+  const service = String((options && options.service) || '').trim();
+  if (!cleanAccount) return { ok: false, message: 'account is required.' };
+  if (process.platform === 'darwin') {
+    return keychain.getSecret(cleanAccount, { service });
+  }
+  const ref = serviceSecretRef(service, cleanAccount);
+  const storeRes = ref ? getSecureSecretStore().getSecret(ref) : { ok: false, message: 'account is required.' };
+  if (storeRes && storeRes.ok && storeRes.secret) {
+    return { ok: true, secret: String(storeRes.secret || '') };
+  }
+  const legacyRes = keychain.getSecret(cleanAccount, { service });
+  if (legacyRes && legacyRes.ok && legacyRes.secret) {
+    getSecureSecretStore().setSecret(ref, String(legacyRes.secret || ''));
+    return { ok: true, secret: String(legacyRes.secret || '') };
+  }
+  return { ok: false, message: String((storeRes && storeRes.message) || (legacyRes && legacyRes.message) || 'Secret is not configured.') };
+}
+
+function setPlatformServiceSecret(account, secret, options = {}) {
+  const cleanAccount = String(account || '').trim();
+  const service = String((options && options.service) || '').trim();
+  if (!cleanAccount) return { ok: false, message: 'account is required.' };
+  if (process.platform === 'darwin') {
+    return keychain.setSecret(cleanAccount, secret, { service });
+  }
+  const ref = serviceSecretRef(service, cleanAccount);
+  const setRes = ref ? getSecureSecretStore().setSecret(ref, secret) : { ok: false, message: 'account is required.' };
+  if (setRes && setRes.ok) return { ok: true };
+  return { ok: false, message: String((setRes && setRes.message) || 'Unable to store secret.') };
+}
+
+function deletePlatformServiceSecret(account, options = {}) {
+  const cleanAccount = String(account || '').trim();
+  const service = String((options && options.service) || '').trim();
+  if (!cleanAccount) return { ok: true, missing: true };
+  if (process.platform === 'darwin') {
+    return keychain.deleteSecret(cleanAccount, { service });
+  }
+  const ref = serviceSecretRef(service, cleanAccount);
+  const clearRes = ref ? getSecureSecretStore().clearSecret(ref) : { ok: true, missing: true };
+  if (clearRes && clearRes.ok) return { ok: true, missing: !!clearRes.missing };
+  return { ok: false, message: String((clearRes && clearRes.message) || 'Unable to delete secret.') };
+}
+
+const trustCommonsSecretAdapter = {
+  getSecret: getPlatformServiceSecret,
+  setSecret: setPlatformServiceSecret,
+  deleteSecret: deletePlatformServiceSecret,
+};
 
 function getMailStore() {
   if (!mailStore) {
@@ -10385,7 +10552,7 @@ function getTrustCommonsSyncSecret() {
   }
 
   const service = TRUSTCOMMONS_SYNC_SECRET_SERVICE;
-  const got = keychain.getSecret(account, { service });
+  const got = getPlatformServiceSecret(account, { service });
   if (got && got.ok && got.secret) {
     cachedTrustCommonsSyncSecret = String(got.secret || '');
     cachedTrustCommonsSyncAccount = account;
@@ -10393,7 +10560,7 @@ function getTrustCommonsSyncSecret() {
   }
 
   const generated = crypto.randomBytes(32).toString('hex');
-  const saved = keychain.setSecret(account, generated, { service });
+  const saved = setPlatformServiceSecret(account, generated, { service });
   if (saved && saved.ok) {
     cachedTrustCommonsSyncSecret = generated;
     cachedTrustCommonsSyncAccount = account;
@@ -10684,6 +10851,15 @@ async function launchTrustCommonsApp() {
     }
   }
 
+  if (process.platform !== 'darwin') {
+    try {
+      await shell.openExternal(deepLink);
+      return { ok: true, opened: true, method: 'deeplink', download_opened: false };
+    } catch (_) {
+      // fall through
+    }
+  }
+
   for (const appPath of getTrustCommonsAppCandidates()) {
     try {
       if (!fs.existsSync(appPath)) continue;
@@ -10749,7 +10925,7 @@ async function ensureTrustCommonsSyncBridge() {
 
 function applyTrustCommonsSettingsPatch(patch = {}) {
   const next = writeSettings(patch || {});
-  const load = trustCommonsIdentity.loadTrustCommonsIdentity(keychain, next);
+  const load = trustCommonsIdentity.loadTrustCommonsIdentity(trustCommonsSecretAdapter, next);
   trustCommonsRuntime = {
     ...trustCommonsRuntime,
     bootstrapComplete: !!next.trustcommons_bootstrap_complete,
@@ -10762,7 +10938,7 @@ function applyTrustCommonsSettingsPatch(patch = {}) {
 
 function ensureTrustCommonsBootstrap() {
   const settings = readSettings();
-  const bootstrap = trustCommonsIdentity.bootstrapTrustCommonsIdentity(keychain, settings, { appLabel: 'subgrapher' });
+  const bootstrap = trustCommonsIdentity.bootstrapTrustCommonsIdentity(trustCommonsSecretAdapter, settings, { appLabel: 'subgrapher' });
   if (!bootstrap || !bootstrap.ok) {
     trustCommonsRuntime = {
       ...trustCommonsRuntime,
@@ -19293,7 +19469,7 @@ ipcMain.handle('browser:settingsDangerResetTrustCommonsLink', async (_event, pay
   cachedTrustCommonsSyncAccount = '';
   ephemeralTrustCommonsSyncSecret = '';
   const syncAccount = getTrustCommonsSyncAccount(current);
-  keychain.deleteSecret(syncAccount, { service: TRUSTCOMMONS_SYNC_SECRET_SERVICE });
+  deletePlatformServiceSecret(syncAccount, { service: TRUSTCOMMONS_SYNC_SECRET_SERVICE });
   const next = writeSettings({
     trustcommons_bootstrap_complete: false,
     trustcommons_identity_id: '',

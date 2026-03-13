@@ -11284,7 +11284,7 @@ function bindControls() {
     const provider = String(select && select.value ? select.value : '').trim().toLowerCase();
     if (!PROVIDERS.includes(provider)) return;
 
-    const ok = window.confirm(`Delete the primary ${provider} API key from macOS Keychain?`);
+    const ok = window.confirm(`Delete the primary ${provider} API key from secure storage?`);
     if (!ok) return;
 
     const res = await api.providerDeleteKey(provider);
