@@ -374,6 +374,7 @@ hyperwebManager.on('protocol', (packet) => {
       alias: String(payload.alias || fingerprint),
       pubkey: String(payload.pubkey || ''),
       chat_pubkey: String(payload.chat_pubkey || ''),
+      relay_peer_id: String(peerId || '').trim(),
       addresses: Array.isArray(payload.addresses) ? payload.addresses : [],
       updated_at: nowTs(),
     };
@@ -9609,8 +9610,30 @@ function listHyperwebMembers() {
 }
 
 function getHyperwebOnlinePeerIds() {
+  const state = ensureHyperwebSocialState();
   const peers = hyperwebManager.listPeers();
-  return new Set((Array.isArray(peers) ? peers : []).map((peer) => String((peer && peer.peer_id) || '').trim().toUpperCase()).filter(Boolean));
+  const relayIds = new Set((Array.isArray(peers) ? peers : []).map((peer) => String((peer && peer.peer_id) || '').trim().toUpperCase()).filter(Boolean));
+  const online = new Set();
+  Object.entries(state.known_peers || {}).forEach(([fingerprint, peer]) => {
+    const id = String(fingerprint || '').trim().toUpperCase();
+    const relayPeerId = String((peer && peer.relay_peer_id) || '').trim().toUpperCase();
+    if (id && (relayIds.has(id) || (relayPeerId && relayIds.has(relayPeerId)))) {
+      online.add(id);
+    }
+  });
+  return online;
+}
+
+function resolveHyperwebTransportPeerId(recipientId = '') {
+  const target = String(recipientId || '').trim().toUpperCase();
+  if (!target) return '';
+  const state = ensureHyperwebSocialState();
+  const peer = state.known_peers && state.known_peers[target] ? state.known_peers[target] : null;
+  const relayPeerId = String((peer && peer.relay_peer_id) || '').trim().toUpperCase();
+  if (!relayPeerId) return '';
+  const peers = hyperwebManager.listPeers();
+  const connected = (Array.isArray(peers) ? peers : []).find((row) => String((row && row.peer_id) || '').trim().toUpperCase() === relayPeerId);
+  return connected ? relayPeerId : '';
 }
 
 function broadcastHyperwebInviteHandshake() {
@@ -9727,6 +9750,11 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
       failures.push({ peer_id: recipientId, reason: 'missing_peer_keys' });
       return;
     }
+    const transportPeerId = resolveHyperwebTransportPeerId(recipientId);
+    if (!transportPeerId) {
+      failures.push({ peer_id: recipientId, reason: 'channel_closed' });
+      return;
+    }
     const encrypted = encryptHyperwebChatEnvelope(payloadObj, recipientChatPub);
     if (!encrypted || !encrypted.ok) {
       failures.push({ peer_id: recipientId, reason: (encrypted && encrypted.message) || 'encrypt_failed' });
@@ -9747,13 +9775,23 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
       file_size: file ? Number(file.size || 0) : 0,
     };
     payload.signature = signHyperwebPayload(buildHyperwebChatSignedPayload(payload));
-    const sent = hyperwebManager.sendProtocolToPeer(recipientId, payload);
+    const sent = hyperwebManager.sendProtocolToPeer(transportPeerId, payload);
     if (!sent) failures.push({ peer_id: recipientId, reason: 'channel_closed' });
   });
 
   const sentCount = recipients.length - failures.length;
   if (sentCount <= 0) {
-    return { ok: false, message: 'Unable to deliver message to selected recipient(s).', failures };
+    const failureSummary = failures
+      .map((row) => {
+        const peerLabel = String(row.peer_id || 'peer').trim();
+        const reason = String(row.reason || 'unknown').trim().toLowerCase();
+        if (reason === 'missing_peer_keys') return `${peerLabel}: missing peer keys`;
+        if (reason === 'channel_closed') return `${peerLabel}: channel not open`;
+        if (reason === 'encrypt_failed') return `${peerLabel}: encryption failed`;
+        return `${peerLabel}: ${reason}`;
+      })
+      .join('; ');
+    return { ok: false, message: failureSummary ? `Unable to deliver message to selected recipient(s). ${failureSummary}` : 'Unable to deliver message to selected recipient(s).', failures };
   }
 
   const persisted = persistHyperwebChatMessage({
