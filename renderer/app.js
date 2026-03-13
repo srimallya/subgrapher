@@ -11013,11 +11013,22 @@ function bindControls() {
       window.alert((res && res.message) || 'Unable to reset Hyperweb identity.');
       return;
     }
+    state.settingsSaveState = 'Hyperweb identity reset.';
+    renderSettingsStatusLine();
+    state.hyperwebChatPeerId = '';
+    state.hyperwebChatMessages = [];
+    state.hyperwebChatConversations = [];
+    state.hyperwebChatMembers = [];
+    state.hyperwebReferenceResults = [];
+    state.hyperwebFeed = [];
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
       state.settingsDiagnostics = diagnostics;
       renderSettingsDiagnostics();
     }
+    await refreshHyperwebStatus();
+    await refreshHyperwebChatData();
+    await refreshHyperwebFeedAndReferences();
   });
 
   e('settings-danger-clear-social-cache-btn')?.addEventListener('click', async () => {
@@ -11028,11 +11039,22 @@ function bindControls() {
       window.alert((res && res.message) || 'Unable to clear social cache.');
       return;
     }
+    state.settingsSaveState = 'Hyperweb social cache cleared.';
+    renderSettingsStatusLine();
+    state.hyperwebChatPeerId = '';
+    state.hyperwebChatMessages = [];
+    state.hyperwebChatConversations = [];
+    state.hyperwebChatMembers = [];
+    state.hyperwebReferenceResults = [];
+    state.hyperwebFeed = [];
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
       state.settingsDiagnostics = diagnostics;
       renderSettingsDiagnostics();
     }
+    await refreshHyperwebStatus();
+    await refreshHyperwebChatData();
+    await refreshHyperwebFeedAndReferences();
   });
 
   e('settings-danger-reset-trustcommons-link-btn')?.addEventListener('click', async () => {
