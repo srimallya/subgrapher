@@ -9016,6 +9016,16 @@ function normalizeHyperwebInviteTokenInput(value = '') {
   return raw;
 }
 
+function readDangerConfirmPhrase() {
+  const input = e('settings-danger-confirm-input');
+  return String((input && input.value) || '').trim();
+}
+
+function clearDangerConfirmPhrase() {
+  const input = e('settings-danger-confirm-input');
+  if (input) input.value = '';
+}
+
 function renderTelegramSettingsStatus() {
   const node = e('settings-telegram-token-status');
   if (!node) return;
@@ -11006,13 +11016,19 @@ function bindControls() {
   });
 
   e('settings-danger-reset-hyperweb-identity-btn')?.addEventListener('click', async () => {
-    const text = window.prompt('Type RESET to confirm Hyperweb identity reset:', '');
-    if (text === null) return;
-    const res = await api.settingsDangerResetHyperwebIdentity({ phrase: String(text || '') });
-    if (!res || !res.ok) {
-      window.alert((res && res.message) || 'Unable to reset Hyperweb identity.');
+    const phrase = readDangerConfirmPhrase();
+    if (!phrase) {
+      state.settingsSaveState = 'Type RESET in the confirmation field first.';
+      renderSettingsStatusLine();
       return;
     }
+    const res = await api.settingsDangerResetHyperwebIdentity({ phrase });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to reset Hyperweb identity.';
+      renderSettingsStatusLine();
+      return;
+    }
+    clearDangerConfirmPhrase();
     state.settingsSaveState = 'Hyperweb identity reset.';
     renderSettingsStatusLine();
     state.hyperwebChatPeerId = '';
@@ -11032,13 +11048,19 @@ function bindControls() {
   });
 
   e('settings-danger-clear-social-cache-btn')?.addEventListener('click', async () => {
-    const text = window.prompt('Type RESET to clear Hyperweb social cache:', '');
-    if (text === null) return;
-    const res = await api.settingsDangerClearHyperwebSocialCache({ phrase: String(text || '') });
-    if (!res || !res.ok) {
-      window.alert((res && res.message) || 'Unable to clear social cache.');
+    const phrase = readDangerConfirmPhrase();
+    if (!phrase) {
+      state.settingsSaveState = 'Type RESET in the confirmation field first.';
+      renderSettingsStatusLine();
       return;
     }
+    const res = await api.settingsDangerClearHyperwebSocialCache({ phrase });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to clear social cache.';
+      renderSettingsStatusLine();
+      return;
+    }
+    clearDangerConfirmPhrase();
     state.settingsSaveState = 'Hyperweb social cache cleared.';
     renderSettingsStatusLine();
     state.hyperwebChatPeerId = '';
@@ -11058,13 +11080,21 @@ function bindControls() {
   });
 
   e('settings-danger-reset-trustcommons-link-btn')?.addEventListener('click', async () => {
-    const text = window.prompt('Type RESET to reset TrustCommons link:', '');
-    if (text === null) return;
-    const res = await api.settingsDangerResetTrustCommonsLink({ phrase: String(text || '') });
-    if (!res || !res.ok) {
-      window.alert((res && res.message) || 'Unable to reset TrustCommons link.');
+    const phrase = readDangerConfirmPhrase();
+    if (!phrase) {
+      state.settingsSaveState = 'Type RESET in the confirmation field first.';
+      renderSettingsStatusLine();
       return;
     }
+    const res = await api.settingsDangerResetTrustCommonsLink({ phrase });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to reset TrustCommons link.';
+      renderSettingsStatusLine();
+      return;
+    }
+    clearDangerConfirmPhrase();
+    state.settingsSaveState = 'TrustCommons link reset.';
+    renderSettingsStatusLine();
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
       state.settingsDiagnostics = diagnostics;
