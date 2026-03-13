@@ -124,6 +124,8 @@ const state = {
   settingsValidationErrors: {},
   settingsDiagnostics: null,
   mailStatus: null,
+  mailUnreadCount: 0,
+  hyperwebUnreadCount: 0,
   mailAccounts: [],
   mailboxesByAccount: new Map(),
   mailSearchQueryByRef: new Map(),
@@ -212,6 +214,7 @@ const MAIL_SMART_FOLDER_LABELS = {
   trash: 'Trash',
   junk: 'Junk',
 };
+const HYPERWEB_LAST_SEEN_KEY = 'subgrapher_hyperweb_last_seen_v1';
 let passiveNoticeTimer = null;
 
 function e(id) {
@@ -267,6 +270,73 @@ function loadHyperwebSplitRatio() {
   } catch (_) {
     return 0.5;
   }
+}
+
+function loadHyperwebLastSeenAt() {
+  try {
+    const raw = window.localStorage.getItem(HYPERWEB_LAST_SEEN_KEY);
+    const value = Number(raw || 0);
+    return Number.isFinite(value) ? value : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function saveHyperwebLastSeenAt(ts = Date.now()) {
+  try {
+    window.localStorage.setItem(HYPERWEB_LAST_SEEN_KEY, String(Number(ts || Date.now())));
+  } catch (_) {
+    // noop
+  }
+}
+
+function renderTopbarBadges() {
+  const mailBadge = e('mail-open-badge');
+  const hyperwebBadge = e('hyperweb-open-badge');
+  const mailCount = Math.max(0, Number(state.mailUnreadCount || 0));
+  const hyperwebCount = Math.max(0, Number(state.hyperwebUnreadCount || 0));
+  if (mailBadge) {
+    mailBadge.textContent = String(mailCount);
+    mailBadge.classList.toggle('hidden', mailCount <= 0);
+  }
+  if (hyperwebBadge) {
+    hyperwebBadge.textContent = String(hyperwebCount);
+    hyperwebBadge.classList.toggle('hidden', hyperwebCount <= 0);
+  }
+}
+
+async function refreshTopbarBadges() {
+  if (api.mailSearchLocalThreads) {
+    const unreadRes = await api.mailSearchLocalThreads('', 500, true, '', '', '', 'unread');
+    const unreadItems = (unreadRes && unreadRes.ok && Array.isArray(unreadRes.items)) ? unreadRes.items : [];
+    state.mailUnreadCount = unreadItems.reduce((sum, item) => sum + Math.max(0, Number((item && item.unread_count) || 0)), 0);
+  }
+  if (api.hyperwebChatConversations) {
+    const conversationsRes = await api.hyperwebChatConversations();
+    const conversations = (conversationsRes && conversationsRes.ok && Array.isArray(conversationsRes.conversations))
+      ? conversationsRes.conversations
+      : [];
+    const dmUnread = conversations.reduce((sum, item) => sum + Math.max(0, Number((item && item.unread_count) || 0)), 0);
+    let publicUnread = 0;
+    if (api.hyperwebFeedQuery) {
+      const feedRes = await api.hyperwebFeedQuery('');
+      const posts = (feedRes && feedRes.ok && Array.isArray(feedRes.posts)) ? feedRes.posts : [];
+      const lastSeenAt = loadHyperwebLastSeenAt();
+      const myId = String((((state.hyperwebIdentity || {}).fingerprint) || '')).trim().toUpperCase();
+      posts.forEach((post) => {
+        const postTs = Number((post && post.created_at) || 0);
+        const authorFp = String((post && post.author_fingerprint) || '').trim().toUpperCase();
+        if (postTs > lastSeenAt && authorFp && authorFp !== myId) publicUnread += 1;
+        (Array.isArray(post && post.replies) ? post.replies : []).forEach((reply) => {
+          const replyTs = Number((reply && reply.created_at) || 0);
+          const replyAuthor = String((reply && reply.author_fingerprint) || '').trim().toUpperCase();
+          if (replyTs > lastSeenAt && replyAuthor && replyAuthor !== myId) publicUnread += 1;
+        });
+      });
+    }
+    state.hyperwebUnreadCount = dmUnread + publicUnread;
+  }
+  renderTopbarBadges();
 }
 
 function persistHyperwebSplitRatio(value) {
@@ -4812,6 +4882,34 @@ async function deleteMailThreads(threadIds = []) {
   };
 }
 
+function removeMailThreadsFromLocalState(threadIds = []) {
+  const ids = new Set((Array.isArray(threadIds) ? threadIds : []).map((item) => String(item || '').trim()).filter(Boolean));
+  if (!ids.size) return;
+  state.mailSearchResultsByRef.forEach((results, key) => {
+    const list = Array.isArray(results) ? results : [];
+    state.mailSearchResultsByRef.set(key, list.filter((item) => !ids.has(String((item && item.id) || '').trim())));
+  });
+  state.mailPreviewByRef.forEach((preview, key) => {
+    const previewThreadId = String((preview && preview.thread_id) || '').trim();
+    if (previewThreadId && ids.has(previewThreadId)) state.mailPreviewByRef.delete(key);
+  });
+}
+
+function resolveMailThreadCounterparty(item = {}) {
+  const accountEmail = String((item && item.account_email) || '').trim().toLowerCase();
+  const participants = Array.isArray(item && item.participants) ? item.participants : [];
+  const others = participants
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .filter((value) => value.toLowerCase() !== accountEmail);
+  if (others.length > 0) {
+    if (others.length === 1) return others[0];
+    return `${others[0]} +${others.length - 1}`;
+  }
+  const sender = String((item && item.from) || '').trim();
+  return sender || 'Unknown sender';
+}
+
 function getMailPreviewState(srId) {
   return state.mailPreviewByRef.get(resolveMailStateId(srId)) || null;
 }
@@ -5049,8 +5147,9 @@ function renderMailPreviewMarkup(preview) {
     String((preview && preview.mailbox_name) || '').trim(),
     String((preview && preview.sent_at) || '').trim(),
   ].filter(Boolean).join(' · ');
+  const unread = !!(preview && preview.is_unread);
   return `
-    <div class="mail-message">
+    <div class="mail-message ${unread ? 'unread' : ''}">
       <div class="mail-message-head">
         <div class="mail-row-title">${escapeHtml(String((preview && preview.subject) || 'Message'))}</div>
         <div class="mail-row-sub muted small">${escapeHtml(meta)}</div>
@@ -5221,22 +5320,14 @@ async function renderMailPanel() {
       const isActive = previewState && String((previewState && previewState.thread_id) || '') === threadId;
       const isSelected = selectedSources.has(threadId);
       const isUnread = Number((item && item.unread_count) || 0) > 0;
-      const meta = [
-        String((item && item.account_label) || '').trim(),
-        MAIL_SMART_FOLDER_LABELS[String((item && item.mailbox_role) || '').trim().toLowerCase()] || formatMailFolderLabel({ path: String((item && item.mailbox) || '').trim() }),
-      ].filter(Boolean).join(' · ');
-      const sender = String((item && item.from) || '').trim() || 'Unknown sender';
-      const sentAgo = formatAgo((item && item.last_message_at) || 0);
+      const sender = resolveMailThreadCounterparty(item);
       return `
         <div class="mail-list-row ${isActive ? 'active' : ''} ${isUnread ? 'unread' : ''}">
           <button type="button" class="mail-list-row-main" data-mail-thread-preview="${escapeHtml(threadId)}">
-            <div class="mail-row-title ${isUnread ? 'unread' : ''}">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
-            <div class="mail-row-sub mail-row-meta muted small">${escapeHtml(meta)}</div>
             <div class="mail-row-sub mail-row-sender">
               <span class="mail-row-sender-name">${escapeHtml(sender)}</span>
-              ${sentAgo ? `<span class="mail-row-time">${escapeHtml(sentAgo)}</span>` : ''}
             </div>
-            <div class="mail-row-sub">${escapeHtml(normalizeMailSnippet((item && item.snippet) || ''))}</div>
+            <div class="mail-row-title ${isUnread ? 'unread' : ''}">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
           </button>
           <div class="mail-row-side">
             ${isUnread ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
@@ -5597,6 +5688,7 @@ async function renderMailPanel() {
         : `Move ${threadIds.length} selected threads to trash?`
     );
     if (!confirmed) return;
+    showPassiveNotification(threadIds.length === 1 ? 'Moving thread to trash...' : `Moving ${threadIds.length} threads to trash...`, 1800);
     const deleteRes = await deleteMailThreads(threadIds);
     if (!deleteRes.ok) {
       clearMailSelection(state.activeSrId);
@@ -5609,10 +5701,13 @@ async function renderMailPanel() {
       window.alert(summary);
       return;
     }
+    removeMailThreadsFromLocalState(threadIds);
     clearMailSelection(state.activeSrId);
     setMailPreviewState(state.activeSrId, null);
+    await renderMailPanel();
     await runMailSearch(state.activeSrId, query);
     await renderMailPanel();
+    await refreshTopbarBadges();
     showPassiveNotification(
       threadIds.length === 1
         ? 'Mail thread moved to trash.'
@@ -5682,22 +5777,14 @@ async function renderGlobalMailPage() {
       const threadId = String((item && item.id) || '').trim();
       const isActive = previewState && String((previewState && previewState.thread_id) || '') === threadId;
       const isUnread = Number((item && item.unread_count) || 0) > 0;
-      const meta = [
-        String((item && item.account_label) || '').trim(),
-        MAIL_SMART_FOLDER_LABELS[String((item && item.mailbox_role) || '').trim().toLowerCase()] || formatMailFolderLabel({ path: String((item && item.mailbox) || '').trim() }),
-      ].filter(Boolean).join(' · ');
-      const sender = String((item && item.from) || '').trim() || 'Unknown sender';
-      const sentAgo = formatAgo((item && item.last_message_at) || 0);
+      const sender = resolveMailThreadCounterparty(item);
       return `
         <div class="mail-list-row ${isActive ? 'active' : ''} ${isUnread ? 'unread' : ''}">
           <button type="button" class="mail-list-row-main" data-global-mail-thread-preview="${escapeHtml(threadId)}">
-            <div class="mail-row-title ${isUnread ? 'unread' : ''}">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
-            <div class="mail-row-sub mail-row-meta muted small">${escapeHtml(meta)}</div>
             <div class="mail-row-sub mail-row-sender">
               <span class="mail-row-sender-name">${escapeHtml(sender)}</span>
-              ${sentAgo ? `<span class="mail-row-time">${escapeHtml(sentAgo)}</span>` : ''}
             </div>
-            <div class="mail-row-sub">${escapeHtml(normalizeMailSnippet((item && item.snippet) || ''))}</div>
+            <div class="mail-row-title ${isUnread ? 'unread' : ''}">${escapeHtml(String((item && item.subject) || 'Untitled thread'))}</div>
           </button>
           <div class="mail-row-side">
             ${isUnread ? `<span class="mail-row-count">${escapeHtml(String(item.unread_count || 0))}</span>` : ''}
@@ -5959,14 +6046,19 @@ async function renderGlobalMailPage() {
     if (!thread) return;
     const confirmed = window.confirm('Move this thread to trash?');
     if (!confirmed) return;
+    showPassiveNotification('Moving thread to trash...', 1800);
     const res = await api.mailDeleteThread(String(thread.id || '').trim());
     if (!res || !res.ok) {
       window.alert((res && res.message) || 'Unable to move thread to trash.');
       return;
     }
+    removeMailThreadsFromLocalState([String(thread.id || '').trim()]);
     setMailPreviewState(viewId, null);
+    await renderGlobalMailPage();
     await runMailSearch(viewId, query);
     await renderGlobalMailPage();
+    await refreshTopbarBadges();
+    showPassiveNotification('Mail thread moved to trash.');
   });
   body.querySelectorAll('button[data-global-mail-thread-preview]').forEach((node) => {
     node.addEventListener('click', async () => {
@@ -5984,6 +6076,7 @@ async function openMailPage() {
   await refreshMailStatus();
   await refreshMailAccounts();
   await renderGlobalMailPage();
+  await refreshTopbarBadges();
 }
 
 async function handleMailEventPayload(payload = {}) {
@@ -6916,6 +7009,7 @@ function setupBrowserEvents() {
   }
   if (typeof api.onHyperwebChat === 'function') {
     api.onHyperwebChat(() => {
+      refreshTopbarBadges().catch(() => {});
       if (state.appView === 'hyperweb' && state.hyperwebActiveTab === 'chat') {
         refreshHyperwebChatData().catch(() => {});
       }
@@ -6956,6 +7050,7 @@ function setupBrowserEvents() {
   }
   if (typeof api.onMailEvent === 'function') {
     api.onMailEvent((payload) => {
+      refreshTopbarBadges().catch(() => {});
       handleMailEventPayload(payload).catch(() => {});
     });
   }
@@ -7151,6 +7246,7 @@ function updateTopbarViewButtons() {
   e('private-shares-open-btn')?.classList.toggle('active', active === 'private-shares');
   e('settings-open-btn')?.classList.toggle('active', active === 'settings');
   e('history-open-btn')?.classList.toggle('active', active === 'history');
+  renderTopbarBadges();
 }
 
 async function setAppView(viewName) {
@@ -7173,6 +7269,11 @@ async function setAppView(viewName) {
   document.body.classList.remove('mobile-left-open', 'mobile-right-open');
   closeTopbarMenu();
   updateTopbarViewButtons();
+  if (state.appView === 'hyperweb') {
+    saveHyperwebLastSeenAt(Date.now());
+    state.hyperwebUnreadCount = Math.max(0, Number(state.hyperwebUnreadCount || 0));
+    renderTopbarBadges();
+  }
   if (state.appView === 'hyperweb' || state.appView === 'private-shares' || state.appView === 'settings' || state.appView === 'mail') {
     await api.historyPreviewHide();
     await api.hide();
@@ -7272,6 +7373,7 @@ function renderShareMemberList() {
   if (!holder) return;
   const query = String(state.shareMemberSearchQuery || '').trim().toLowerCase();
   const members = (Array.isArray(state.shareMemberDirectory) ? state.shareMemberDirectory : [])
+    .filter((member) => !(member && member.is_self))
     .filter((member) => {
       if (!query) return true;
       const text = `${String(member.display_name || '')} ${String(member.member_id || '')} ${String(member.search_blob || '')}`.toLowerCase();
@@ -7285,7 +7387,8 @@ function renderShareMemberList() {
     const memberId = String((member && member.member_id) || '').trim();
     const selected = state.shareRecipientSelection.has(memberId);
     const alias = escapeHtml(String((member && member.display_name) || memberId));
-    const desc = String((member && member.is_self) ? 'You' : (member && member.member_id) || '');
+    const presence = String((member && member.presence_status) || '').trim().toLowerCase();
+    const desc = `${String((member && member.member_id) || '')}${presence ? ` · ${presence.replace(/_/g, ' ')}` : ''}`.trim();
     return `
       <label class="share-member-row">
         <input type="checkbox" data-share-member="${escapeHtml(memberId)}" ${selected ? 'checked' : ''} />
@@ -8288,6 +8391,9 @@ async function refreshHyperwebFeedAndReferences() {
     }
   }
   await refreshHyperwebReferences();
+  if (state.appView === 'hyperweb') {
+    saveHyperwebLastSeenAt(Date.now());
+  }
 }
 
 async function openHyperwebPage() {
@@ -8296,13 +8402,16 @@ async function openHyperwebPage() {
   applyHyperwebSplitRatio(state.hyperwebSplitRatio, { skipPersist: true });
   if (state.hyperwebActiveTab === 'chat') {
     await refreshHyperwebChatData();
+    await refreshTopbarBadges();
     return;
   }
   if (state.hyperwebActiveTab === 'refs') {
     await refreshHyperwebReferences();
+    await refreshTopbarBadges();
     return;
   }
   await refreshHyperwebFeedAndReferences();
+  await refreshTopbarBadges();
 }
 
 function setHistoryStatus(text) {
@@ -9289,6 +9398,7 @@ async function refreshMailStatus() {
   state.mailStatus = res || null;
   renderMailSettingsStatus();
   await refreshMailAccounts();
+  await refreshTopbarBadges();
   return res;
 }
 
@@ -9873,6 +9983,7 @@ async function refreshHyperwebStatus() {
   const mode = res.connected ? 'connected' : 'disconnected';
   const signalNote = res.signaling_available ? 'signaling ready' : 'signaling missing';
   statusNode.textContent = `Hyperweb ${mode} · live peers ${peerCount} · ${signalNote}${relay ? ` · relay ${relay}` : ''}`;
+  await refreshTopbarBadges();
 }
 
 function showAboutModal(show) {
@@ -11667,6 +11778,7 @@ async function initialize() {
   state.selectedModel = getSelectedModel();
   refreshAgentModeAvailability();
   await refreshHyperwebStatus();
+  await refreshTopbarBadges();
   await loadChatThread();
   await loadProgramEditorForActiveReference();
   await syncActiveSurface();

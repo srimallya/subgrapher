@@ -170,6 +170,9 @@ summary:focus-visible {
   height: 32px;
   padding: 6px 10px;
   background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .top-btn.active {
@@ -186,6 +189,20 @@ summary:focus-visible {
 
 .workspace-chrome-toggle {
   display: none;
+}
+
+.top-btn-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #3b3127;
+  color: #f4e7d8;
+  font-size: 11px;
+  line-height: 1;
 }
 
 .app-tools {
@@ -1258,10 +1275,24 @@ summary:focus-visible {
 .settings-user-row,
 .settings-provider-key-row,
 .share-member-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 8px;
+  padding: 10px 12px;
   background: #242424;
+}
+
+.share-member-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  padding: 0;
+  margin: 0;
+  justify-self: start;
+  align-self: center;
 }
 
 .files-item + .files-item,
@@ -2718,8 +2749,8 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 .mail-list-row.unread:not(.active) {
-  border-color: #5a4c3a;
-  background: #24201c;
+  border-color: #6b553a;
+  background: #2a221b;
 }
 
 .mail-list-row-main {
@@ -2756,11 +2787,12 @@ body.chat-collapsed #chat-panel-resizer {
 .mail-row-title {
   color: var(--text);
   font-size: 13px;
+  line-height: 1.35;
 }
 
 .mail-row-title.unread,
 .mail-list-row.unread .mail-row-sender-name {
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .mail-row-sub,
@@ -2782,6 +2814,12 @@ body.chat-collapsed #chat-panel-resizer {
 
 .mail-row-sender-name {
   color: var(--text);
+  font-size: 12px;
+}
+
+.mail-message.unread {
+  border-color: #6b553a;
+  background: #262018;
 }
 
 .mail-row-time {
