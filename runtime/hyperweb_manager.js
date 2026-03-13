@@ -669,9 +669,26 @@ class HyperwebManager extends EventEmitter {
   }
 
   _sendProtocolToPeer(peerId, message) {
-    const state = this.peerStates.get(normalizeText(peerId));
-    if (!state || !state.channel || state.channel.readyState !== 'open') return false;
-    return this._serializeAndSend(state.channel, message);
+    const normalizedPeerId = normalizeText(peerId);
+    const state = this.peerStates.get(normalizedPeerId);
+    if (state && state.channel && state.channel.readyState === 'open') {
+      return this._serializeAndSend(state.channel, message);
+    }
+    if (this.socket && this.connected && normalizedPeerId) {
+      try {
+        this.socket.emit('hyperweb:signal', {
+          to: normalizedPeerId,
+          from: this.peerId,
+          signal: {
+            protocol: message,
+          },
+        });
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
   }
 
   _broadcastProtocol(message) {
@@ -905,6 +922,11 @@ class HyperwebManager extends EventEmitter {
 
     if (!from || from === this.peerId) return;
     if (to && to !== this.peerId) return;
+
+    if (signal.protocol && typeof signal.protocol === 'object') {
+      await this._handleProtocolMessage(from, signal.protocol);
+      return;
+    }
 
     await this._ensureRtcConnection(from, { initiator: false });
     const state = this.peerStates.get(from);
