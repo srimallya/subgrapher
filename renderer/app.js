@@ -68,7 +68,6 @@ const state = {
   activeSkillsByRef: new Map(),
   activeMailByRef: new Map(),
   workspaceBrowserTabMap: new Map(),
-  trustCommonsStatus: null,
   hyperwebStatus: null,
   hyperwebSuggestions: [],
   audibleByRef: new Map(),
@@ -84,7 +83,7 @@ const state = {
   hyperwebActiveTab: 'feed',
   hyperwebReferenceResults: [],
   hyperwebIdentity: null,
-  hyperwebChatMode: 'dm',
+  hyperwebChatMode: 'room',
   hyperwebChatPeerId: '',
   hyperwebChatRoomId: '',
   hyperwebChatMessages: [],
@@ -198,8 +197,6 @@ const IMAGE_ANALYSIS_PROMPT_DEFAULT = 'Describe the image in details and write t
 const RAG_EMBEDDING_SOURCE_DEFAULT = 'lmstudio';
 const RAG_EMBEDDING_MODEL_DEFAULT = 'text-embedding-nomic-embed-text-v1.5';
 const RAG_TOP_K_DEFAULT = 8;
-const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
-const TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC = 8;
 const HISTORY_DEFAULT_MAX_ENTRIES = 5000;
 const GLOBAL_MAIL_VIEW_ID = '__global_mail__';
 const MAIL_SMART_FOLDER_LABELS = {
@@ -2600,7 +2597,7 @@ async function sendPrivateShareFromModal() {
     return;
   }
   if (!recipients.length) {
-    setStatusText('shares-status-line', 'Select at least one TTC member.');
+    setStatusText('shares-status-line', 'Select at least one trusted peer.');
     return;
   }
   const res = await api.hyperwebShareReference(srId, recipients);
@@ -2615,7 +2612,7 @@ async function sendPrivateShareFromModal() {
     : null;
   const attemptedDm = Number((inviteDm && inviteDm.attempted) || 0);
   const deliveredDm = Number((inviteDm && inviteDm.delivered) || 0);
-  const dmSuffix = attemptedDm > 0 ? ` TTC DM delivered ${deliveredDm}/${attemptedDm}.` : '';
+  const dmSuffix = attemptedDm > 0 ? ` Invite delivered ${deliveredDm}/${attemptedDm}.` : '';
   if (inviteUrl) {
     const clipboardText = inviteMessage || inviteUrl;
     try {
@@ -7303,9 +7300,6 @@ async function refreshShareMemberDirectory() {
   }
   state.shareMemberDirectory = Array.isArray(res.members) ? res.members : [];
   renderShareMemberList();
-  if (res.unauthenticated) {
-    setStatusText('shares-status-line', (res && res.message) || 'TTC auth required to send a private share.');
-  }
 }
 
 async function openShareReferenceModal(srId) {
@@ -7598,7 +7592,7 @@ function getHyperwebSelectableDmPeers() {
   const members = Array.isArray(state.hyperwebChatMembers) ? state.hyperwebChatMembers : [];
   members.forEach((member) => {
     const id = String((member && member.member_id) || '').trim();
-    if (!id || member.is_self || id.toUpperCase().indexOf('TTC_USER:') === 0) return;
+    if (!id || member.is_self) return;
     peersById.set(id, member);
   });
   const conversations = Array.isArray(state.hyperwebChatConversations) ? state.hyperwebChatConversations : [];
@@ -8741,15 +8735,7 @@ function normalizeSettingsDraft(raw = {}) {
   const telegramAllowedChatIds = parseCommaSeparatedList(src.telegram_allowed_chat_ids);
   const telegramAllowedUsernames = parseCommaSeparatedList(src.telegram_allowed_usernames)
     .map((item) => item.toLowerCase().replace(/^@/, ''));
-  const trustSyncPortRaw = Number(src.trustcommons_sync_port);
-  const trustSyncIntervalRaw = Number(src.trustcommons_sync_interval_sec);
   const historyMaxRaw = Number(src.history_max_entries);
-  const trustcommonsSyncPort = Number.isFinite(trustSyncPortRaw)
-    ? Math.round(trustSyncPortRaw)
-    : TRUSTCOMMONS_SYNC_DEFAULT_PORT;
-  const trustcommonsSyncIntervalSec = Number.isFinite(trustSyncIntervalRaw)
-    ? Math.round(trustSyncIntervalRaw)
-    : TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC;
   const historyMaxEntries = Number.isFinite(historyMaxRaw)
     ? Math.max(500, Math.min(10000, Math.round(historyMaxRaw)))
     : HISTORY_DEFAULT_MAX_ENTRIES;
@@ -8787,18 +8773,13 @@ function normalizeSettingsDraft(raw = {}) {
     telegram_poll_interval_sec: Number(src.telegram_poll_interval_sec || 2),
     hyperweb_enabled: !!src.hyperweb_enabled,
     hyperweb_relay_url: String(src.hyperweb_relay_url || '').trim(),
-    trustcommons_sync_enabled: !!src.trustcommons_sync_enabled,
-    trustcommons_sync_port: trustcommonsSyncPort,
-    trustcommons_peer_sync_url: String(src.trustcommons_peer_sync_url || '').trim(),
-    trustcommons_sync_interval_sec: trustcommonsSyncIntervalSec,
+    hyperweb_display_name: String(src.hyperweb_display_name || '').trim(),
     crawler_mode: String(src.crawler_mode || 'broad').trim().toLowerCase(),
     crawler_markdown_first: !!src.crawler_markdown_first,
     crawler_robots_default: String(src.crawler_robots_default || 'respect').trim().toLowerCase(),
     crawler_depth_default: Number(src.crawler_depth_default || 3),
     crawler_page_cap_default: Number(src.crawler_page_cap_default || 80),
     agent_mode_v1_enabled: !!src.agent_mode_v1_enabled,
-    trustcommons_download_url: String(src.trustcommons_download_url || '').trim(),
-    trustcommons_app_bundle_id: String(src.trustcommons_app_bundle_id || '').trim(),
     mail_sync_enabled: !!src.mail_sync_enabled,
     mail_poll_interval_sec: mailPollIntervalSec,
     history_enabled: Object.prototype.hasOwnProperty.call(src, 'history_enabled') ? !!src.history_enabled : true,
@@ -8822,16 +8803,7 @@ function validateSettingsDraft(draft = {}) {
   if (!Number.isFinite(d.mail_poll_interval_sec) || d.mail_poll_interval_sec < 120 || d.mail_poll_interval_sec > 900) {
     errors.mail_poll_interval_sec = 'Mail polling interval must be 120..900 sec.';
   }
-  if (!Number.isFinite(d.trustcommons_sync_port) || d.trustcommons_sync_port < 1024 || d.trustcommons_sync_port > 65535) {
-    errors.trustcommons_sync_port = 'Port must be 1024..65535.';
-  }
-  if (!Number.isFinite(d.trustcommons_sync_interval_sec) || d.trustcommons_sync_interval_sec < 2 || d.trustcommons_sync_interval_sec > 60) {
-    errors.trustcommons_sync_interval_sec = 'Interval must be 2..60 sec.';
-  }
-  if (d.trustcommons_peer_sync_url) {
-    const isLoopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]|::1)(:\d+)?/i.test(d.trustcommons_peer_sync_url);
-    if (!isLoopback) errors.trustcommons_peer_sync_url = 'Peer URL must be loopback HTTP.';
-  }
+  if (!/^https?:\/\//i.test(d.hyperweb_relay_url || '')) errors.hyperweb_relay_url = 'Relay URL must start with http:// or https://';
   if (!['safe', 'broad'].includes(d.crawler_mode)) errors.crawler_mode = 'Invalid crawler mode.';
   if (!['respect', 'ignore'].includes(d.crawler_robots_default)) errors.crawler_robots_default = 'Invalid robots setting.';
   if (!Number.isFinite(d.crawler_depth_default) || d.crawler_depth_default < 1 || d.crawler_depth_default > 6) {
@@ -8898,22 +8870,6 @@ function renderSettingsStatusLine() {
   if (cancelBtn) cancelBtn.disabled = !dirty;
 }
 
-function renderSyncEligibility() {
-  const node = e('settings-sync-eligibility');
-  const toggle = e('settings-trustcommons-sync-enabled');
-  if (!node || !toggle) return;
-  const trust = state.trustCommonsStatus || null;
-  const identityId = String((trust && trust.identity_id) || '').trim();
-  const eligible = !!identityId;
-  toggle.disabled = !eligible;
-  if (!eligible) {
-    toggle.checked = false;
-    node.textContent = 'Unavailable: connect Trust Commons identity first.';
-    return;
-  }
-  node.textContent = `Available for ${identityId}`;
-}
-
 function renderAppDataProtectionStatus() {
   const node = e('settings-appdata-lock-status');
   const touchBtn = e('settings-appdata-unlock-touchid-btn');
@@ -8963,7 +8919,6 @@ function renderSettingsForm() {
   const ragFetchBtn = e('settings-rag-fetch-models-btn');
   if (ragModelNode) ragModelNode.disabled = !ragUsesLmstudio;
   if (ragFetchBtn) ragFetchBtn.disabled = !ragUsesLmstudio;
-  renderSyncEligibility();
   renderMailSettingsStatus();
   renderMailAccountsList();
   renderAppDataProtectionStatus();
@@ -8975,12 +8930,10 @@ function renderSettingsForm() {
 
 function renderSettingsDiagnostics() {
   const diag = state.settingsDiagnostics || {};
-  const trust = e('settings-diagnostics-trustcommons');
   const hyper = e('settings-diagnostics-hyperweb');
   const identity = e('settings-diagnostics-identity');
   const python = e('settings-diagnostics-python');
   const pythonDownloadBtn = e('settings-python-download-btn');
-  if (trust) trust.textContent = JSON.stringify((diag && diag.trustcommons) || {}, null, 2);
   if (hyper) hyper.textContent = JSON.stringify((diag && diag.hyperweb) || {}, null, 2);
   if (identity) identity.textContent = JSON.stringify((diag && diag.hyperweb_identity) || {}, null, 2);
   if (python) {
@@ -9295,7 +9248,6 @@ async function loadSettingsData() {
   } catch (_) {
     diagnostics = null;
   }
-  try { await refreshTrustCommonsStatus(); } catch (_) {}
   try { await refreshSettingsLmstudioModelOptions(); } catch (_) {}
   try { await refreshProviderKeysState({ renderSettings: true }); } catch (_) {}
   if (prefRes && prefRes.ok) {
@@ -9386,7 +9338,6 @@ async function saveSettingsDraft() {
   await refreshMailStatus();
   await refreshAbstractionStatus();
   await refreshRagStatus();
-  await refreshTrustCommonsStatus();
   await refreshHyperwebStatus();
   renderSettingsForm();
   renderReferences();
@@ -9395,29 +9346,6 @@ async function saveSettingsDraft() {
     state.settingsDiagnostics = diagnostics;
     renderSettingsDiagnostics();
   }
-}
-
-async function refreshTrustCommonsStatus() {
-  const res = await api.trustCommonsStatus();
-  if (!res || !res.ok) {
-    state.trustCommonsStatus = null;
-    const btn = e('trustcommons-connect-btn');
-    if (btn) btn.textContent = 'TrustCommons Connect';
-    renderSyncEligibility();
-    return;
-  }
-  state.trustCommonsStatus = res;
-  const btn = e('trustcommons-connect-btn');
-  if (btn) {
-    if (res.connected) {
-      btn.textContent = `TrustCommons Connected (${res.identity_name || 'identity'})`;
-    } else if (res.launched || (res.sync && res.sync.running)) {
-      btn.textContent = `TrustCommons Ready (${res.identity_name || 'identity'})`;
-    } else {
-    btn.textContent = 'TrustCommons Connect';
-  }
-  renderSyncEligibility();
-}
 }
 
 async function refreshProviderKeysState(options = {}) {
@@ -9974,7 +9902,6 @@ async function setupOnboardingBindings() {
   e('onboarding-complete-btn')?.addEventListener('click', async () => {
     markOnboardingComplete();
     await refreshProviderStatus();
-    await refreshTrustCommonsStatus();
     await refreshHyperwebStatus();
   });
 }
@@ -10988,15 +10915,6 @@ function bindControls() {
     }
   });
 
-  e('settings-trustcommons-connect-btn')?.addEventListener('click', async () => {
-    await api.trustCommonsConnect();
-    const diagnostics = await api.settingsDiagnostics();
-    if (diagnostics && diagnostics.ok) {
-      state.settingsDiagnostics = diagnostics;
-      renderSettingsDiagnostics();
-    }
-  });
-
   e('settings-hyperweb-connect-btn')?.addEventListener('click', async () => {
     await api.hyperwebConnect();
     const diagnostics = await api.settingsDiagnostics();
@@ -11077,31 +10995,6 @@ function bindControls() {
     await refreshHyperwebStatus();
     await refreshHyperwebChatData();
     await refreshHyperwebFeedAndReferences();
-  });
-
-  e('settings-danger-reset-trustcommons-link-btn')?.addEventListener('click', async () => {
-    const phrase = readDangerConfirmPhrase();
-    if (!phrase) {
-      state.settingsSaveState = 'Type RESET in the confirmation field first.';
-      renderSettingsStatusLine();
-      return;
-    }
-    const res = await api.settingsDangerResetTrustCommonsLink({ phrase });
-    if (!res || !res.ok) {
-      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to reset TrustCommons link.';
-      renderSettingsStatusLine();
-      return;
-    }
-    clearDangerConfirmPhrase();
-    state.settingsSaveState = 'TrustCommons link reset.';
-    renderSettingsStatusLine();
-    const diagnostics = await api.settingsDiagnostics();
-    if (diagnostics && diagnostics.ok) {
-      state.settingsDiagnostics = diagnostics;
-      renderSettingsDiagnostics();
-    }
-    await refreshTrustCommonsStatus();
-    await refreshHyperwebStatus();
   });
 
   e('settings-appdata-unlock-touchid-btn')?.addEventListener('click', async () => {
@@ -11501,15 +11394,14 @@ function bindControls() {
     renderWorkspaceTabs();
   });
 
-  e('trustcommons-connect-btn')?.addEventListener('click', async () => {
+  e('hyperweb-connect-menu-btn')?.addEventListener('click', async () => {
     closeTopbarMenu();
-    const res = await api.trustCommonsConnect();
+    const res = await api.hyperwebConnect();
     if (!res || !res.ok) {
-      window.alert((res && res.message) || 'Unable to connect Trust Commons.');
+      window.alert((res && res.message) || 'Unable to connect Hyperweb.');
     } else if (res.message) {
-      showPassiveNotification(String(res.message || 'TrustCommons connected.'));
+      showPassiveNotification(String(res.message || 'Hyperweb connected.'));
     }
-    await refreshTrustCommonsStatus();
     await refreshHyperwebStatus();
   });
 
@@ -11662,7 +11554,6 @@ async function initialize() {
   });
   state.selectedModel = getSelectedModel();
   refreshAgentModeAvailability();
-  await refreshTrustCommonsStatus();
   await refreshHyperwebStatus();
   await loadChatThread();
   await loadProgramEditorForActiveReference();

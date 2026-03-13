@@ -147,13 +147,8 @@ This implementation delivers:
   - job controls (`/jobs`, `/job_create`, `/job_edit`, `/job_pause`, `/job_resume`, `/job_delete`)
 - Hyperweb and sharing:
   - public feed posting, semantic reference search/import, and snapshot publishing
-  - E2E chat over existing Hyperweb RTC data-channel (`DM`, `room`, delivery/read ack, basic p2p file transfer)
-  - private reference sharing with TTC members and shared rooms
-- Multi-device sync:
-  - optional `Multi-Device Auto Sync` toggle in Settings (`off` by default)
-  - requires Trust Commons identity (`trustcommons_identity_id`); without identity, sync cannot be enabled
-  - when enabled, local sync bridge is auto-managed by runtime settings
-  - note: Hyperweb peer identity is currently device-local; two devices may appear as two peer fingerprints
+  - public lobby chat plus invite-based trusted-peer DM and rooms
+  - private reference sharing with trusted peers and shared rooms
 - First-run onboarding:
   - default search engine selection (`google`, `bing`, `ddg`)
   - Chrome/Safari import
@@ -212,10 +207,9 @@ For new users:
 
 ## Important notes
 
-- This is a clean standalone project, independent of `ttc_webapp` SaaS runtime.
+- This is a clean standalone project.
 - Context files imported from mounted folders are read-only by default.
 - Mail sync is IMAP-based and local to Subgrapher's own database; Apple Mail folder scanning and AppleScript control are not part of the active mail path.
-- Multi-device sync is opt-in and identity-gated; users without Trust Commons identity remain local-only.
 - Use chat commands for direct workspace mutations:
   - `/artifact title: content`
   - `/viz <title>` (creates an HTML artifact scaffold)
@@ -234,7 +228,6 @@ For new users:
 - `runtime/lumino_path_a.js`: scoped Path A execution runtime.
 - `runtime/lumino_path_b.js`: orchestrator Path B runtime.
 - `runtime/hyperweb_manager.js`: Hyperweb signaling + peer exchange manager.
-- `runtime/trustcommons_identity.js`: Trust Commons identity bootstrap helper.
 - `runtime/file_indexer.js`: folder ingestion/indexing.
 - `runtime/lumino_crawler.js`: crawl and ingestion pipeline.
 - `runtime/keychain.js`: macOS keychain provider key storage.

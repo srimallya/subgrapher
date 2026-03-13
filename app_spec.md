@@ -100,12 +100,7 @@ Migration is idempotent and safe to run repeatedly.
   - sender payloads are signed and verified against known peer signing keys
   - chat body is end-to-end encrypted (X25519 key agreement + AES-256-GCM envelope)
 - UX:
-  - Hyperweb Chat tab supports direct messages, room messaging, online presence, and basic p2p file transfer.
-- Multi-device sync policy:
-  - controlled by Settings toggle `trustcommons_sync_enabled` (`Multi-Device Auto Sync`)
-  - default `false` (opt-in)
-  - enabling requires `trustcommons_identity_id`; without identity, sync remains disabled
-  - current limitation: Hyperweb peer identity is device-local, so multiple devices for one user may appear as separate peer fingerprints.
+  - Hyperweb Chat tab supports a public lobby, direct messages, room messaging, online presence, and basic p2p file transfer.
 
 ## Local Context Ingestion + Abstraction
 - Folder mounts are read-only indexed context with recursive traversal and extension filtering.

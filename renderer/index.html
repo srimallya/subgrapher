@@ -29,7 +29,7 @@
       <div class="app-tools">
         <button id="app-tools-btn" class="top-btn" type="button" aria-haspopup="true" aria-expanded="false">More</button>
         <div id="app-tools-menu" class="app-tools-menu hidden">
-          <button id="trustcommons-connect-btn" class="menu-btn" type="button">TrustCommons Connect</button>
+          <button id="hyperweb-connect-menu-btn" class="menu-btn" type="button">Hyperweb Connect</button>
           <button id="about-open-btn" class="menu-btn" type="button">About</button>
           <label class="menu-field hidden" for="default-search-engine-select">Search engine</label>
           <select id="default-search-engine-select" class="hidden">
@@ -316,7 +316,7 @@
     <div class="shares-toolbar">
       <div class="page-heading">
         <h1>Private Shares</h1>
-        <div id="shares-status-line" class="muted small">Share references privately with TTC members.</div>
+        <div id="shares-status-line" class="muted small">Share references privately with trusted peers.</div>
       </div>
       <div class="shares-toolbar-actions">
         <button id="shares-refresh-btn">Refresh</button>
@@ -386,22 +386,23 @@
         </div>
       </details>
 
-      <details class="settings-section settings-accordion" data-settings-section="sync">
-        <summary>Multi-Device Sync</summary>
+      <details class="settings-section settings-accordion" data-settings-section="hyperweb">
+        <summary>Hyperweb</summary>
         <div class="settings-section-content">
-        <p class="muted small">Optional automatic reference sync across your devices. Requires Trust Commons identity.</p>
         <div class="settings-grid settings-grid-2">
           <label class="settings-field settings-boolean-field">
-            <span>Multi-Device Auto Sync</span>
+            <span>Hyperweb</span>
             <span class="settings-toggle-card">
-              <input id="settings-trustcommons-sync-enabled" data-setting="trustcommons_sync_enabled" type="checkbox" />
+              <input id="settings-hyperweb-enabled" data-setting="hyperweb_enabled" type="checkbox" />
               <span>Enabled</span>
             </span>
           </label>
-          <div class="settings-field">
-            <span>Eligibility</span>
-            <div id="settings-sync-eligibility" class="muted small">Checking Trust Commons identity...</div>
-          </div>
+          <label class="settings-field">Display Name
+            <input id="settings-hyperweb-display-name" data-setting="hyperweb_display_name" type="text" placeholder="Your public alias" />
+          </label>
+          <label class="settings-field settings-field-wide">Relay URL
+            <input id="settings-hyperweb-relay-url" data-setting="hyperweb_relay_url" type="text" placeholder="https://your-hyperweb-relay.example" />
+          </label>
         </div>
         </div>
       </details>
@@ -797,28 +798,10 @@
         </div>
       </details>
 
-      <details class="settings-section settings-accordion" id="settings-advanced-trustcommons" data-settings-section="trustcommons">
-        <summary>TrustCommons App Paths</summary>
-        <div class="settings-section-content">
-        <div class="settings-grid settings-grid-2">
-          <label class="settings-field">Download URL
-            <input id="settings-tc-download-url" data-setting="trustcommons_download_url" type="text" />
-          </label>
-          <label class="settings-field">Bundle ID
-            <input id="settings-tc-bundle-id" data-setting="trustcommons_app_bundle_id" type="text" />
-          </label>
-        </div>
-        </div>
-      </details>
-
       <details class="settings-section settings-accordion" id="settings-diagnostics" data-settings-section="diagnostics">
         <summary>Diagnostics</summary>
         <div class="settings-section-content">
         <div class="settings-grid settings-grid-2">
-          <div class="settings-readout">
-            <h4>TrustCommons</h4>
-            <pre id="settings-diagnostics-trustcommons"></pre>
-          </div>
           <div class="settings-readout">
             <h4>Hyperweb</h4>
             <pre id="settings-diagnostics-hyperweb"></pre>
@@ -837,7 +820,6 @@
         </div>
         <div class="settings-inline-actions">
           <button id="settings-refresh-diagnostics-btn">Refresh Diagnostics</button>
-          <button id="settings-trustcommons-connect-btn">TrustCommons Connect</button>
           <button id="settings-hyperweb-connect-btn">Hyperweb Connect</button>
           <button id="settings-hyperweb-disconnect-btn">Hyperweb Disconnect</button>
         </div>
@@ -876,7 +858,6 @@
         <div class="settings-inline-actions">
           <button id="settings-danger-reset-hyperweb-identity-btn">Reset Hyperweb Identity</button>
           <button id="settings-danger-clear-social-cache-btn">Clear Hyperweb Social Cache</button>
-          <button id="settings-danger-reset-trustcommons-link-btn">Reset TrustCommons Link</button>
         </div>
         </div>
       </details>
@@ -1043,12 +1024,7 @@
     <div class="modal-card about-card">
       <h2>About Subgrapher</h2>
       <p>
-        By Srimallya Maitra, a project originated from The Trust Commons Project.
-        <a class="about-link" href="https://www.thetrustcommons.com/" data-external-url="https://www.thetrustcommons.com/" target="_blank" rel="noopener noreferrer">thetrustcommons.com</a>
-      </p>
-      <p>
-        Contact:
-        <a class="about-link" href="mailto:info@thetrustcommons.com" data-external-url="mailto:info@thetrustcommons.com">info@thetrustcommons.com</a>
+        By Srimallya Maitra.
       </p>
       <div class="modal-footer">
         <button id="about-close-btn">Close</button>
@@ -1072,7 +1048,7 @@
     <div class="modal-card action-modal">
       <h2>Share Privately</h2>
       <p>Recipients get immediate read access. Write access begins after they accept.</p>
-      <input id="share-member-search-input" type="text" placeholder="Search TTC members..." />
+      <input id="share-member-search-input" type="text" placeholder="Search trusted peers..." />
       <div id="share-member-list" class="share-member-list"></div>
       <div class="modal-footer">
         <button id="share-reference-cancel-btn">Cancel</button>

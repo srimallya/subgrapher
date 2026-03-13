@@ -31,9 +31,7 @@ const { PythonSandboxManager, cleanupStaleSandboxes, spawnPythonInteractiveProce
 const { installAllowedPackages } = require('./runtime/python_packages');
 const { createPythonRuntimeResolver } = require('./runtime/python_runtime');
 const { buildBatchImageOcrScript, parseBatchImageOcrResult } = require('./runtime/python_ocr');
-const { TrustCommonsSyncBridge, isLoopbackUrl } = require('./runtime/trustcommons_sync_bridge');
 const keychain = require('./runtime/keychain');
-const trustCommonsIdentity = require('./runtime/trustcommons_identity');
 const { createSecureSecretStore } = require('./runtime/secure_secret_store');
 const { TelegramService } = require('./runtime/telegram_service');
 const { createOrchestratorJobsStore } = require('./runtime/orchestrator_jobs_store');
@@ -72,10 +70,6 @@ const PRIVATE_HISTORY_FILENAME = 'private_history.json';
 const HYPERWEB_PUBLIC_SNAPSHOTS_FILENAME = 'hyperweb_public_snapshots.json';
 const HYPERWEB_PRIVATE_SHARES_FILENAME = 'hyperweb_private_shares.json';
 const DEFAULT_HYPERWEB_RELAY_URL = 'https://relay.thetrustcommons.com';
-const TRUSTCOMMONS_DOWNLOAD_URL = 'https://www.thetrustcommons.com/';
-const TRUSTCOMMONS_BUNDLE_ID = 'com.trustcommons.desktop';
-const TRUSTCOMMONS_SYNC_SECRET_ACCOUNT = 'local_sync_secret';
-const TRUSTCOMMONS_SYNC_SECRET_SERVICE = 'com.trustcommons.local-sync';
 const HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT = 'hyperweb_identity_private_key';
 const HYPERWEB_IDENTITY_SERVICE = 'com.subgrapher.hyperweb.identity';
 const HYPERWEB_IDENTITY_DER_PREFIX = 'ed25519-pkcs8-der:';
@@ -86,12 +80,11 @@ const HYPERWEB_CHAT_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const APP_DATA_KEY_ACCOUNT = 'app_data_key_v1';
 const APP_DATA_KEY_SERVICE = 'com.subgrapher.appdata';
 const APP_DATA_KEY_REF = 'system:app_data_key_v1';
-const TRUSTCOMMONS_SYNC_DEFAULT_PORT = 42631;
-const TRUSTCOMMONS_SYNC_DEFAULT_PEER_URL = 'http://127.0.0.1:42641';
-const TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC = 8;
 const HYPERWEB_SOCIAL_FILENAME = 'hyperweb_social.json';
 const HYPERWEB_INVITE_PROTO = 'subgrapher';
 const HYPERWEB_INVITE_ROUTE = 'hyperweb-invite';
+const HYPERWEB_PUBLIC_LOBBY_ID = 'public-lobby';
+const HYPERWEB_PUBLIC_LOBBY_NAME = 'Global Lobby';
 const HYPERWEB_INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const HYPERWEB_MODERATION_HIDE_SCORE = -12;
 const HYPERWEB_MODERATION_HIDE_MIN_DOWNVOTERS = 8;
@@ -114,18 +107,13 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'lumino_last_model',
   'hyperweb_enabled',
   'hyperweb_relay_url',
-  'trustcommons_sync_enabled',
-  'trustcommons_sync_port',
-  'trustcommons_peer_sync_url',
-  'trustcommons_sync_interval_sec',
+  'hyperweb_display_name',
   'crawler_mode',
   'crawler_markdown_first',
   'crawler_robots_default',
   'crawler_depth_default',
   'crawler_page_cap_default',
   'agent_mode_v1_enabled',
-  'trustcommons_download_url',
-  'trustcommons_app_bundle_id',
   'history_enabled',
   'history_max_entries',
   'telegram_enabled',
@@ -293,22 +281,6 @@ const luminoCrawler = new LuminoCrawler({
   defaultPageCap: 80,
   markdownFirst: true,
 });
-let trustCommonsRuntime = {
-  bootstrapComplete: false,
-  identity: null,
-  connected: false,
-  lastError: '',
-  launched: false,
-  launchMethod: '',
-  downloadOpened: false,
-  sync: {
-    running: false,
-    port: TRUSTCOMMONS_SYNC_DEFAULT_PORT,
-    peer_url: '',
-    last_sync_at: 0,
-    last_sync_error: '',
-  },
-};
 let pendingInviteToken = '';
 let hyperwebSocialState = null;
 const appDataProtectionState = {
@@ -352,12 +324,6 @@ const hyperwebManager = new HyperwebManager({
   relayUrl: DEFAULT_HYPERWEB_RELAY_URL,
   enabled: true,
   logger: console,
-});
-hyperwebManager.on('status', (status) => {
-  trustCommonsRuntime.connected = !!(status && status.connected);
-  if (status && status.last_error) {
-    trustCommonsRuntime.lastError = String(status.last_error || '');
-  }
 });
 hyperwebManager.on('peer_seen', () => {
   const state = ensureHyperwebSocialState();
@@ -495,22 +461,6 @@ hyperwebManager.on('protocol', (packet) => {
     signature,
   }, { skipBroadcast: true });
 });
-const trustCommonsSyncBridge = new TrustCommonsSyncBridge({
-  logger: console,
-  secretProvider: () => getTrustCommonsSyncSecret(),
-  refsProvider: () => getSyncEligibleReferences(),
-  refsConsumer: (incomingRefs, context) => mergeSyncedReferences(incomingRefs, context),
-});
-trustCommonsSyncBridge.on('status', (status) => {
-  trustCommonsRuntime.sync = {
-    running: !!(status && status.running),
-    port: Number((status && status.port) || 0),
-    peer_url: String((status && status.peer_url) || ''),
-    last_sync_at: Number((status && status.last_sync_at) || 0),
-    last_sync_error: String((status && status.last_sync_error) || ''),
-  };
-});
-
 luminoCrawler.on('job_update', (event) => {
   const payload = (event && typeof event === 'object') ? event : {};
   const phase = String(payload.phase || '').trim().toLowerCase();
@@ -4721,18 +4671,9 @@ function getDefaultSettings() {
   return {
     default_search_engine: 'ddg',
     reference_ranking_enabled: false,
-    trustcommons_bootstrap_complete: false,
-    trustcommons_identity_id: '',
-    trustcommons_display_name: '',
-    trustcommons_bootstrap_at: 0,
-    trustcommons_download_url: TRUSTCOMMONS_DOWNLOAD_URL,
-    trustcommons_app_bundle_id: TRUSTCOMMONS_BUNDLE_ID,
-    trustcommons_sync_enabled: false,
-    trustcommons_sync_port: TRUSTCOMMONS_SYNC_DEFAULT_PORT,
-    trustcommons_peer_sync_url: TRUSTCOMMONS_SYNC_DEFAULT_PEER_URL,
-    trustcommons_sync_interval_sec: TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC,
     hyperweb_relay_url: DEFAULT_HYPERWEB_RELAY_URL,
     hyperweb_enabled: true,
+    hyperweb_display_name: '',
     crawler_mode: 'broad',
     crawler_markdown_first: true,
     crawler_robots_default: 'respect',
@@ -4779,11 +4720,6 @@ function readSettings() {
     const parsed = JSON.parse(raw);
     const engine = String((parsed && parsed.default_search_engine) || defaults.default_search_engine).trim().toLowerCase();
     const relay = String((parsed && parsed.hyperweb_relay_url) || defaults.hyperweb_relay_url).trim();
-    const peerSyncUrl = String((parsed && parsed.trustcommons_peer_sync_url) || defaults.trustcommons_peer_sync_url).trim();
-    const downloadUrl = String((parsed && parsed.trustcommons_download_url) || defaults.trustcommons_download_url).trim();
-    const appBundle = String((parsed && parsed.trustcommons_app_bundle_id) || defaults.trustcommons_app_bundle_id).trim();
-    const syncPort = Number((parsed && parsed.trustcommons_sync_port) || defaults.trustcommons_sync_port);
-    const syncIntervalSec = Number((parsed && parsed.trustcommons_sync_interval_sec) || defaults.trustcommons_sync_interval_sec);
     const savedProvider = String((parsed && parsed.lumino_last_provider) || defaults.lumino_last_provider).trim().toLowerCase();
     const savedModel = String((parsed && parsed.lumino_last_model) || defaults.lumino_last_model).trim();
     const providerKeyProfiles = normalizeProviderKeyProfiles(parsed && parsed.provider_key_profiles);
@@ -4804,33 +4740,20 @@ function readSettings() {
     const ragEmbeddingSource = normalizeRagEmbeddingSource((parsed && parsed.rag_embedding_source) || defaults.rag_embedding_source);
     const ragEmbeddingModel = String((parsed && parsed.rag_embedding_model) || defaults.rag_embedding_model).trim();
     const ragTopK = Number((parsed && parsed.rag_top_k) || defaults.rag_top_k);
-    const identityId = String((parsed && parsed.trustcommons_identity_id) || '').trim();
-    const requestedSyncEnabled = parsed && Object.prototype.hasOwnProperty.call(parsed, 'trustcommons_sync_enabled')
-      ? !!parsed.trustcommons_sync_enabled
-      : defaults.trustcommons_sync_enabled;
+    const hyperwebDisplayName = String(
+      (parsed && parsed.hyperweb_display_name)
+      || defaults.hyperweb_display_name
+    ).trim();
     return {
       default_search_engine: ['google', 'bing', 'ddg'].includes(engine) ? engine : 'ddg',
       reference_ranking_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'reference_ranking_enabled')
         ? !!parsed.reference_ranking_enabled
         : defaults.reference_ranking_enabled,
-      trustcommons_bootstrap_complete: !!(parsed && parsed.trustcommons_bootstrap_complete),
-      trustcommons_identity_id: identityId,
-      trustcommons_display_name: String((parsed && parsed.trustcommons_display_name) || '').trim(),
-      trustcommons_bootstrap_at: Number((parsed && parsed.trustcommons_bootstrap_at) || 0),
-      trustcommons_download_url: downloadUrl || defaults.trustcommons_download_url,
-      trustcommons_app_bundle_id: appBundle || defaults.trustcommons_app_bundle_id,
-      trustcommons_sync_enabled: !!identityId && requestedSyncEnabled,
-      trustcommons_sync_port: Number.isFinite(syncPort) && syncPort >= 1024 && syncPort <= 65535
-        ? Math.round(syncPort)
-        : defaults.trustcommons_sync_port,
-      trustcommons_peer_sync_url: isLoopbackUrl(peerSyncUrl) ? peerSyncUrl : '',
-      trustcommons_sync_interval_sec: Number.isFinite(syncIntervalSec) && syncIntervalSec >= 2 && syncIntervalSec <= 60
-        ? Math.round(syncIntervalSec)
-        : defaults.trustcommons_sync_interval_sec,
       hyperweb_relay_url: relay || defaults.hyperweb_relay_url,
       hyperweb_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'hyperweb_enabled')
         ? !!parsed.hyperweb_enabled
         : defaults.hyperweb_enabled,
+      hyperweb_display_name: hyperwebDisplayName,
       crawler_mode: String((parsed && parsed.crawler_mode) || defaults.crawler_mode).trim().toLowerCase() === 'safe' ? 'safe' : 'broad',
       crawler_markdown_first: parsed && Object.prototype.hasOwnProperty.call(parsed, 'crawler_markdown_first')
         ? !!parsed.crawler_markdown_first
@@ -4913,31 +4836,11 @@ function writeSettings(next) {
       ? input.hyperweb_relay_url
       : current.hyperweb_relay_url
   ).trim();
-  const requestedPeerSyncUrl = String(
-    Object.prototype.hasOwnProperty.call(input, 'trustcommons_peer_sync_url')
-      ? input.trustcommons_peer_sync_url
-      : current.trustcommons_peer_sync_url
+  const requestedHyperwebDisplayName = String(
+    Object.prototype.hasOwnProperty.call(input, 'hyperweb_display_name')
+      ? input.hyperweb_display_name
+      : current.hyperweb_display_name
   ).trim();
-  const requestedDownloadUrl = String(
-    Object.prototype.hasOwnProperty.call(input, 'trustcommons_download_url')
-      ? input.trustcommons_download_url
-      : current.trustcommons_download_url
-  ).trim();
-  const requestedAppBundle = String(
-    Object.prototype.hasOwnProperty.call(input, 'trustcommons_app_bundle_id')
-      ? input.trustcommons_app_bundle_id
-      : current.trustcommons_app_bundle_id
-  ).trim();
-  const requestedSyncPort = Number(
-    Object.prototype.hasOwnProperty.call(input, 'trustcommons_sync_port')
-      ? input.trustcommons_sync_port
-      : current.trustcommons_sync_port
-  );
-  const requestedSyncIntervalSec = Number(
-    Object.prototype.hasOwnProperty.call(input, 'trustcommons_sync_interval_sec')
-      ? input.trustcommons_sync_interval_sec
-      : current.trustcommons_sync_interval_sec
-  );
   const requestedLastProvider = String(
     Object.prototype.hasOwnProperty.call(input, 'lumino_last_provider')
       ? input.lumino_last_provider
@@ -5045,38 +4948,11 @@ function writeSettings(next) {
     reference_ranking_enabled: Object.prototype.hasOwnProperty.call(input, 'reference_ranking_enabled')
       ? !!input.reference_ranking_enabled
       : !!current.reference_ranking_enabled,
-    trustcommons_bootstrap_complete: Object.prototype.hasOwnProperty.call(input, 'trustcommons_bootstrap_complete')
-      ? !!input.trustcommons_bootstrap_complete
-      : !!current.trustcommons_bootstrap_complete,
-    trustcommons_identity_id: String(
-      Object.prototype.hasOwnProperty.call(input, 'trustcommons_identity_id')
-        ? input.trustcommons_identity_id
-        : current.trustcommons_identity_id
-    ).trim(),
-    trustcommons_display_name: String(
-      Object.prototype.hasOwnProperty.call(input, 'trustcommons_display_name')
-        ? input.trustcommons_display_name
-        : current.trustcommons_display_name
-    ).trim(),
-    trustcommons_bootstrap_at: Number(
-      Object.prototype.hasOwnProperty.call(input, 'trustcommons_bootstrap_at')
-        ? input.trustcommons_bootstrap_at
-        : current.trustcommons_bootstrap_at
-    ) || 0,
-    trustcommons_download_url: requestedDownloadUrl || TRUSTCOMMONS_DOWNLOAD_URL,
-    trustcommons_app_bundle_id: requestedAppBundle || TRUSTCOMMONS_BUNDLE_ID,
-    trustcommons_sync_enabled: false,
-    trustcommons_sync_port: Number.isFinite(requestedSyncPort) && requestedSyncPort >= 1024 && requestedSyncPort <= 65535
-      ? Math.round(requestedSyncPort)
-      : TRUSTCOMMONS_SYNC_DEFAULT_PORT,
-    trustcommons_peer_sync_url: isLoopbackUrl(requestedPeerSyncUrl) ? requestedPeerSyncUrl : '',
-    trustcommons_sync_interval_sec: Number.isFinite(requestedSyncIntervalSec) && requestedSyncIntervalSec >= 2 && requestedSyncIntervalSec <= 60
-      ? Math.round(requestedSyncIntervalSec)
-      : TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC,
     hyperweb_relay_url: requestedRelay || DEFAULT_HYPERWEB_RELAY_URL,
     hyperweb_enabled: Object.prototype.hasOwnProperty.call(input, 'hyperweb_enabled')
       ? !!input.hyperweb_enabled
       : !!current.hyperweb_enabled,
+    hyperweb_display_name: requestedHyperwebDisplayName,
     crawler_mode: String(
       Object.prototype.hasOwnProperty.call(input, 'crawler_mode')
         ? input.crawler_mode
@@ -5162,11 +5038,6 @@ function writeSettings(next) {
       ? Math.max(1, Math.min(24, Math.round(requestedRagTopK)))
       : RAG_TOP_K_DEFAULT,
   };
-  settings.trustcommons_sync_enabled = !!settings.trustcommons_identity_id && (
-    Object.prototype.hasOwnProperty.call(input, 'trustcommons_sync_enabled')
-      ? !!input.trustcommons_sync_enabled
-      : !!current.trustcommons_sync_enabled
-  );
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
   return settings;
 }
@@ -5283,12 +5154,6 @@ function deletePlatformServiceSecret(account, options = {}) {
   if (clearRes && clearRes.ok) return { ok: true, missing: !!clearRes.missing };
   return { ok: false, message: String((clearRes && clearRes.message) || 'Unable to delete secret.') };
 }
-
-const trustCommonsSecretAdapter = {
-  getSecret: getPlatformServiceSecret,
-  setSecret: setPlatformServiceSecret,
-  deleteSecret: deletePlatformServiceSecret,
-};
 
 function getMailStore() {
   if (!mailStore) {
@@ -7473,17 +7338,55 @@ function writePublicFeed(feed) {
 }
 
 function isTtcHyperwebAuthenticated() {
-  const settings = readSettings();
-  return !!(
-    settings
-    && settings.trustcommons_bootstrap_complete
-    && String(settings.trustcommons_identity_id || '').trim()
-  );
+  return false;
 }
 
 function requireTtcHyperwebAuth() {
-  if (isTtcHyperwebAuthenticated()) return { ok: true };
-  return { ok: false, message: 'TTC authentication required for Hyperweb actions.' };
+  return requireHyperwebIdentity();
+}
+
+function getConfiguredHyperwebAlias(settings = null, fingerprint = '') {
+  const cfg = settings || readSettings();
+  const saved = String((cfg && cfg.hyperweb_display_name) || '').trim();
+  if (saved) return saved.slice(0, 80);
+  return defaultAliasFromFingerprint(fingerprint);
+}
+
+function syncHyperwebIdentityAliasFromSettings(settings = null) {
+  const cfg = settings || readSettings();
+  const state = ensureHyperwebSocialState();
+  const identity = (state && state.identity && typeof state.identity === 'object') ? state.identity : {};
+  const fingerprint = String(identity.fingerprint || '').trim().toUpperCase();
+  const nextAlias = getConfiguredHyperwebAlias(cfg, fingerprint);
+  if (!fingerprint || !nextAlias) return state;
+  if (String(identity.display_alias || '').trim() === nextAlias) return state;
+  state.identity = {
+    ...identity,
+    display_alias: nextAlias,
+  };
+  writeHyperwebSocialState(state);
+  hyperwebSocialState = state;
+  return state;
+}
+
+function getHyperwebNetworkIdentity(settings = null) {
+  const cfg = settings || readSettings();
+  const ensured = ensureHyperwebIdentity();
+  const identity = (ensured && ensured.identity) ? ensured.identity : {};
+  const fingerprint = String(identity.fingerprint || '').trim().toUpperCase();
+  const displayName = getConfiguredHyperwebAlias(cfg, fingerprint);
+  syncHyperwebIdentityAliasFromSettings(cfg);
+  return {
+    identity_id: fingerprint,
+    display_name: displayName,
+    token: '',
+  };
+}
+
+function requireHyperwebIdentity() {
+  const identity = getHyperwebNetworkIdentity(readSettings());
+  if (!identity.identity_id) return { ok: false, message: 'Hyperweb identity unavailable.' };
+  return { ok: true, identity };
 }
 
 function getHyperwebPublicSnapshotsPath() {
@@ -8352,6 +8255,7 @@ function generateAndPersistHyperwebIdentity(state) {
 }
 
 function ensureHyperwebIdentity() {
+  const settings = readSettings();
   const state = readHyperwebSocialState();
   const identity = (state.identity && typeof state.identity === 'object')
     ? state.identity
@@ -8370,7 +8274,7 @@ function ensureHyperwebIdentity() {
     return regenerated;
   } else {
     const expectedFp = localFingerprintFromPubKey(identity.pubkey);
-    const display = String(identity.display_alias || '').trim() || defaultAliasFromFingerprint(expectedFp);
+    const display = getConfiguredHyperwebAlias(settings, expectedFp);
     if (expectedFp !== String(identity.fingerprint || '').trim().toUpperCase() || display !== String(identity.display_alias || '')) {
       nextIdentity = {
         pubkey: String(identity.pubkey || ''),
@@ -8670,6 +8574,9 @@ function resolveHyperwebChatThreadMessages(options = {}) {
   const peerId = String(options.peer_id || '').trim().toUpperCase();
   const roomId = String(options.room_id || '').trim();
   const limit = Math.max(1, Math.min(500, Number(options.limit || 200) || 200));
+  if (roomId === HYPERWEB_PUBLIC_LOBBY_ID) {
+    return resolvePublicLobbyMessages(limit);
+  }
   const list = (Array.isArray(state.chat_messages) ? state.chat_messages : []).filter((item) => {
     if (!item || typeof item !== 'object') return false;
     if (roomId) return String(item.room_id || '') === roomId;
@@ -9602,11 +9509,10 @@ function runHyperwebPostSearch(query, options = {}) {
 
 function listHyperwebMembers() {
   const state = ensureHyperwebSocialState();
-  const settings = readSettings();
   const onlineSet = getHyperwebOnlinePeerIds();
   const localIdentity = state.identity || {};
   const localId = String(localIdentity.fingerprint || '').trim().toUpperCase();
-  const localName = String(settings.trustcommons_display_name || localIdentity.display_alias || 'You').trim() || 'You';
+  const localName = getConfiguredHyperwebAlias(readSettings(), localId) || 'You';
   const membersById = new Map();
 
   if (localId) {
@@ -9632,57 +9538,6 @@ function listHyperwebMembers() {
       search_blob: String((peer && peer.alias) || id).toLowerCase(),
     });
   });
-
-  const ttcUserFileCandidates = [
-    path.join(__dirname, '..', 'ttc_webapp', 'database', 'core', 'users.json'),
-    path.join(process.cwd(), 'ttc_webapp', 'database', 'core', 'users.json'),
-    path.join(process.cwd(), '..', 'ttc_webapp', 'database', 'core', 'users.json'),
-    path.join(process.cwd(), 'database', 'core', 'users.json'),
-  ];
-  for (const filePath of ttcUserFileCandidates) {
-    try {
-      if (!filePath || !fs.existsSync(filePath)) continue;
-      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      if (!parsed || typeof parsed !== 'object') continue;
-
-      const nicknameMap = new Map();
-      Object.entries(parsed).forEach(([ownerName, row]) => {
-        void ownerName;
-        const nicknames = (row && row.member_prefs && row.member_prefs.nicknames && typeof row.member_prefs.nicknames === 'object')
-          ? row.member_prefs.nicknames
-          : {};
-        Object.entries(nicknames).forEach(([target, nickname]) => {
-          const targetKey = String(target || '').trim();
-          const nick = String(nickname || '').trim();
-          if (!targetKey || !nick) return;
-          const bucket = nicknameMap.get(targetKey) || new Set();
-          bucket.add(nick);
-          nicknameMap.set(targetKey, bucket);
-        });
-      });
-
-      Object.keys(parsed).forEach((username) => {
-        const clean = String(username || '').trim();
-        if (!clean) return;
-        const id = `ttc_user:${clean}`;
-        const nicknames = Array.from(nicknameMap.get(clean) || []).slice(0, 4);
-        const label = nicknames.length ? `${nicknames[0]} (${clean})` : clean;
-        membersById.set(id, {
-          member_id: id,
-          display_name: label,
-          ttc_username: clean,
-          nicknames,
-          is_self: false,
-          is_online: false,
-          source: 'ttc_directory',
-          search_blob: `${clean} ${nicknames.join(' ')}`.toLowerCase(),
-        });
-      });
-      break;
-    } catch (_) {
-      // Continue to next candidate path.
-    }
-  }
 
   return Array.from(membersById.values()).sort((a, b) => {
     if (a.is_self && !b.is_self) return -1;
@@ -9763,6 +9618,46 @@ function broadcastHyperwebInviteHandshake() {
   });
 }
 
+function buildPublicLobbyRoom() {
+  return {
+    room_id: HYPERWEB_PUBLIC_LOBBY_ID,
+    room_name: HYPERWEB_PUBLIC_LOBBY_NAME,
+    members: [],
+    created_by: 'subgrapher',
+    created_at: 0,
+    updated_at: nowTs(),
+    is_public: true,
+  };
+}
+
+function resolvePublicLobbyMessages(limit = 200) {
+  const localId = currentHyperwebMemberId();
+  return (Array.isArray(ensureHyperwebSocialState().hyperweb_social_log) ? ensureHyperwebSocialState().hyperweb_social_log : [])
+    .filter((event) => String((event && event.type) || '').trim().toLowerCase() === 'social_chat_message')
+    .sort((a, b) => Number((a && a.ts) || 0) - Number((b && b.ts) || 0))
+    .slice(-Math.max(1, Math.min(500, Number(limit || 200) || 200)))
+    .map((event) => {
+      const payload = (event && event.payload && typeof event.payload === 'object') ? event.payload : {};
+      const fromPeerId = String((payload && payload.author_fingerprint) || '').trim().toUpperCase();
+      return {
+        message_id: String((payload && payload.message_id) || (event && event.event_id) || ''),
+        logical_id: String((payload && payload.message_id) || (event && event.event_id) || ''),
+        room_id: HYPERWEB_PUBLIC_LOBBY_ID,
+        mode: 'room',
+        from_peer_id: fromPeerId,
+        to_peer_id: HYPERWEB_PUBLIC_LOBBY_ID,
+        recipients: [],
+        ts: Number((payload && payload.created_at) || (event && event.ts) || nowTs()),
+        text: String((payload && payload.body) || ''),
+        file: null,
+        direction: fromPeerId === localId ? 'out' : 'in',
+        status: 'sent',
+        delivered_by: {},
+        read_by: {},
+      };
+    });
+}
+
 function createHyperwebChatRoom(input = {}) {
   const state = ensureHyperwebSocialState();
   const identity = state.identity || {};
@@ -9793,6 +9688,7 @@ function listHyperwebChatRooms() {
     const members = Array.isArray(room && room.members) ? room.members : [];
     return members.map((m) => String(m || '').trim().toUpperCase()).includes(localId);
   }).sort((a, b) => Number((b && b.updated_at) || 0) - Number((a && a.updated_at) || 0));
+  rooms.unshift(buildPublicLobbyRoom());
   return { ok: true, rooms };
 }
 
@@ -9828,6 +9724,28 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
   const file = normalizeChatFilePayload((options && options.file) || {});
   const plainText = String(text || '').slice(0, 20000);
   if (!plainText && !file) return { ok: false, message: 'text or file is required.' };
+  if (mode === 'room' && roomId === HYPERWEB_PUBLIC_LOBBY_ID) {
+    if (file) return { ok: false, message: 'Public lobby supports text messages only.' };
+    const author = getLocalHyperwebAuthor();
+    const event = makeSignedSocialEvent('social_chat_message', {
+      message_id: makeId('hwlobby'),
+      room_id: HYPERWEB_PUBLIC_LOBBY_ID,
+      body: plainText.slice(0, 5000),
+      author_fingerprint: String(author.peer_id || '').toUpperCase(),
+      author_alias: String(author.peer_name || ''),
+      created_at: nowTs(),
+    });
+    const appended = appendHyperwebSocialEvent(event);
+    if (!appended || !appended.ok) return { ok: false, message: 'Unable to send public lobby message.' };
+    return {
+      ok: true,
+      message_id: String((event && event.payload && event.payload.message_id) || ''),
+      logical_id: String((event && event.payload && event.payload.message_id) || ''),
+      sent_to: [HYPERWEB_PUBLIC_LOBBY_ID],
+      failures: [],
+      message: null,
+    };
+  }
 
   let recipients = [];
   if (mode === 'room') {
@@ -9943,64 +9861,6 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
   };
 }
 
-function resolveTtcUsersFilePath() {
-  const candidates = [
-    path.join(__dirname, '..', 'ttc_webapp', 'database', 'core', 'users.json'),
-    path.join(process.cwd(), 'ttc_webapp', 'database', 'core', 'users.json'),
-    path.join(process.cwd(), '..', 'ttc_webapp', 'database', 'core', 'users.json'),
-    path.join(process.cwd(), 'database', 'core', 'users.json'),
-  ];
-  for (const filePath of candidates) {
-    if (filePath && fs.existsSync(filePath)) return filePath;
-  }
-  return '';
-}
-
-function resolveTtcPrivateMessagesFilePath(usersFilePath = '') {
-  const inferred = String(usersFilePath || '').trim();
-  if (inferred && inferred.endsWith(path.join('database', 'core', 'users.json'))) {
-    const root = inferred.slice(0, -('core/users.json'.length));
-    const fromUsers = path.join(root, 'social', 'private_messages.json');
-    if (fs.existsSync(fromUsers)) return fromUsers;
-  }
-  const candidates = [
-    path.join(__dirname, '..', 'ttc_webapp', 'database', 'social', 'private_messages.json'),
-    path.join(process.cwd(), 'ttc_webapp', 'database', 'social', 'private_messages.json'),
-    path.join(process.cwd(), '..', 'ttc_webapp', 'database', 'social', 'private_messages.json'),
-    path.join(process.cwd(), 'database', 'social', 'private_messages.json'),
-  ];
-  for (const filePath of candidates) {
-    if (filePath && fs.existsSync(filePath)) return filePath;
-  }
-  return '';
-}
-
-function findTtcUsernameExactOrCaseInsensitive(usersData = {}, hint = '') {
-  const target = String(hint || '').trim();
-  if (!target) return '';
-  if (Object.prototype.hasOwnProperty.call(usersData, target)) return target;
-  const lower = target.toLowerCase();
-  return Object.keys(usersData).find((name) => String(name || '').toLowerCase() === lower) || '';
-}
-
-function resolveTtcDmSenderUsername(usersData = {}) {
-  const settings = readSettings();
-  const hints = [
-    String((settings && settings.trustcommons_identity_id) || '').trim(),
-    String((settings && settings.trustcommons_display_name) || '').trim(),
-  ].filter(Boolean);
-  for (const hint of hints) {
-    const match = findTtcUsernameExactOrCaseInsensitive(usersData, hint);
-    if (match) return match;
-  }
-  return '';
-}
-
-function encryptTtcPrivateMessage(plaintext = '', shiftKey = 1) {
-  const shift = Number.isFinite(Number(shiftKey)) && Number(shiftKey) > 0 ? Number(shiftKey) : 1;
-  return String(plaintext || '').split('').map((ch) => String.fromCharCode(ch.charCodeAt(0) + shift)).join('');
-}
-
 function writeJsonAtomic(filePath, payloadObj) {
   const dir = path.dirname(filePath);
   const temp = path.join(dir, `${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}`);
@@ -10008,70 +9868,8 @@ function writeJsonAtomic(filePath, payloadObj) {
   fs.renameSync(temp, filePath);
 }
 
-function appendTtcInviteDm(recipientUsername = '', messageText = '') {
-  const recipientHint = String(recipientUsername || '').trim();
-  const text = String(messageText || '').trim();
-  if (!recipientHint || !text) return { ok: false, message: 'recipient and message are required.' };
-
-  const usersFilePath = resolveTtcUsersFilePath();
-  if (!usersFilePath) return { ok: false, message: 'TTC users directory not found.' };
-  const messagesFilePath = resolveTtcPrivateMessagesFilePath(usersFilePath);
-  if (!messagesFilePath) return { ok: false, message: 'TTC private messages store not found.' };
-
-  try {
-    const usersData = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'));
-    if (!usersData || typeof usersData !== 'object') {
-      return { ok: false, message: 'TTC users data is invalid.' };
-    }
-    const sender = resolveTtcDmSenderUsername(usersData);
-    if (!sender) {
-      return { ok: false, message: 'TTC sender identity is not linked in Subgrapher settings.' };
-    }
-    const recipient = findTtcUsernameExactOrCaseInsensitive(usersData, recipientHint);
-    if (!recipient) return { ok: false, message: `TTC recipient not found: ${recipientHint}` };
-
-    const recipientRow = usersData[recipient] || {};
-    const recipientKey = Number(recipientRow.key || 1);
-    const encrypted = encryptTtcPrivateMessage(text, recipientKey);
-    const messageId = `msg-${crypto.randomBytes(8).toString('hex')}`;
-    const timestamp = Date.now() / 1000;
-
-    let store = { history: [] };
-    if (fs.existsSync(messagesFilePath)) {
-      const parsed = JSON.parse(fs.readFileSync(messagesFilePath, 'utf8'));
-      if (parsed && typeof parsed === 'object') {
-        store = {
-          ...parsed,
-          history: Array.isArray(parsed.history) ? parsed.history : [],
-        };
-      }
-    }
-    store.history.push({
-      message_id: messageId,
-      from: sender,
-      to: recipient,
-      encrypted_message: encrypted,
-      timestamp,
-      parent_id: null,
-      root_id: messageId,
-      depth: 0,
-      ancestry: [messageId],
-    });
-    writeJsonAtomic(messagesFilePath, store);
-    return {
-      ok: true,
-      sender,
-      recipient,
-      message_id: messageId,
-      file: messagesFilePath,
-    };
-  } catch (err) {
-    return { ok: false, message: String((err && err.message) || 'Unable to append TTC invite DM.') };
-  }
-}
-
 function publishSnapshotFromReference(srId) {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
 
   const refId = String(srId || '').trim();
@@ -10116,7 +9914,7 @@ function publishSnapshotFromReference(srId) {
     published_at: now,
     updated_at: now,
     status: visible ? 'visible' : 'pending',
-    trust_tier: visible ? 'verified' : 'pending',
+    trust_tier: visible ? 'local_identity' : 'pending',
     reference_payload: payload,
     summary_text: String(payload.summary_text || ''),
   };
@@ -10274,7 +10072,7 @@ function refreshRoomParticipantsFromShare(room, share) {
 }
 
 function createPrivateShare(srId, recipientIds = []) {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const refId = String(srId || '').trim();
   if (!refId) return { ok: false, message: 'sr_id is required.' };
@@ -10312,10 +10110,9 @@ function createPrivateShare(srId, recipientIds = []) {
     return {
       member_id: memberId,
       display_name: String(meta.display_name || memberId),
-      ttc_username: String((meta && meta.ttc_username) || ''),
       read_access: true,
-      write_status: 'write_pending',
-      status: 'write_pending',
+      write_status: 'write_accepted',
+      status: 'write_accepted',
       updated_at: nowTs(),
     };
   });
@@ -10330,41 +10127,6 @@ function createPrivateShare(srId, recipientIds = []) {
     created_at: nowTs(),
     updated_at: nowTs(),
   };
-  const invite = createHyperwebInvite();
-  if (invite && invite.ok && invite.invite_url) {
-    share.invite_url = String(invite.invite_url || '');
-    share.invite_message = [
-      `Hi, ${share.owner_alias} shared a Subgrapher reference with you.`,
-      'Subgrapher is TTC\'s browsing workspace for Hyperweb snapshots and private collaboration.',
-      'Install or open it from: https://thetrustcommons.com/apps',
-      `Invite link: ${share.invite_url}`,
-    ].join('\n');
-  }
-
-  const dmRecipients = recipients
-    .map((item) => String((item && item.ttc_username) || '').trim())
-    .filter(Boolean);
-  const inviteDm = {
-    attempted: 0,
-    delivered: 0,
-    failed: 0,
-    results: [],
-  };
-  if (dmRecipients.length > 0 && share.invite_message) {
-    dmRecipients.forEach((username) => {
-      inviteDm.attempted += 1;
-      const result = appendTtcInviteDm(username, share.invite_message);
-      if (result && result.ok) inviteDm.delivered += 1;
-      else inviteDm.failed += 1;
-      inviteDm.results.push({
-        username,
-        ok: !!(result && result.ok),
-        message: String((result && result.message) || ''),
-      });
-    });
-  }
-  share.invite_dm = inviteDm;
-
   const room = {
     room_id: roomId,
     share_id: shareId,
@@ -10682,458 +10444,11 @@ function makeSignedSocialEvent(type, payload) {
   return event;
 }
 
-let cachedTrustCommonsSyncSecret = '';
-let cachedTrustCommonsSyncAccount = '';
-let ephemeralTrustCommonsSyncSecret = '';
-
-function getTrustCommonsSyncAccount(settings = null) {
-  const cfg = settings || readSettings();
-  const identityId = String((cfg && cfg.trustcommons_identity_id) || '').trim();
-  return identityId
-    ? `${TRUSTCOMMONS_SYNC_SECRET_ACCOUNT}:${identityId}`
-    : TRUSTCOMMONS_SYNC_SECRET_ACCOUNT;
-}
-
-function getTrustCommonsSyncSecret() {
-  const settings = readSettings();
-  const account = getTrustCommonsSyncAccount(settings);
-  if (cachedTrustCommonsSyncSecret && cachedTrustCommonsSyncAccount === account) {
-    return cachedTrustCommonsSyncSecret;
-  }
-
-  const service = TRUSTCOMMONS_SYNC_SECRET_SERVICE;
-  const got = getPlatformServiceSecret(account, { service });
-  if (got && got.ok && got.secret) {
-    cachedTrustCommonsSyncSecret = String(got.secret || '');
-    cachedTrustCommonsSyncAccount = account;
-    return cachedTrustCommonsSyncSecret;
-  }
-
-  const generated = crypto.randomBytes(32).toString('hex');
-  const saved = setPlatformServiceSecret(account, generated, { service });
-  if (saved && saved.ok) {
-    cachedTrustCommonsSyncSecret = generated;
-    cachedTrustCommonsSyncAccount = account;
-    return cachedTrustCommonsSyncSecret;
-  }
-
-  if (!ephemeralTrustCommonsSyncSecret) {
-    ephemeralTrustCommonsSyncSecret = generated;
-  }
-  return ephemeralTrustCommonsSyncSecret;
-}
-
-function getSyncEligibleReferences() {
-  const refs = getReferences();
-  return refs
-    .filter((ref) => ref && !ref.is_public_candidate)
-    .filter((ref) => !ref.is_temp_candidate)
-    .map((ref) => JSON.parse(JSON.stringify(ref)));
-}
-
-function normalizeSyncedReferenceTabs(rawTabs = []) {
-  const tabs = Array.isArray(rawTabs) ? rawTabs : [];
-  if (tabs.length === 0) {
-    return [createWebTab({ url: getDefaultSearchHomeUrl(), title: getDefaultSearchHomeTitle() })];
-  }
-  const normalized = tabs.slice(0, MAX_BROWSER_TABS_PER_REFERENCE).map((tab) => {
-    const kind = String((tab && tab.tab_kind) || 'web').trim().toLowerCase();
-    if (kind === 'files') {
-      return createFilesTab({
-        id: String((tab && tab.id) || makeId('tab')),
-        title: String((tab && tab.title) || 'Files'),
-        files_view_state: (tab && typeof tab.files_view_state === 'object') ? tab.files_view_state : {},
-        updated_at: Number((tab && tab.updated_at) || nowTs()),
-      });
-    }
-    if (kind === 'viz') {
-      return null;
-    }
-    if (kind === 'skills') {
-      return createSkillsTab({
-        id: String((tab && tab.id) || makeId('tab')),
-        title: String((tab && tab.title) || 'Skills'),
-      });
-    }
-    if (kind === 'mail') {
-      return createMailTab({
-        id: String((tab && tab.id) || makeId('tab')),
-        title: String((tab && tab.title) || 'Mail'),
-        mail_view_state: (tab && typeof tab.mail_view_state === 'object') ? tab.mail_view_state : {},
-        updated_at: Number((tab && tab.updated_at) || nowTs()),
-      });
-    }
-    const next = createWebTab({
-      url: String((tab && tab.url) || ''),
-      title: String((tab && tab.title) || ''),
-    });
-    next.id = String((tab && tab.id) || next.id);
-    next.tab_kind = 'web';
-    next.updated_at = Number((tab && tab.updated_at) || nowTs());
-    return next;
-  });
-  const filtered = normalized.filter(Boolean);
-  return filtered.length > 0
-    ? filtered
-    : [createWebTab({ url: getDefaultSearchHomeUrl(), title: getDefaultSearchHomeTitle() })];
-}
-
-function normalizeSyncedReferenceArtifacts(rawArtifacts = []) {
-  const artifacts = Array.isArray(rawArtifacts) ? rawArtifacts : [];
-  if (artifacts.length === 0) {
-    return [createArtifact({
-      title: 'Research Draft',
-      type: 'markdown',
-      content: '',
-    })];
-  }
-  return artifacts.slice(0, 80).map((artifact) => createArtifact({
-    id: String((artifact && artifact.id) || makeId('artifact')),
-    type: normalizeArtifactType((artifact && artifact.type) || 'markdown'),
-    title: String((artifact && artifact.title) || 'Artifact').slice(0, 180),
-    content: String((artifact && artifact.content) || ''),
-    created_at: Number((artifact && artifact.created_at) || nowTs()),
-    updated_at: Number((artifact && artifact.updated_at) || nowTs()),
-  }));
-}
-
 function sanitizeReferenceColorTag(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (raw === 'c1' || raw === 'c2' || raw === 'c3' || raw === 'c4' || raw === 'c5') return raw;
   return '';
 }
-
-function normalizeIncomingSyncedReference(raw, context = {}) {
-  if (!raw || typeof raw !== 'object') return null;
-  const refId = String(raw.id || '').trim();
-  if (!refId) return null;
-
-  const tabs = normalizeSyncedReferenceTabs(raw.tabs);
-  const artifacts = normalizeSyncedReferenceArtifacts(raw.artifacts);
-  const legacyVizArtifacts = (Array.isArray(raw.tabs) ? raw.tabs : [])
-    .filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'viz')
-    .map((tab) => buildLegacyVizArtifact(refId, tab));
-  const mergedArtifacts = artifacts.concat(legacyVizArtifacts).slice(0, 80);
-  const activeTabIdRaw = String(raw.active_tab_id || '').trim();
-  const activeTabId = tabs.find((tab) => String(tab.id || '') === activeTabIdRaw)
-    ? activeTabIdRaw
-    : String((tabs[0] && tabs[0].id) || '').trim();
-
-  const synced = {
-    id: refId,
-    title: String(raw.title || 'Untitled').slice(0, 120),
-    title_user_edited: !!raw.title_user_edited,
-    intent: String(raw.intent || ''),
-    tags: Array.isArray(raw.tags) ? raw.tags.slice(0, 40).map((item) => String(item || '').trim()).filter(Boolean) : [],
-    parent_id: raw.parent_id ? String(raw.parent_id) : null,
-    children: Array.isArray(raw.children) ? raw.children.map((item) => String(item || '').trim()).filter(Boolean) : [],
-    lineage: Array.isArray(raw.lineage) ? raw.lineage.map((item) => String(item || '').trim()).filter(Boolean) : [],
-    relation_type: String(raw.relation_type || (raw.parent_id ? 'child' : 'root')),
-    color_tag: sanitizeReferenceColorTag(raw.color_tag),
-    visibility: String(raw.visibility || 'private').trim().toLowerCase() === 'public' ? 'public' : 'private',
-    is_public_candidate: false,
-    source_type: 'trustcommons_sync',
-    source_peer_id: String((context && context.source_peer_id) || '').trim(),
-    source_peer_name: String((context && context.source_app) || 'trustcommons').trim(),
-    source_candidate_key: '',
-    source_metadata: {
-      sync_source_app: String((context && context.source_app) || 'trustcommons').trim(),
-      sync_source_peer_id: String((context && context.source_peer_id) || '').trim(),
-      sync_ingested_at: nowTs(),
-    },
-    is_temp_candidate: false,
-    temp_imported_at: 0,
-    hyperweb_payload_version: 1,
-    tabs,
-    active_tab_id: activeTabId || null,
-    artifacts: mergedArtifacts,
-    mail_threads: [],
-    context_files: Array.isArray(raw.context_files)
-      ? raw.context_files.slice(0, 100).map((file) => ({
-        id: String((file && file.id) || makeId('ctx')),
-        source_type: 'trustcommons_sync',
-        original_name: String((file && file.original_name) || 'context.txt'),
-        relative_path: String((file && file.relative_path) || ''),
-        stored_path: '',
-        mime_type: String((file && file.mime_type) || 'text/plain'),
-        size_bytes: Number((file && file.size_bytes) || 0),
-        content_hash: String((file && file.content_hash) || ''),
-        summary: String((file && file.summary) || '').slice(0, 1200),
-        read_only: true,
-        created_at: nowTs(),
-        updated_at: nowTs(),
-      }))
-      : [],
-    folder_mounts: [],
-    youtube_transcripts: sanitizeYouTubeTranscriptMap(raw.youtube_transcripts),
-    reference_graph: (raw && typeof raw.reference_graph === 'object' && raw.reference_graph)
-      ? raw.reference_graph
-      : { nodes: [], edges: [] },
-    agent_weights: (raw && typeof raw.agent_weights === 'object' && raw.agent_weights)
-      ? raw.agent_weights
-      : {},
-    decision_trace: Array.isArray(raw.decision_trace) ? raw.decision_trace.slice(-DECISION_TRACE_MAX_STEPS) : [],
-    program: String(raw.program || ''),
-    skills: Array.isArray(raw.skills)
-      ? raw.skills.map((item) => sanitizeSkillDescriptor(item)).filter(Boolean)
-      : [],
-    highlights: Array.isArray(raw.highlights)
-      ? raw.highlights.map((item) => sanitizeHighlightEntry(item)).filter(Boolean).slice(-MAX_HIGHLIGHTS)
-      : [],
-    chat_thread: (raw && raw.chat_thread && typeof raw.chat_thread === 'object')
-      ? {
-        messages: Array.isArray(raw.chat_thread.messages) ? raw.chat_thread.messages.slice(-MAX_CHAT_MESSAGES) : [],
-        last_message_at: Number((raw.chat_thread && raw.chat_thread.last_message_at) || null),
-      }
-      : { messages: [], last_message_at: null },
-    pinned_root: !!raw.pinned_root,
-    created_at: Number(raw.created_at || nowTs()),
-    updated_at: Number(raw.updated_at || nowTs()),
-    last_used_at: Number(raw.last_used_at || raw.updated_at || nowTs()),
-  };
-
-  return synced;
-}
-
-function mergeSyncedReferences(incomingRefs, context = {}) {
-  const incoming = Array.isArray(incomingRefs) ? incomingRefs : [];
-  if (incoming.length === 0) {
-    return { ok: true, created_count: 0, updated_count: 0, skipped_count: 0, references: getReferences() };
-  }
-
-  const refs = getReferences();
-  const indexById = new Map();
-  refs.forEach((ref, idx) => {
-    const id = String((ref && ref.id) || '').trim();
-    if (id) indexById.set(id, idx);
-  });
-
-  let createdCount = 0;
-  let updatedCount = 0;
-  let skippedCount = 0;
-
-  incoming.forEach((raw) => {
-    const normalized = normalizeIncomingSyncedReference(raw, context);
-    if (!normalized) {
-      skippedCount += 1;
-      return;
-    }
-
-    const id = String(normalized.id || '').trim();
-    if (!id) {
-      skippedCount += 1;
-      return;
-    }
-
-    const idx = indexById.get(id);
-    if (typeof idx === 'number' && idx >= 0) {
-      const existing = refs[idx];
-      const existingUpdated = Number((existing && existing.updated_at) || 0);
-      const incomingUpdated = Number((normalized && normalized.updated_at) || 0);
-      if (incomingUpdated <= existingUpdated) {
-        skippedCount += 1;
-        return;
-      }
-      const merged = {
-        ...existing,
-        ...normalized,
-        chat_thread: (existing && existing.chat_thread && Array.isArray(existing.chat_thread.messages) && existing.chat_thread.messages.length > 0)
-          ? existing.chat_thread
-          : normalized.chat_thread,
-      };
-      refs[idx] = merged;
-      updatedCount += 1;
-      return;
-    }
-
-    refs.unshift(normalized);
-    for (const [key, value] of indexById.entries()) {
-      indexById.set(key, value + 1);
-    }
-    indexById.set(id, 0);
-    createdCount += 1;
-  });
-
-  if (createdCount > 0 || updatedCount > 0) {
-    setReferences(refs);
-  }
-
-  return {
-    ok: true,
-    created_count: createdCount,
-    updated_count: updatedCount,
-    skipped_count: skippedCount,
-    references: refs,
-  };
-}
-
-function getTrustCommonsAppCandidates() {
-  const home = os.homedir();
-  return [
-    '/Applications/Trust Commons.app',
-    '/Applications/TrustCommons.app',
-    path.join(home, 'Applications', 'Trust Commons.app'),
-    path.join(home, 'Applications', 'TrustCommons.app'),
-  ];
-}
-
-async function launchTrustCommonsApp() {
-  const settings = readSettings();
-  const bundleId = String(settings.trustcommons_app_bundle_id || TRUSTCOMMONS_BUNDLE_ID).trim();
-  const downloadUrl = String(settings.trustcommons_download_url || TRUSTCOMMONS_DOWNLOAD_URL).trim();
-  const syncStatus = trustCommonsSyncBridge.getStatus();
-  const localBridgeUrl = String((syncStatus && syncStatus.local_url) || '').trim();
-  const peerUrl = String(settings.trustcommons_peer_sync_url || '').trim();
-  const syncAccount = getTrustCommonsSyncAccount(settings);
-  const deepLink = `trustcommons://subgrapher/connect?source=subgrapher${localBridgeUrl ? `&bridge_url=${encodeURIComponent(localBridgeUrl)}` : ''}${peerUrl ? `&peer_url=${encodeURIComponent(peerUrl)}` : ''}${syncAccount ? `&sync_account=${encodeURIComponent(syncAccount)}` : ''}&sync_service=${encodeURIComponent(TRUSTCOMMONS_SYNC_SECRET_SERVICE)}`;
-
-  if (process.platform === 'darwin' && bundleId) {
-    try {
-      execFileSync('open', ['-b', bundleId], { stdio: 'ignore' });
-      try {
-        await shell.openExternal(deepLink);
-        return { ok: true, opened: true, method: 'bundle_id+deeplink', download_opened: false };
-      } catch (_) {
-        return { ok: true, opened: true, method: 'bundle_id', download_opened: false };
-      }
-    } catch (_) {
-      // fall through
-    }
-  }
-
-  if (process.platform !== 'darwin') {
-    try {
-      await shell.openExternal(deepLink);
-      return { ok: true, opened: true, method: 'deeplink', download_opened: false };
-    } catch (_) {
-      // fall through
-    }
-  }
-
-  for (const appPath of getTrustCommonsAppCandidates()) {
-    try {
-      if (!fs.existsSync(appPath)) continue;
-      const err = await shell.openPath(appPath);
-      if (!err) {
-        try {
-          await shell.openExternal(deepLink);
-          return { ok: true, opened: true, method: 'app_path+deeplink', app_path: appPath, download_opened: false };
-        } catch (_) {
-          return { ok: true, opened: true, method: 'app_path', app_path: appPath, download_opened: false };
-        }
-      }
-    } catch (_) {
-      // try next path
-    }
-  }
-
-  if (downloadUrl) {
-    try {
-      await shell.openExternal(downloadUrl);
-      return { ok: true, opened: false, method: 'download_fallback', download_opened: true, download_url: downloadUrl };
-    } catch (err) {
-      return {
-        ok: false,
-        opened: false,
-        method: 'download_fallback_failed',
-        download_opened: false,
-        download_url: downloadUrl,
-        message: String((err && err.message) || 'Unable to open Trust Commons download URL.'),
-      };
-    }
-  }
-
-  return { ok: false, opened: false, method: 'none', download_opened: false, message: 'Trust Commons app not found and no download URL is configured.' };
-}
-
-async function ensureTrustCommonsSyncBridge() {
-  const settings = readSettings();
-  trustCommonsSyncBridge.setEnabled(!!settings.trustcommons_sync_enabled);
-  trustCommonsSyncBridge.setPeerBridgeUrl(String(settings.trustcommons_peer_sync_url || '').trim());
-  trustCommonsSyncBridge.setSyncIntervalMs(Number(settings.trustcommons_sync_interval_sec || TRUSTCOMMONS_SYNC_DEFAULT_INTERVAL_SEC) * 1000);
-
-  if (!String(settings.trustcommons_identity_id || '').trim()) {
-    await trustCommonsSyncBridge.stop();
-    return { ok: true, disabled: true, message: 'Trust Commons identity is required for multi-device sync.', status: trustCommonsSyncBridge.getStatus() };
-  }
-
-  if (!settings.trustcommons_sync_enabled) {
-    await trustCommonsSyncBridge.stop();
-    return { ok: true, disabled: true, status: trustCommonsSyncBridge.getStatus() };
-  }
-
-  const secret = getTrustCommonsSyncSecret();
-  if (!secret) {
-    return { ok: false, message: 'Unable to initialize local sync secret.', status: trustCommonsSyncBridge.getStatus() };
-  }
-
-  const port = Number(settings.trustcommons_sync_port || TRUSTCOMMONS_SYNC_DEFAULT_PORT);
-  const started = await trustCommonsSyncBridge.start(port);
-  if (!started || !started.ok) return started;
-  return { ok: true, status: trustCommonsSyncBridge.getStatus() };
-}
-
-function applyTrustCommonsSettingsPatch(patch = {}) {
-  const next = writeSettings(patch || {});
-  const load = trustCommonsIdentity.loadTrustCommonsIdentity(trustCommonsSecretAdapter, next);
-  trustCommonsRuntime = {
-    ...trustCommonsRuntime,
-    bootstrapComplete: !!next.trustcommons_bootstrap_complete,
-    identity: load && load.ok ? load.identity : null,
-    connected: !!trustCommonsRuntime.connected,
-    lastError: load && !load.ok ? String(load.message || '') : '',
-  };
-  return next;
-}
-
-function ensureTrustCommonsBootstrap() {
-  const settings = readSettings();
-  const bootstrap = trustCommonsIdentity.bootstrapTrustCommonsIdentity(trustCommonsSecretAdapter, settings, { appLabel: 'subgrapher' });
-  if (!bootstrap || !bootstrap.ok) {
-    trustCommonsRuntime = {
-      ...trustCommonsRuntime,
-      bootstrapComplete: false,
-      identity: null,
-      connected: false,
-      lastError: String((bootstrap && bootstrap.message) || 'Trust Commons bootstrap failed.'),
-    };
-    return { ok: false, message: trustCommonsRuntime.lastError, settings };
-  }
-
-  const merged = applyTrustCommonsSettingsPatch(bootstrap.settings_patch || {});
-  trustCommonsRuntime.bootstrapComplete = !!merged.trustcommons_bootstrap_complete;
-  trustCommonsRuntime.lastError = '';
-  if (trustCommonsRuntime.identity) {
-    hyperwebManager.setIdentity(trustCommonsRuntime.identity);
-  }
-  return {
-    ok: true,
-    created: !!bootstrap.created,
-    identity: trustCommonsRuntime.identity,
-    settings: merged,
-  };
-}
-
-function getTrustCommonsStatus() {
-  const settings = readSettings();
-  const managerStatus = hyperwebManager.getStatus();
-  const syncStatus = trustCommonsSyncBridge.getStatus();
-  return {
-    ok: true,
-    bootstrap_complete: !!settings.trustcommons_bootstrap_complete,
-    identity_id: String(settings.trustcommons_identity_id || ''),
-    identity_name: String(settings.trustcommons_display_name || ''),
-    connected: !!managerStatus.connected,
-    launched: !!trustCommonsRuntime.launched,
-    launch_method: String(trustCommonsRuntime.launchMethod || ''),
-    download_opened: !!trustCommonsRuntime.downloadOpened,
-    relay_url: String(settings.hyperweb_relay_url || DEFAULT_HYPERWEB_RELAY_URL),
-    hyperweb_enabled: !!settings.hyperweb_enabled,
-    sync: syncStatus,
-    last_error: trustCommonsRuntime.lastError || managerStatus.last_error || '',
-  };
-}
-
 function getHyperwebIdentityDiagnostics() {
   const state = ensureHyperwebSocialState();
   const identity = (state && state.identity && typeof state.identity === 'object') ? state.identity : {};
@@ -11164,7 +10479,6 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
   const applied = {
     reference_ranking: { ok: true, changed: false },
     hyperweb: { ok: true, changed: false },
-    trustcommons_sync: { ok: true, changed: false },
     history: { ok: true, changed: false },
     telegram: { ok: true, changed: false },
     mail_sync: { ok: true, changed: false },
@@ -11186,32 +10500,20 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
   const hyperwebChanged = (
     prev.hyperweb_enabled !== next.hyperweb_enabled
     || String(prev.hyperweb_relay_url || '') !== String(next.hyperweb_relay_url || '')
+    || String(prev.hyperweb_display_name || '') !== String(next.hyperweb_display_name || '')
   );
   if (hyperwebChanged) {
     applied.hyperweb.changed = true;
     hyperwebManager.setRelayUrl(String(next.hyperweb_relay_url || DEFAULT_HYPERWEB_RELAY_URL));
     hyperwebManager.setEnabled(!!next.hyperweb_enabled);
+    syncHyperwebIdentityAliasFromSettings(next);
     if (!next.hyperweb_enabled) {
       hyperwebManager.disconnect();
     } else {
-      const connectRes = await connectTrustCommonsAndHyperweb({ launchApp: false });
+      const connectRes = await connectHyperweb({ broadcastHandshake: false });
       applied.hyperweb.ok = !!(connectRes && connectRes.ok);
       applied.hyperweb.message = String((connectRes && connectRes.message) || '');
     }
-  }
-
-  const syncChanged = (
-    prev.trustcommons_sync_enabled !== next.trustcommons_sync_enabled
-    || Number(prev.trustcommons_sync_port || 0) !== Number(next.trustcommons_sync_port || 0)
-    || String(prev.trustcommons_peer_sync_url || '') !== String(next.trustcommons_peer_sync_url || '')
-    || Number(prev.trustcommons_sync_interval_sec || 0) !== Number(next.trustcommons_sync_interval_sec || 0)
-  );
-  if (syncChanged) {
-    applied.trustcommons_sync.changed = true;
-    const syncRes = await ensureTrustCommonsSyncBridge();
-    applied.trustcommons_sync.ok = !!(syncRes && syncRes.ok);
-    applied.trustcommons_sync.message = String((syncRes && syncRes.message) || '');
-    applied.trustcommons_sync.status = trustCommonsSyncBridge.getStatus();
   }
   const historyChanged = (
     prev.history_enabled !== next.history_enabled
@@ -11289,104 +10591,23 @@ function confirmTypedResetPhrase(phrase = 'RESET') {
   return expected;
 }
 
-async function connectTrustCommonsAndHyperweb(options = {}) {
-  const launchApp = options && Object.prototype.hasOwnProperty.call(options, 'launchApp')
-    ? !!options.launchApp
-    : true;
-  const bootstrap = ensureTrustCommonsBootstrap();
-  if (!bootstrap || !bootstrap.ok) {
-    return {
-      ok: false,
-      message: (bootstrap && bootstrap.message) || 'Unable to bootstrap Trust Commons identity.',
-      status: getTrustCommonsStatus(),
-    };
-  }
-
-  const syncInit = await ensureTrustCommonsSyncBridge();
-  if (!syncInit || !syncInit.ok) {
-    trustCommonsRuntime.lastError = String((syncInit && syncInit.message) || 'Local sync bridge unavailable.');
-  }
-
-  let launch = {
-    ok: true,
-    opened: false,
-    method: 'skipped',
-    download_opened: false,
-  };
-  if (launchApp) {
-    launch = await launchTrustCommonsApp();
-    trustCommonsRuntime.launched = !!(launch && launch.opened);
-    trustCommonsRuntime.launchMethod = String((launch && launch.method) || '');
-    trustCommonsRuntime.downloadOpened = !!(launch && launch.download_opened);
-    if (!launch || !launch.ok) {
-      trustCommonsRuntime.lastError = String((launch && launch.message) || 'Unable to launch Trust Commons.');
-    }
-  }
-
+async function connectHyperweb(options = {}) {
   const settings = readSettings();
+  const identity = getHyperwebNetworkIdentity(settings);
   hyperwebManager.setRelayUrl(settings.hyperweb_relay_url || DEFAULT_HYPERWEB_RELAY_URL);
   hyperwebManager.setEnabled(!!settings.hyperweb_enabled);
-  hyperwebManager.setIdentity(bootstrap.identity || null);
+  hyperwebManager.setIdentity(identity);
   const connectRes = settings.hyperweb_enabled
-    ? await hyperwebManager.connect(bootstrap.identity || null)
+    ? await hyperwebManager.connect(identity)
     : { ok: true, status: hyperwebManager.getStatus(), message: 'Hyperweb disabled in settings.' };
-  trustCommonsRuntime.connected = !!(connectRes && connectRes.status && connectRes.status.connected);
-  if (connectRes && connectRes.ok && (!syncInit || syncInit.ok) && (!launchApp || (launch && launch.ok))) {
-    trustCommonsRuntime.lastError = '';
-  } else if (connectRes && !connectRes.ok) {
-    trustCommonsRuntime.lastError = String((connectRes && connectRes.message) || 'Hyperweb connect failed.');
+  if (connectRes && connectRes.ok && options.broadcastHandshake !== false) {
+    broadcastHyperwebInviteHandshake();
   }
-
-  let syncResult = { ok: true, skipped: true, reason: 'peer_not_configured' };
-  const activeSyncStatus = trustCommonsSyncBridge.getStatus();
-  if (activeSyncStatus.running && activeSyncStatus.peer_url) {
-    try {
-      syncResult = await trustCommonsSyncBridge.syncOnce();
-      if (!syncResult || !syncResult.ok) {
-        trustCommonsRuntime.lastError = String((syncResult && syncResult.message) || 'Trust Commons local sync failed.');
-      }
-    } catch (err) {
-      syncResult = { ok: false, message: String((err && err.message) || 'Trust Commons local sync failed.') };
-      trustCommonsRuntime.lastError = syncResult.message;
-    }
-  }
-
-  const messageParts = [];
-  if (launchApp) {
-    if (launch && launch.download_opened) {
-      messageParts.push('Trust Commons app not found. Opened download page.');
-    } else if (launch && launch.opened) {
-      messageParts.push('Trust Commons app opened.');
-    }
-  }
-  if (connectRes && connectRes.message) {
-    messageParts.push(String(connectRes.message));
-  }
-  if (syncResult && syncResult.ok && !syncResult.skipped) {
-    messageParts.push(`Local sync: pushed ${Number(syncResult.pushed || 0)} and pulled ${Number(syncResult.pulled || 0)} references.`);
-  } else if (syncResult && !syncResult.ok) {
-    messageParts.push(`Local sync issue: ${syncResult.message || 'sync failed.'}`);
-  }
-
-  const ok = launchApp
-    ? !!(launch && launch.ok)
-    : !!(connectRes && connectRes.ok);
-  const degraded = !!(
-    (connectRes && (!connectRes.ok || connectRes.degraded))
-    || (syncInit && !syncInit.ok)
-    || (syncResult && !syncResult.ok)
-  );
-
   return {
-    ok,
-    degraded,
-    message: messageParts.filter(Boolean).join(' ').trim(),
-    status: getTrustCommonsStatus(),
+    ok: !!(connectRes && connectRes.ok),
+    degraded: !!(connectRes && connectRes.degraded),
+    message: String((connectRes && connectRes.message) || ''),
     hyperweb: connectRes && connectRes.status ? connectRes.status : hyperwebManager.getStatus(),
-    launch,
-    sync_init: syncInit,
-    sync: trustCommonsSyncBridge.getStatus(),
-    sync_result: syncResult,
   };
 }
 
@@ -17153,7 +16374,7 @@ ipcMain.handle('browser:srPublishSnapshot', (_event, payload) => {
 });
 
 ipcMain.handle('browser:srDiscoverPublicReferences', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const query = String((payload && payload.query) || '').trim();
   const limit = Number((payload && payload.limit) || 20);
@@ -19473,17 +18694,6 @@ ipcMain.handle('browser:historySemanticMap', (_event, payload) => {
 ipcMain.handle('browser:updatePreferences', async (_event, payload) => {
   const current = readSettings();
   const patch = pickEditableSettingsPatch(payload || {});
-  if (
-    Object.prototype.hasOwnProperty.call(patch, 'trustcommons_sync_enabled')
-    && !!patch.trustcommons_sync_enabled
-    && !String(current.trustcommons_identity_id || '').trim()
-  ) {
-    return {
-      ok: false,
-      message: 'Connect a Trust Commons identity before enabling multi-device sync.',
-      settings: current,
-    };
-  }
   const updated = writeSettings(patch);
   const appliedRuntime = await applySettingsRuntimeEffects(current, updated);
   return {
@@ -19566,14 +18776,12 @@ ipcMain.handle('browser:ragReindex', async (_event, payload) => {
 
 ipcMain.handle('browser:settingsDiagnostics', async () => {
   const settings = readSettings();
-  const trustcommons = getTrustCommonsStatus();
   const hyperweb = hyperwebManager.getStatus();
   const identity = getHyperwebIdentityDiagnostics();
   const python = await getPythonRuntimeResolver().diagnostics({ bypassCache: true });
   return {
     ok: true,
     settings,
-    trustcommons,
     hyperweb,
     hyperweb_identity: identity,
     python,
@@ -19612,35 +18820,6 @@ ipcMain.handle('browser:settingsDangerClearHyperwebSocialCache', async (_event, 
   return { ok: true };
 });
 
-ipcMain.handle('browser:settingsDangerResetTrustCommonsLink', async (_event, payload) => {
-  const phrase = String((payload && payload.phrase) || '').trim().toUpperCase();
-  if (phrase !== confirmTypedResetPhrase('RESET')) {
-    return { ok: false, message: 'Type RESET to confirm.' };
-  }
-  const current = readSettings();
-  cachedTrustCommonsSyncSecret = '';
-  cachedTrustCommonsSyncAccount = '';
-  ephemeralTrustCommonsSyncSecret = '';
-  const syncAccount = getTrustCommonsSyncAccount(current);
-  deletePlatformServiceSecret(syncAccount, { service: TRUSTCOMMONS_SYNC_SECRET_SERVICE });
-  const next = writeSettings({
-    trustcommons_bootstrap_complete: false,
-    trustcommons_identity_id: '',
-    trustcommons_display_name: '',
-    trustcommons_bootstrap_at: 0,
-  });
-  trustCommonsRuntime.bootstrapComplete = false;
-  trustCommonsRuntime.identity = null;
-  trustCommonsRuntime.connected = false;
-  trustCommonsRuntime.lastError = '';
-  trustCommonsSyncBridge.stop().catch(() => {});
-  hyperwebManager.disconnect();
-  return {
-    ok: true,
-    settings: next,
-  };
-});
-
 ipcMain.handle('browser:setLuminoSelection', (_event, payload) => {
   const provider = String((payload && payload.provider) || '').trim().toLowerCase();
   const model = String((payload && payload.model) || '').trim();
@@ -19667,61 +18846,42 @@ ipcMain.handle('browser:setDefaultSearchEngine', (_event, payload) => {
   return { ok: true, ...updated };
 });
 
-ipcMain.handle('browser:trustCommonsStatus', () => {
-  return getTrustCommonsStatus();
-});
-
-ipcMain.handle('browser:trustCommonsConnect', async () => {
-  const connected = await connectTrustCommonsAndHyperweb({ launchApp: true });
-  return connected;
-});
-
 ipcMain.handle('browser:hyperwebStatus', async () => {
-  const authenticated = isTtcHyperwebAuthenticated();
   await hyperwebManager.refreshLocalPublicIndex();
+  const identity = getHyperwebNetworkIdentity(readSettings());
   return {
     ok: true,
-    ttc_authenticated: authenticated,
+    identity,
     ...hyperwebManager.getStatus(),
   };
 });
 
 ipcMain.handle('browser:hyperwebConnect', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
-  const trust = await connectTrustCommonsAndHyperweb({ launchApp: false });
+  const trust = await connectHyperweb({});
   const status = hyperwebManager.getStatus();
-  if (trust && trust.ok) {
-    broadcastHyperwebInviteHandshake();
-  }
   return {
     ok: !!(trust && trust.ok),
     degraded: !!(trust && trust.degraded),
     message: (trust && trust.message) || '',
-    trustcommons: trust && trust.status ? trust.status : getTrustCommonsStatus(),
     ...status,
   };
 });
 
 ipcMain.handle('browser:hyperwebDisconnect', () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const res = hyperwebManager.disconnect();
-  trustCommonsRuntime.connected = false;
   return { ok: true, ...res.status };
 });
 
 ipcMain.handle('browser:hyperwebQuery', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const query = String((payload && payload.query) || '').trim();
   const limit = Number((payload && payload.limit) || 25);
   if (!query) return { ok: false, message: 'query is required.' };
-
-  const trustStatus = getTrustCommonsStatus();
-  if (!trustStatus.bootstrap_complete) {
-    ensureTrustCommonsBootstrap();
-  }
 
   const status = hyperwebManager.getStatus();
   const connectedPeers = Number((status && status.peer_count) || 0);
@@ -19736,7 +18896,7 @@ ipcMain.handle('browser:hyperwebQuery', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebImportSuggestion', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const suggestion = payload && payload.suggestion ? payload.suggestion : payload;
   const importRes = await hyperwebManager.importSuggestion(suggestion || {});
@@ -19753,7 +18913,7 @@ ipcMain.handle('browser:hyperwebImportSuggestion', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebSocialStatus', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const state = ensureHyperwebSocialState();
   const status = hyperwebManager.getStatus();
@@ -19769,7 +18929,7 @@ ipcMain.handle('browser:hyperwebSocialStatus', async () => {
 });
 
 ipcMain.handle('browser:hyperwebListPeers', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const state = ensureHyperwebSocialState();
   return {
@@ -19780,7 +18940,7 @@ ipcMain.handle('browser:hyperwebListPeers', async () => {
 });
 
 ipcMain.handle('browser:hyperwebCreateInvite', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const invite = createHyperwebInvite();
   if (!invite || !invite.ok) return { ok: false, message: 'Unable to create invite.' };
@@ -19788,7 +18948,7 @@ ipcMain.handle('browser:hyperwebCreateInvite', async () => {
 });
 
 ipcMain.handle('browser:hyperwebAcceptInvite', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const token = String((payload && payload.token) || '').trim();
   const res = acceptHyperwebInviteToken(token);
@@ -19807,7 +18967,7 @@ ipcMain.handle('browser:hyperwebAcceptInvite', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebPostCreate', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const body = String((payload && payload.body) || '').trim();
   if (!body) return { ok: false, message: 'Post body is required.' };
@@ -19825,7 +18985,7 @@ ipcMain.handle('browser:hyperwebPostCreate', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebPostReply', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const postId = String((payload && payload.post_id) || '').trim();
   const body = String((payload && payload.body) || '').trim();
@@ -19848,7 +19008,7 @@ ipcMain.handle('browser:hyperwebPostReply', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebVoteSet', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const targetId = String((payload && payload.target_id) || '').trim();
   const value = Number((payload && payload.value) || 0);
@@ -19867,7 +19027,7 @@ ipcMain.handle('browser:hyperwebVoteSet', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebReportTarget', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const targetId = String((payload && payload.target_id) || '').trim();
   const targetKind = String((payload && payload.target_kind) || 'post').trim().toLowerCase();
@@ -19877,44 +19037,43 @@ ipcMain.handle('browser:hyperwebReportTarget', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebDeleteSnapshot', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const snapshotId = String((payload && payload.snapshot_id) || '').trim();
   return deletePublishedSnapshot(snapshotId);
 });
 
 ipcMain.handle('browser:hyperwebFeedQuery', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const authorFingerprint = String((payload && payload.author_fingerprint) || '').trim();
   return buildHyperwebFeed({ author_fingerprint: authorFingerprint });
 });
 
 ipcMain.handle('browser:hyperwebProfileQuery', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const authorFingerprint = String((payload && payload.author_fingerprint) || '').trim();
   return queryHyperwebProfile(authorFingerprint);
 });
 
 ipcMain.handle('browser:hyperwebResetFilter', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   return { ok: true };
 });
 
 ipcMain.handle('browser:hyperwebMembersList', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   return {
     ok: true,
     members: listHyperwebMembers(),
-    unauthenticated: !auth.ok,
     message: auth.ok ? '' : String(auth.message || ''),
   };
 });
 
 ipcMain.handle('browser:hyperwebChatSend', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const peerId = String((payload && payload.peer_id) || '').trim();
   const text = String((payload && payload.text) || '');
@@ -19932,7 +19091,7 @@ ipcMain.handle('browser:hyperwebChatSend', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const peerId = String((payload && payload.peer_id) || '').trim().toUpperCase();
   const roomId = String((payload && payload.room_id) || '').trim();
@@ -19952,7 +19111,7 @@ ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebChatConversations', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   return {
     ok: true,
@@ -19961,10 +19120,11 @@ ipcMain.handle('browser:hyperwebChatConversations', async () => {
 });
 
 ipcMain.handle('browser:hyperwebChatMarkRead', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const peerId = String((payload && payload.peer_id) || '').trim().toUpperCase();
   const roomId = String((payload && payload.room_id) || '').trim();
+  if (roomId === HYPERWEB_PUBLIC_LOBBY_ID) return { ok: true, acked_message_ids: [] };
   const messageIds = Array.isArray(payload && payload.message_ids) ? payload.message_ids : [];
   const state = ensureHyperwebSocialState();
   const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
@@ -19990,7 +19150,7 @@ ipcMain.handle('browser:hyperwebChatMarkRead', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebChatRoomCreate', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const roomName = String((payload && payload.room_name) || '').trim();
   const memberIds = Array.isArray(payload && payload.member_ids) ? payload.member_ids : [];
@@ -20001,13 +19161,13 @@ ipcMain.handle('browser:hyperwebChatRoomCreate', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebChatRoomsList', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   return listHyperwebChatRooms();
 });
 
 ipcMain.handle('browser:hyperwebShareReference', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const srId = String((payload && payload.sr_id) || '').trim();
   const recipientIds = Array.isArray(payload && payload.recipient_ids) ? payload.recipient_ids : [];
@@ -20015,54 +19175,54 @@ ipcMain.handle('browser:hyperwebShareReference', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebListShares', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   return listPrivateSharesForCurrentUser();
 });
 
 ipcMain.handle('browser:hyperwebAcceptShareWrite', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const shareId = String((payload && payload.share_id) || '').trim();
   return updateRecipientShareStatus(shareId, 'write_accepted');
 });
 
 ipcMain.handle('browser:hyperwebDeclineShareWrite', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const shareId = String((payload && payload.share_id) || '').trim();
   return updateRecipientShareStatus(shareId, 'declined');
 });
 
 ipcMain.handle('browser:hyperwebRevokeShare', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const shareId = String((payload && payload.share_id) || '').trim();
   return revokeShareAccess(shareId);
 });
 
 ipcMain.handle('browser:hyperwebDeleteShare', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const shareId = String((payload && payload.share_id) || '').trim();
   return deletePrivateShare(shareId);
 });
 
 ipcMain.handle('browser:hyperwebListSharedRooms', async () => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   return listSharedRoomsForCurrentUser();
 });
 
 ipcMain.handle('browser:hyperwebOpenSharedRoom', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const roomId = String((payload && payload.room_id) || '').trim();
   return openSharedRoomForCurrentUser(roomId);
 });
 
 ipcMain.handle('browser:hyperwebCollabApplyUpdate', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const roomId = String((payload && payload.room_id) || '').trim();
   const update = (payload && payload.update && typeof payload.update === 'object') ? payload.update : {};
@@ -20070,7 +19230,7 @@ ipcMain.handle('browser:hyperwebCollabApplyUpdate', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebReferenceSearch', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const query = String((payload && payload.query) || '').trim();
   const limit = Number((payload && payload.limit) || 40);
@@ -20082,7 +19242,7 @@ ipcMain.handle('browser:hyperwebReferenceSearch', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebImportReference', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const item = (payload && payload.item && typeof payload.item === 'object') ? payload.item : {};
   const isSnapshot = (
@@ -20104,7 +19264,7 @@ ipcMain.handle('browser:hyperwebImportReference', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebPostSearch', async (_event, payload) => {
-  const auth = requireTtcHyperwebAuth();
+  const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const query = String((payload && payload.query) || '').trim();
   const limit = Number((payload && payload.limit) || 40);
@@ -20183,7 +19343,6 @@ if (gotSingleInstanceLock) app.whenReady().then(() => {
   applySettingsRuntimeEffects(settings, settings).catch((err) => {
     console.warn('[runtime] settings effects failed:', String((err && err.message) || err));
   });
-  ensureTrustCommonsBootstrap();
   cleanupStaleSandboxes(app.getPath('userData'), { maxAgeMs: 48 * 60 * 60 * 1000 });
   getPythonRuntimeResolver().diagnostics({ bypassCache: true }).then((result) => {
     const tool = result && result.tool && typeof result.tool === 'object' ? result.tool : {};
@@ -20197,15 +19356,6 @@ if (gotSingleInstanceLock) app.whenReady().then(() => {
   }).catch((err) => {
     console.warn('[python] check error:', String((err && err.message) || err));
   });
-  ensureTrustCommonsSyncBridge()
-    .then((res) => {
-      if (!res || !res.ok) {
-        trustCommonsRuntime.lastError = String((res && res.message) || 'Trust Commons local sync bridge unavailable.');
-      }
-    })
-    .catch((err) => {
-      trustCommonsRuntime.lastError = String((err && err.message) || 'Trust Commons local sync bridge unavailable.');
-    });
   hyperwebManager.refreshLocalPublicIndex().catch(() => {});
   createMainWindow();
   if (!memorySemanticTimer) {
@@ -20218,7 +19368,7 @@ if (gotSingleInstanceLock) app.whenReady().then(() => {
   runMemorySemanticEvaluation();
 
   if (settings.hyperweb_enabled) {
-    connectTrustCommonsAndHyperweb({ launchApp: false }).catch(() => {});
+    connectHyperweb({}).catch(() => {});
   }
 
   app.on('activate', () => {
@@ -20246,5 +19396,4 @@ app.on('before-quit', () => {
     telegramService.stop().catch(() => {});
   }
   hyperwebManager.disconnect();
-  trustCommonsSyncBridge.stop().catch(() => {});
 });

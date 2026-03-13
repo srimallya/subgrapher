@@ -222,7 +222,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     appDataProtectionUnlock: (payload = {}) => ipcRenderer.invoke('browser:appDataProtectionUnlock', payload || {}),
     settingsDangerResetHyperwebIdentity: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerResetHyperwebIdentity', payload),
     settingsDangerClearHyperwebSocialCache: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerClearHyperwebSocialCache', payload),
-    settingsDangerResetTrustCommonsLink: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerResetTrustCommonsLink', payload),
     setLuminoSelection: (provider, model) => ipcRenderer.invoke('browser:setLuminoSelection', { provider, model }),
     setDefaultSearchEngine: (engine) => ipcRenderer.invoke('browser:setDefaultSearchEngine', { engine }),
 
@@ -283,8 +282,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       update,
     }),
 
-    trustCommonsStatus: () => ipcRenderer.invoke('browser:trustCommonsStatus'),
-    trustCommonsConnect: () => ipcRenderer.invoke('browser:trustCommonsConnect'),
 
     onNavigate: (callback) => {
       ipcRenderer.removeAllListeners('browser:did-navigate');
