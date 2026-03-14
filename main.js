@@ -334,6 +334,8 @@ hyperwebManager.on('peer_seen', () => {
   if (String(identity.fingerprint || '').trim()) {
     broadcastHyperwebInviteHandshake();
   }
+  ensureTrustedPeerInboxTopicsJoined();
+  requestAllTrustedPeerInboxSync();
   hyperwebManager.announcePublicIndex().catch(() => {});
 });
 hyperwebManager.on('protocol', (packet) => {
@@ -351,6 +353,8 @@ hyperwebManager.on('protocol', (packet) => {
     && type !== 'hyperweb:share_delete'
     && type !== 'hyperweb:collab_update'
     && type !== 'hyperweb:collab_request_state'
+    && type !== 'hyperweb:inbox_sync_request'
+    && type !== 'hyperweb:inbox_entry'
   ) return;
   if (type === 'hyperweb:invite_handshake') {
     const payload = (message.payload && typeof message.payload === 'object') ? message.payload : {};
@@ -368,6 +372,8 @@ hyperwebManager.on('protocol', (packet) => {
     };
     writeHyperwebSocialState(state);
     hyperwebSocialState = state;
+    ensureTrustedPeerInboxTopicsJoined();
+    requestPrivateInboxSyncForPeer(fingerprint);
     return;
   }
   if (type === 'hyperweb:chat_ack') {
@@ -493,6 +499,37 @@ hyperwebManager.on('protocol', (packet) => {
   if (type === 'hyperweb:collab_request_state') {
     if (!verifyHyperwebPeerMessage(message)) return;
     respondToSharedRoomStateRequest(message);
+    return;
+  }
+  if (type === 'hyperweb:inbox_sync_request') {
+    const topicId = String(message.topic_id || '').trim();
+    const requesterPeerId = String(message.requester_peer_id || '').trim().toUpperCase();
+    const knownSeq = Number(message.known_seq || 0);
+    if (!topicId || !requesterPeerId) return;
+    const state = ensureHyperwebSocialState();
+    const localId = currentHyperwebMemberId();
+    const entries = getPrivateInboxEntriesForTopic(state, topicId)
+      .filter((item) => String((item && item.from_fingerprint) || '').trim().toUpperCase() === localId)
+      .filter((item) => Number((item && item.seq) || 0) > knownSeq);
+    entries.forEach((entry) => {
+      hyperwebManager.broadcastTopicProtocol(topicId, {
+        type: 'hyperweb:inbox_entry',
+        topic_id: topicId,
+        entry,
+        ts: nowTs(),
+      });
+    });
+    return;
+  }
+  if (type === 'hyperweb:inbox_entry') {
+    const entry = (message.entry && typeof message.entry === 'object') ? message.entry : null;
+    if (!entry) return;
+    handleIncomingPrivateInboxEntry(entry);
+    sendBrowserEvent('browser:hyperwebChat', {
+      event: 'inbox_entry',
+      entry_id: String((entry && entry.entry_id) || ''),
+      kind: String((entry && entry.kind) || ''),
+    });
     return;
   }
   const event = (message.event && typeof message.event === 'object') ? message.event : null;
@@ -8349,6 +8386,10 @@ function createDefaultHyperwebSocialState() {
     reports: [],
     chat_messages: [],
     chat_receipts: {},
+    private_inbox_entries: [],
+    private_inbox_cursors: {},
+    private_inbox_applied: {},
+    private_inbox_receipts: {},
     chat_rooms: {},
     presence_by_peer: {},
     thread_policies: {},
@@ -8887,10 +8928,19 @@ function resolveHyperwebChatThreadMessages(options = {}) {
       dedupe.add(key);
     }
     const receipt = (state.chat_receipts && state.chat_receipts[item.message_id]) || {};
+    const deliveredBy = (receipt && receipt.delivered_by && typeof receipt.delivered_by === 'object') ? receipt.delivered_by : {};
+    const readBy = (receipt && receipt.read_by && typeof receipt.read_by === 'object') ? receipt.read_by : {};
+    let status = String((item && item.status) || 'sent').trim().toLowerCase();
+    if (String((item && item.direction) || '').trim().toLowerCase() === 'out') {
+      if (Object.keys(readBy).length > 0) status = 'read';
+      else if (Object.keys(deliveredBy).length > 0) status = 'delivered';
+      else status = 'pending';
+    }
     reduced.push({
       ...item,
-      delivered_by: receipt.delivered_by || {},
-      read_by: receipt.read_by || {},
+      status,
+      delivered_by: deliveredBy,
+      read_by: readBy,
     });
   });
   return reduced.slice(-limit);
@@ -9019,6 +9069,10 @@ function ensureHyperwebSocialState() {
   if (!Array.isArray(hyperwebSocialState.reports)) hyperwebSocialState.reports = [];
   if (!Array.isArray(hyperwebSocialState.chat_messages)) hyperwebSocialState.chat_messages = [];
   if (!hyperwebSocialState.chat_receipts || typeof hyperwebSocialState.chat_receipts !== 'object') hyperwebSocialState.chat_receipts = {};
+  if (!Array.isArray(hyperwebSocialState.private_inbox_entries)) hyperwebSocialState.private_inbox_entries = [];
+  if (!hyperwebSocialState.private_inbox_cursors || typeof hyperwebSocialState.private_inbox_cursors !== 'object') hyperwebSocialState.private_inbox_cursors = {};
+  if (!hyperwebSocialState.private_inbox_applied || typeof hyperwebSocialState.private_inbox_applied !== 'object') hyperwebSocialState.private_inbox_applied = {};
+  if (!hyperwebSocialState.private_inbox_receipts || typeof hyperwebSocialState.private_inbox_receipts !== 'object') hyperwebSocialState.private_inbox_receipts = {};
   if (!hyperwebSocialState.chat_rooms || typeof hyperwebSocialState.chat_rooms !== 'object') hyperwebSocialState.chat_rooms = {};
   if (!hyperwebSocialState.presence_by_peer || typeof hyperwebSocialState.presence_by_peer !== 'object') hyperwebSocialState.presence_by_peer = {};
   if (!hyperwebSocialState.thread_policies || typeof hyperwebSocialState.thread_policies !== 'object') hyperwebSocialState.thread_policies = {};
@@ -10092,6 +10146,200 @@ function getHyperwebOnlinePeerIds() {
   return online;
 }
 
+function buildHyperwebInboxTopicId(peerA = '', peerB = '') {
+  const list = [String(peerA || '').trim().toUpperCase(), String(peerB || '').trim().toUpperCase()]
+    .filter(Boolean)
+    .sort();
+  if (list.length !== 2) return '';
+  return `subgrapher:hyperweb:inbox:${list[0]}:${list[1]}`;
+}
+
+function getHyperwebInboxTopicForPeer(peerId = '') {
+  const localId = currentHyperwebMemberId();
+  return buildHyperwebInboxTopicId(localId, peerId);
+}
+
+function getPrivateInboxCursorKey(topicId = '', authorId = '') {
+  return `${String(topicId || '').trim()}::${String(authorId || '').trim().toUpperCase()}`;
+}
+
+function getPrivateInboxEntriesForTopic(state, topicId = '') {
+  const target = String(topicId || '').trim();
+  return (Array.isArray(state && state.private_inbox_entries) ? state.private_inbox_entries : [])
+    .filter((item) => String((item && item.topic_id) || '') === target)
+    .sort((a, b) => {
+      const seqDiff = Number((a && a.seq) || 0) - Number((b && b.seq) || 0);
+      if (seqDiff !== 0) return seqDiff;
+      return Number((a && a.created_at) || 0) - Number((b && b.created_at) || 0);
+    });
+}
+
+function getNextPrivateInboxSeq(state, topicId = '', authorId = '') {
+  const key = getPrivateInboxCursorKey(topicId, authorId);
+  const current = Number((((state || {}).private_inbox_cursors || {})[key]) || 0);
+  return current + 1;
+}
+
+function setPrivateInboxCursor(state, topicId = '', authorId = '', seq = 0) {
+  if (!state.private_inbox_cursors || typeof state.private_inbox_cursors !== 'object') state.private_inbox_cursors = {};
+  const key = getPrivateInboxCursorKey(topicId, authorId);
+  state.private_inbox_cursors[key] = Math.max(Number(state.private_inbox_cursors[key] || 0), Number(seq || 0));
+}
+
+function countPendingPrivateInboxEntries() {
+  const state = ensureHyperwebSocialState();
+  const localId = currentHyperwebMemberId();
+  return (Array.isArray(state.private_inbox_entries) ? state.private_inbox_entries : []).filter((item) => {
+    if (!item || typeof item !== 'object') return false;
+    if (String((item && item.from_fingerprint) || '').trim().toUpperCase() !== localId) return false;
+    const kind = String((item && item.kind) || '').trim().toLowerCase();
+    if (kind === 'delivery_ack' || kind === 'read_ack') return false;
+    const targetPeer = String((item && item.to_fingerprint) || '').trim().toUpperCase();
+    const inboxReceipt = (((state.private_inbox_receipts || {})[String((item && item.entry_id) || '').trim()] || {}).delivered_by) || {};
+    if (targetPeer && inboxReceipt[targetPeer]) return false;
+    const deliveredBy = (((state.chat_receipts || {})[String((item && item.message_id) || '').trim()] || {}).delivered_by) || {};
+    if (String((item && item.message_id) || '').trim() && targetPeer && deliveredBy[targetPeer]) return false;
+    return true;
+  }).length;
+}
+
+function upsertPrivateInboxReceipt(entryId = '', peerId = '', kind = 'delivered') {
+  const id = String(entryId || '').trim();
+  const peer = String(peerId || '').trim().toUpperCase();
+  if (!id || !peer) return;
+  const state = ensureHyperwebSocialState();
+  if (!state.private_inbox_receipts || typeof state.private_inbox_receipts !== 'object') state.private_inbox_receipts = {};
+  if (!state.private_inbox_receipts[id] || typeof state.private_inbox_receipts[id] !== 'object') {
+    state.private_inbox_receipts[id] = {};
+  }
+  const bucketName = String(kind || '').trim().toLowerCase() === 'read' ? 'read_by' : 'delivered_by';
+  const bucket = (state.private_inbox_receipts[id][bucketName] && typeof state.private_inbox_receipts[id][bucketName] === 'object')
+    ? state.private_inbox_receipts[id][bucketName]
+    : {};
+  bucket[peer] = nowTs();
+  state.private_inbox_receipts[id][bucketName] = bucket;
+  writeHyperwebSocialState(state);
+  hyperwebSocialState = state;
+}
+
+function ensureTrustedPeerInboxTopicsJoined() {
+  const state = ensureHyperwebSocialState();
+  const localId = currentHyperwebMemberId();
+  Object.keys(state.known_peers || {}).forEach((peerId) => {
+    const target = String(peerId || '').trim().toUpperCase();
+    if (!target || target === localId) return;
+    const topicId = buildHyperwebInboxTopicId(localId, target);
+    if (!topicId) return;
+    hyperwebManager.joinTopic(topicId).catch(() => {});
+  });
+}
+
+function buildPrivateInboxSignedPayload(entry = {}) {
+  const clone = cloneValue(entry);
+  delete clone.signature;
+  return clone;
+}
+
+function signPrivateInboxEntry(entry = {}) {
+  return signHyperwebPayload(buildPrivateInboxSignedPayload(entry));
+}
+
+function verifyPrivateInboxEntry(entry = {}) {
+  const fromPeerId = String((entry && entry.from_fingerprint) || '').trim().toUpperCase();
+  const signature = String((entry && entry.signature) || '').trim();
+  if (!fromPeerId || !signature) return false;
+  const state = ensureHyperwebSocialState();
+  const known = (state.known_peers && state.known_peers[fromPeerId]) ? state.known_peers[fromPeerId] : null;
+  const pubkey = String((known && known.pubkey) || '').trim();
+  if (!pubkey) return false;
+  return verifyHyperwebPayload(buildPrivateInboxSignedPayload(entry), signature, pubkey);
+}
+
+function persistPrivateInboxEntry(entry = {}, options = {}) {
+  const state = ensureHyperwebSocialState();
+  const item = (entry && typeof entry === 'object') ? cloneValue(entry) : null;
+  if (!item) return { ok: false, message: 'entry is required.' };
+  const entryId = String(item.entry_id || '').trim();
+  if (!entryId) return { ok: false, message: 'entry_id is required.' };
+  const existing = new Set((Array.isArray(state.private_inbox_entries) ? state.private_inbox_entries : []).map((x) => String((x && x.entry_id) || '').trim()));
+  if (existing.has(entryId)) return { ok: true, deduped: true, entry: item };
+  state.private_inbox_entries.push(item);
+  if (state.private_inbox_entries.length > 20000) {
+    state.private_inbox_entries = state.private_inbox_entries.slice(-20000);
+  }
+  setPrivateInboxCursor(state, String(item.topic_id || ''), String(item.from_fingerprint || ''), Number(item.seq || 0));
+  if (!options.skipWrite) {
+    writeHyperwebSocialState(state);
+    hyperwebSocialState = state;
+  }
+  return { ok: true, entry: item };
+}
+
+function buildPrivateInboxEntry(input = {}) {
+  const state = ensureHyperwebSocialState();
+  const localId = currentHyperwebMemberId();
+  const toPeerId = String((input && input.to_fingerprint) || '').trim().toUpperCase();
+  const topicId = String((input && input.topic_id) || buildHyperwebInboxTopicId(localId, toPeerId)).trim();
+  const seq = getNextPrivateInboxSeq(state, topicId, localId);
+  const entry = {
+    entry_id: String((input && input.entry_id) || makeId('hwinbox')).trim(),
+    topic_id: topicId,
+    kind: String((input && input.kind) || '').trim().toLowerCase(),
+    from_fingerprint: localId,
+    to_fingerprint: toPeerId,
+    created_at: Number((input && input.created_at) || nowTs()),
+    seq,
+    message_id: String((input && input.message_id) || '').trim(),
+    logical_id: String((input && input.logical_id) || '').trim(),
+    room_id: String((input && input.room_id) || '').trim(),
+    payload: (input && input.payload && typeof input.payload === 'object') ? cloneValue(input.payload) : {},
+    encrypted_payload: String((input && input.encrypted_payload) || '').trim(),
+    signature: '',
+  };
+  entry.signature = signPrivateInboxEntry(entry);
+  return entry;
+}
+
+function appendPrivateInboxEntry(input = {}, options = {}) {
+  const entry = buildPrivateInboxEntry(input);
+  const persisted = persistPrivateInboxEntry(entry);
+  if (!persisted || !persisted.ok) return persisted;
+  if (options.broadcast !== false) {
+    hyperwebManager.broadcastTopicProtocol(String(entry.topic_id || ''), {
+      type: 'hyperweb:inbox_entry',
+      topic_id: String(entry.topic_id || ''),
+      entry,
+      ts: nowTs(),
+    });
+  }
+  return { ok: true, entry };
+}
+
+function requestPrivateInboxSyncForPeer(peerId = '') {
+  const target = String(peerId || '').trim().toUpperCase();
+  if (!target) return false;
+  const state = ensureHyperwebSocialState();
+  const topicId = buildHyperwebInboxTopicId(currentHyperwebMemberId(), target);
+  if (!topicId) return false;
+  const knownSeq = Number((((state || {}).private_inbox_cursors || {})[getPrivateInboxCursorKey(topicId, target)]) || 0);
+  ensureTrustedPeerInboxTopicsJoined();
+  hyperwebManager.broadcastTopicProtocol(topicId, {
+    type: 'hyperweb:inbox_sync_request',
+    topic_id: topicId,
+    requester_peer_id: currentHyperwebMemberId(),
+    known_seq: knownSeq,
+    ts: nowTs(),
+  });
+  return true;
+}
+
+function requestAllTrustedPeerInboxSync() {
+  const state = ensureHyperwebSocialState();
+  Object.keys(state.known_peers || {}).forEach((peerId) => {
+    requestPrivateInboxSyncForPeer(peerId);
+  });
+}
+
 function resolveHyperwebPeerRouting(peerId = '') {
   const target = String(peerId || '').trim().toUpperCase();
   if (!target) {
@@ -10203,6 +10451,122 @@ function listHyperwebChatRooms() {
   return { ok: true, rooms };
 }
 
+function hasDeliveredReceipt(messageId = '', peerId = '') {
+  const state = ensureHyperwebSocialState();
+  const receipt = (state.chat_receipts && state.chat_receipts[String(messageId || '').trim()]) || {};
+  const deliveredBy = (receipt && receipt.delivered_by && typeof receipt.delivered_by === 'object') ? receipt.delivered_by : {};
+  return !!deliveredBy[String(peerId || '').trim().toUpperCase()];
+}
+
+function hasLocalInboxAckForEntry(entryId = '', kind = 'delivery_ack') {
+  const state = ensureHyperwebSocialState();
+  const localId = currentHyperwebMemberId();
+  const target = String(entryId || '').trim();
+  const ackKind = String(kind || 'delivery_ack').trim().toLowerCase();
+  return (Array.isArray(state.private_inbox_entries) ? state.private_inbox_entries : []).some((item) => {
+    if (!item || typeof item !== 'object') return false;
+    if (String((item && item.kind) || '').trim().toLowerCase() !== ackKind) return false;
+    if (String((item && item.from_fingerprint) || '').trim().toUpperCase() !== localId) return false;
+    const payload = (item.payload && typeof item.payload === 'object') ? item.payload : {};
+    return String((payload && payload.entry_id) || '').trim() === target;
+  });
+}
+
+function materializePrivateInboxEntry(entry = {}) {
+  const item = (entry && typeof entry === 'object') ? entry : null;
+  if (!item) return { ok: false, message: 'entry is required.' };
+  const entryId = String(item.entry_id || '').trim();
+  if (!entryId) return { ok: false, message: 'entry_id is required.' };
+  const state = ensureHyperwebSocialState();
+  if (state.private_inbox_applied && state.private_inbox_applied[entryId]) {
+    return { ok: true, deduped: true };
+  }
+  const localId = currentHyperwebMemberId();
+  const kind = String(item.kind || '').trim().toLowerCase();
+  let res = { ok: true };
+  if (kind === 'dm_message') {
+    if (String(item.to_fingerprint || '').trim().toUpperCase() !== localId) return { ok: true, skipped: true };
+    const decrypted = decryptHyperwebChatEnvelope(String(item.encrypted_payload || ''));
+    if (!decrypted || !decrypted.ok) return { ok: false, message: 'Unable to decrypt inbox message.' };
+    const payload = (decrypted.payload && typeof decrypted.payload === 'object') ? decrypted.payload : {};
+    res = persistHyperwebChatMessage({
+      message_id: String(item.message_id || ''),
+      logical_id: String(item.logical_id || item.message_id || ''),
+      room_id: String(item.room_id || ''),
+      mode: String((payload && payload.mode) || 'dm'),
+      from_peer_id: String(item.from_fingerprint || '').trim().toUpperCase(),
+      to_peer_id: localId,
+      ts: Number(item.created_at || nowTs()),
+      text: String((payload && payload.text) || ''),
+      file: normalizeChatFilePayload((payload && payload.file) || {}) || null,
+      encrypted_text: String(item.encrypted_payload || ''),
+      signature: String(item.signature || ''),
+      direction: 'in',
+      status: 'delivered',
+    });
+    if (res && res.ok && !hasLocalInboxAckForEntry(entryId, 'delivery_ack')) {
+      appendPrivateInboxEntry({
+        kind: 'delivery_ack',
+        to_fingerprint: String(item.from_fingerprint || '').trim().toUpperCase(),
+        topic_id: String(item.topic_id || ''),
+        message_id: String(item.message_id || ''),
+        logical_id: String(item.logical_id || item.message_id || ''),
+        payload: {
+          ack_kind: 'delivered',
+          entry_id: entryId,
+        },
+      });
+    }
+  } else if (kind === 'share_notice') {
+    if (String(item.to_fingerprint || '').trim().toUpperCase() !== localId) return { ok: true, skipped: true };
+    const decrypted = decryptHyperwebChatEnvelope(String(item.encrypted_payload || ''));
+    if (!decrypted || !decrypted.ok) return { ok: false, message: 'Unable to decrypt share notice.' };
+    const payload = (decrypted.payload && typeof decrypted.payload === 'object') ? decrypted.payload : {};
+    const noticeKind = String((payload && payload.notice_kind) || '').trim().toLowerCase();
+    if (noticeKind === 'invite') res = upsertIncomingPrivateShare(payload);
+    else if (noticeKind === 'status') res = applyIncomingShareStatusMessage(payload);
+    else if (noticeKind === 'revoke') res = applyIncomingShareRevokeMessage(payload);
+    else if (noticeKind === 'delete') res = applyIncomingShareDeleteMessage(payload);
+    if (res && res.ok && !hasLocalInboxAckForEntry(entryId, 'delivery_ack')) {
+      appendPrivateInboxEntry({
+        kind: 'delivery_ack',
+        to_fingerprint: String(item.from_fingerprint || '').trim().toUpperCase(),
+        topic_id: String(item.topic_id || ''),
+        payload: {
+          ack_kind: 'delivered',
+          entry_id: entryId,
+          share_id: String((payload && payload.share_id) || ''),
+        },
+      });
+    }
+  } else if (kind === 'delivery_ack' || kind === 'read_ack') {
+    const payload = (item.payload && typeof item.payload === 'object') ? item.payload : {};
+    const messageId = String(item.message_id || payload.message_id || '').trim();
+    const targetEntryId = String((payload && payload.entry_id) || '').trim();
+    if (targetEntryId) {
+      upsertPrivateInboxReceipt(targetEntryId, String(item.from_fingerprint || '').trim().toUpperCase(), kind === 'read_ack' ? 'read' : 'delivered');
+    }
+    if (messageId) {
+      upsertHyperwebChatReceipt(messageId, String(item.from_fingerprint || '').trim().toUpperCase(), kind === 'read_ack' ? 'read' : 'delivered');
+    }
+    res = { ok: true };
+  }
+  if (!res || !res.ok) return res || { ok: false, message: 'Unable to materialize inbox entry.' };
+  state.private_inbox_applied[entryId] = nowTs();
+  writeHyperwebSocialState(state);
+  hyperwebSocialState = state;
+  return { ok: true };
+}
+
+function handleIncomingPrivateInboxEntry(rawEntry = {}) {
+  const entry = (rawEntry && typeof rawEntry === 'object') ? rawEntry : null;
+  if (!entry) return { ok: false, message: 'entry is required.' };
+  if (!verifyPrivateInboxEntry(entry)) return { ok: false, message: 'Invalid inbox entry signature.' };
+  const persisted = persistPrivateInboxEntry(entry);
+  if (!persisted || !persisted.ok) return persisted;
+  return materializePrivateInboxEntry(entry);
+}
+
 function sendHyperwebChatAck(toPeerId = '', messageId = '', logicalId = '', roomId = '', ackType = 'read') {
   const state = ensureHyperwebSocialState();
   const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
@@ -10232,6 +10596,19 @@ function sendHyperwebChatAck(toPeerId = '', messageId = '', logicalId = '', room
   payload.signature = signHyperwebPayload(buildHyperwebChatSignedPayload(payload));
   const transportPeerId = resolveHyperwebTransportPeerId(peer);
   const sent = transportPeerId ? hyperwebManager.sendProtocolToPeer(transportPeerId, payload) : false;
+  if (!roomId && (ackType === 'read' || ackType === 'delivered')) {
+    appendPrivateInboxEntry({
+      kind: String(ackType || '').trim().toLowerCase() === 'read' ? 'read_ack' : 'delivery_ack',
+      to_fingerprint: peer,
+      message_id: String(messageId || '').trim(),
+      logical_id: String(logicalId || messageId).trim(),
+      topic_id: getHyperwebInboxTopicForPeer(peer),
+      payload: {
+        ack_kind: String(ackType || '').trim().toLowerCase() === 'read' ? 'read' : 'delivered',
+        message_id: String(messageId || '').trim(),
+      },
+    }, { broadcast: true });
+  }
   return { ok: true, realtime_sent: !!sent };
 }
 
@@ -10332,6 +10709,24 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
     return { ok: false, message: 'Unable to queue message for delivery.' };
   }
   const realtimeSentTo = [];
+  if (mode === 'dm') {
+    recipients.forEach((recipientId) => {
+      const encryptedPayload = String(recipientPayloads[recipientId] || '').trim();
+      if (!encryptedPayload) return;
+      appendPrivateInboxEntry({
+        kind: 'dm_message',
+        to_fingerprint: recipientId,
+        topic_id: getHyperwebInboxTopicForPeer(recipientId),
+        message_id: messageId,
+        logical_id: logicalId,
+        room_id: '',
+        payload: {
+          mode: 'dm',
+        },
+        encrypted_payload: encryptedPayload,
+      });
+    });
+  }
   recipients.forEach((recipientId) => {
     const transportPeerId = resolveHyperwebTransportPeerId(recipientId);
     if (!transportPeerId) return;
@@ -10973,13 +11368,33 @@ function sendSignedPeerProtocol(peerId, message = {}, options = {}) {
   return hyperwebManager.sendProtocolToPeer(targetPeerId, payload, options || {});
 }
 
+function enqueuePrivateShareNotice(peerId = '', payload = {}) {
+  const targetPeerId = String(peerId || '').trim().toUpperCase();
+  if (!targetPeerId) return { ok: false, message: 'peer_id is required.' };
+  const state = ensureHyperwebSocialState();
+  const peer = (state.known_peers && state.known_peers[targetPeerId]) ? state.known_peers[targetPeerId] : null;
+  const chatPubkey = String((peer && peer.chat_pubkey) || '').trim();
+  if (!chatPubkey) return { ok: false, message: 'Trusted peer chat key is unavailable.' };
+  const encrypted = encryptHyperwebChatEnvelope(payload, chatPubkey);
+  if (!encrypted || !encrypted.ok) return { ok: false, message: String((encrypted && encrypted.message) || 'Unable to encrypt share notice.') };
+  return appendPrivateInboxEntry({
+    kind: 'share_notice',
+    to_fingerprint: targetPeerId,
+    topic_id: getHyperwebInboxTopicForPeer(targetPeerId),
+    payload: {
+      notice_kind: String((payload && payload.notice_kind) || '').trim().toLowerCase(),
+    },
+    encrypted_payload: String(encrypted.text || ''),
+  });
+}
+
 function broadcastPrivateShareInvite(share, room) {
   const recipients = Array.isArray(share && share.recipients) ? share.recipients : [];
   recipients.forEach((recipient) => {
     const peerId = String((recipient && recipient.member_id) || '').trim().toUpperCase();
     if (!peerId) return;
-    sendSignedPeerProtocol(peerId, {
-      type: 'hyperweb:share_invite',
+    enqueuePrivateShareNotice(peerId, {
+      notice_kind: 'invite',
       share_id: String(share.share_id || ''),
       room_id: String(room.room_id || ''),
       topic_id: String(share.topic_id || room.topic_id || ''),
@@ -10997,8 +11412,8 @@ function broadcastPrivateShareInvite(share, room) {
 function sendPrivateShareStatusUpdate(share, recipient) {
   const ownerId = String((share && share.owner_id) || '').trim().toUpperCase();
   if (!ownerId) return false;
-  return sendSignedPeerProtocol(ownerId, {
-    type: 'hyperweb:share_status',
+  return enqueuePrivateShareNotice(ownerId, {
+    notice_kind: 'status',
     share_id: String(share.share_id || ''),
     room_id: String(share.room_id || ''),
     member_id: String((recipient && recipient.member_id) || '').trim().toUpperCase(),
@@ -11010,8 +11425,8 @@ function sendPrivateShareStatusUpdate(share, recipient) {
 function broadcastPrivateShareRevoke(share) {
   getShareParticipantIds(share).forEach((peerId) => {
     if (peerId === String((share && share.owner_id) || '').trim().toUpperCase()) return;
-    sendSignedPeerProtocol(peerId, {
-      type: 'hyperweb:share_revoke',
+    enqueuePrivateShareNotice(peerId, {
+      notice_kind: 'revoke',
       share_id: String(share.share_id || ''),
       room_id: String(share.room_id || ''),
     });
@@ -11021,8 +11436,8 @@ function broadcastPrivateShareRevoke(share) {
 function broadcastPrivateShareDelete(share) {
   getShareParticipantIds(share).forEach((peerId) => {
     if (peerId === String((share && share.owner_id) || '').trim().toUpperCase()) return;
-    sendSignedPeerProtocol(peerId, {
-      type: 'hyperweb:share_delete',
+    enqueuePrivateShareNotice(peerId, {
+      notice_kind: 'delete',
       share_id: String(share.share_id || ''),
       room_id: String(share.room_id || ''),
     });
@@ -11310,6 +11725,8 @@ function acceptHyperwebInviteToken(rawToken = '') {
   };
   writeHyperwebSocialState(state);
   hyperwebSocialState = state;
+  ensureTrustedPeerInboxTopicsJoined();
+  requestPrivateInboxSyncForPeer(String(payload.inviter_fingerprint || '').toUpperCase());
   return { ok: true, invite: payload, relation_id: relId };
 }
 
@@ -11489,6 +11906,8 @@ async function connectHyperweb(options = {}) {
     ? await hyperwebManager.connect(identity)
     : { ok: true, status: hyperwebManager.getStatus(), message: 'Hyperweb disabled in settings.' };
   if (settings.hyperweb_enabled && connectRes && connectRes.ok) {
+    ensureTrustedPeerInboxTopicsJoined();
+    requestAllTrustedPeerInboxSync();
     ensureAccessibleShareTopicsJoined();
   }
   if (connectRes && connectRes.ok && options.broadcastHandshake !== false) {
@@ -19743,6 +20162,7 @@ ipcMain.handle('browser:hyperwebStatus', async () => {
   return {
     ok: true,
     identity,
+    pending_private_entries: countPendingPrivateInboxEntries(),
     ...hyperwebManager.getStatus(),
   };
 });
@@ -19816,6 +20236,7 @@ ipcMain.handle('browser:hyperwebSocialStatus', async () => {
     peers: hyperwebManager.listPeers(),
     connected: !!(status && status.connected),
     peer_count: Number((status && status.peer_count) || 0),
+    pending_private_entries: countPendingPrivateInboxEntries(),
   };
 });
 

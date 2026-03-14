@@ -10018,7 +10018,8 @@ async function refreshHyperwebStatus() {
   const peerCount = Number(res.peer_count || 0);
   const mode = res.connected ? 'connected' : 'disconnected';
   const topicCount = Array.isArray(res.topic_ids) ? res.topic_ids.length : 0;
-  statusNode.textContent = `Hyperweb ${mode} · live peers ${peerCount} · joined topics ${topicCount}`;
+  const pendingPrivate = Number(res.pending_private_entries || 0);
+  statusNode.textContent = `Hyperweb ${mode} · live peers ${peerCount} · joined topics ${topicCount} · pending private ${pendingPrivate}`;
   await refreshTopbarBadges();
 }
 

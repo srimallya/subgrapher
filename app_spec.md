@@ -7,7 +7,7 @@ Subgrapher uses one artifact runtime for authored outputs:
 
 Legacy pygame/viz tabs are removed from active runtime behavior.
 Image analysis is unified: active provider native vision is attempted first, then LM Studio fallback is used when needed.
-Hyperweb now includes E2E chat (`DM` + `room`) over the existing RTC data-channel path.
+Hyperweb now runs as a pure P2P subsystem over Hyperswarm topics with durable trusted-peer inbox delivery for private traffic.
 Workspace surfaces currently include:
 - `web`
 - `artifact`
@@ -90,17 +90,29 @@ Migration is idempotent and safe to run repeatedly.
   - optional top-result `fetch_webpage`
 - Citation gate validation targets deliverable artifact content when an artifact is written, not just final chat summary text.
 
-## Hyperweb Chat + Multi-Device Sync
+## Hyperweb P2P Runtime
 - Transport:
-  - Uses existing Hyperweb RTC data-channel protocol path (no additional transport).
-- Chat protocol:
-  - `hyperweb:chat_message`
-  - `hyperweb:chat_ack` (delivery/read)
+  - Uses Hyperswarm topic discovery and direct peer sockets.
+  - No TTC auth, no relay URL, and no central signaling dependency.
+  - Built-in topics include:
+    - one fixed public topic for public feed/lobby/reference gossip
+    - deterministic per-share topics for trusted-peer shared workspaces
+    - deterministic per-peer inbox topics for durable private delivery
 - Security:
   - sender payloads are signed and verified against known peer signing keys
   - chat body is end-to-end encrypted (X25519 key agreement + AES-256-GCM envelope)
 - UX:
-  - Hyperweb Chat tab supports a public lobby, direct messages, room messaging, online presence, and basic p2p file transfer.
+  - Hyperweb supports a public lobby, public feed/reference discovery, trusted-peer DM, private share notices, and shared rooms.
+  - Public features are best-effort and eventually consistent across online peers.
+  - Trusted-peer private traffic uses durable inbox replay:
+    - DM text
+    - DM file attachments
+    - share invite / accept / decline / revoke / delete notices
+  - Delivery semantics:
+    - `pending`: stored locally and waiting for peer replay/materialization
+    - `delivered`: recipient materialized the inbox entry locally
+    - `read`: recipient explicitly marked the DM as read
+  - Live collaboration updates remain realtime/best-effort on share topics; they are not part of the durable inbox path.
 
 ## Local Context Ingestion + Abstraction
 - Folder mounts are read-only indexed context with recursive traversal and extension filtering.

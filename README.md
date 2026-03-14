@@ -146,9 +146,11 @@ This implementation delivers:
   - user registration tracking
   - job controls (`/jobs`, `/job_create`, `/job_edit`, `/job_pause`, `/job_resume`, `/job_delete`)
 - Hyperweb and sharing:
-  - public feed posting, semantic reference search/import, and snapshot publishing
-  - public lobby chat plus invite-based trusted-peer DM and rooms
-  - private reference sharing with trusted peers and shared rooms
+  - pure P2P Hyperweb runtime over Hyperswarm topic discovery and peer replication
+  - public feed posting, semantic reference search/import, snapshot publishing, and one global public lobby
+  - invite-based trusted-peer identity graph keyed by fingerprint
+  - durable offline delivery for trusted-peer DM text, DM file attachments, and private share notices
+  - private reference sharing with trusted peers and live shared rooms
 - First-run onboarding:
   - default search engine selection (`google`, `bing`, `ddg`)
   - Chrome/Safari import
@@ -227,7 +229,7 @@ For new users:
 - `runtime/agent_runtime.js`: local agentic response engine.
 - `runtime/lumino_path_a.js`: scoped Path A execution runtime.
 - `runtime/lumino_path_b.js`: orchestrator Path B runtime.
-- `runtime/hyperweb_manager.js`: Hyperweb signaling + peer exchange manager.
+- `runtime/hyperweb_manager.js`: Hyperweb P2P swarm transport and topic manager.
 - `runtime/file_indexer.js`: folder ingestion/indexing.
 - `runtime/lumino_crawler.js`: crawl and ingestion pipeline.
 - `runtime/keychain.js`: macOS keychain provider key storage.
