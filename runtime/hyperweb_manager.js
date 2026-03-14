@@ -3,7 +3,7 @@ const { EventEmitter } = require('events');
 
 const Hyperswarm = require('hyperswarm');
 
-const QUERY_TIMEOUT_MS = 2_800;
+const QUERY_TIMEOUT_MS = 7_000;
 const HELLO_MESSAGE_TYPE = '__hyperweb_hello__';
 const TOPIC_MESSAGE_TYPE = '__hyperweb_topics__';
 const PUBLIC_TOPIC_DEFAULT = 'subgrapher:hyperweb:public:v1';
@@ -634,7 +634,7 @@ class HyperwebManager extends EventEmitter {
     }
 
     const fetchId = makeId('hwfetch');
-    const timeoutMs = Math.max(1200, Math.min(12000, Number(options.timeout_ms || 6000) || 6000));
+    const timeoutMs = Math.max(1800, Math.min(20000, Number(options.timeout_ms || 14000) || 14000));
     const waitPromise = new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pendingFetches.delete(fetchId);

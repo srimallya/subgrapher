@@ -285,7 +285,10 @@ const luminoCrawler = new LuminoCrawler({
 });
 let pendingInviteToken = '';
 let hyperwebSocialState = null;
+let hyperwebPrivateSharesState = null;
+let hyperwebPublicSnapshotsState = null;
 const shownHyperwebNotificationIds = new Set();
+const asyncJsonWriteQueueByPath = new Map();
 const appDataProtectionState = {
   locked: false,
   key: null,
@@ -512,12 +515,12 @@ hyperwebManager.on('protocol', (packet) => {
       .filter((item) => String((item && item.from_fingerprint) || '').trim().toUpperCase() === localId)
       .filter((item) => Number((item && item.seq) || 0) > knownSeq);
     entries.forEach((entry) => {
-      hyperwebManager.broadcastTopicProtocol(topicId, {
+      hyperwebManager.sendProtocolToPeer(requesterPeerId, {
         type: 'hyperweb:inbox_entry',
         topic_id: topicId,
         entry,
         ts: nowTs(),
-      });
+      }, { topic_id: topicId });
     });
     return;
   }
@@ -2535,6 +2538,78 @@ function writeJsonStore(filePath, payload) {
   const encryptedText = createEncryptedEnvelopeForJson(rawJson, key);
   fs.writeFileSync(filePath, encryptedText, 'utf8');
   return true;
+}
+
+async function writeJsonStoreAsync(filePath, payload) {
+  const safePayload = (payload && typeof payload === 'object') ? payload : {};
+  if (!isEncryptedDataFilePath(filePath)) {
+    await fs.promises.writeFile(filePath, JSON.stringify(safePayload, null, 2), 'utf8');
+    return true;
+  }
+  const key = getAppDataKeyBuffer({ allowGenerate: true });
+  if (!key) return false;
+  const rawJson = JSON.stringify(safePayload, null, 2);
+  const encryptedText = createEncryptedEnvelopeForJson(rawJson, key);
+  await fs.promises.writeFile(filePath, encryptedText, 'utf8');
+  return true;
+}
+
+function scheduleAsyncJsonStoreWrite(filePath, payload) {
+  const targetPath = String(filePath || '').trim();
+  if (!targetPath) return;
+  const snapshot = cloneValue((payload && typeof payload === 'object') ? payload : {});
+  let entry = asyncJsonWriteQueueByPath.get(targetPath);
+  if (!entry) {
+    entry = {
+      active: false,
+      latestPayload: snapshot,
+      pendingPayload: snapshot,
+      lastError: '',
+    };
+    asyncJsonWriteQueueByPath.set(targetPath, entry);
+  } else {
+    entry.latestPayload = snapshot;
+    entry.pendingPayload = snapshot;
+  }
+  if (entry.active) return;
+  entry.active = true;
+  void (async () => {
+    while (true) {
+      const nextPayload = entry.pendingPayload;
+      entry.pendingPayload = null;
+      if (!nextPayload) break;
+      try {
+        await writeJsonStoreAsync(targetPath, nextPayload);
+        entry.lastError = '';
+      } catch (err) {
+        entry.lastError = String((err && err.message) || 'Async JSON write failed.');
+        console.warn('[hyperweb-state] async write failed:', targetPath, entry.lastError);
+      }
+    }
+    entry.active = false;
+    if (entry.pendingPayload) {
+      scheduleAsyncJsonStoreWrite(targetPath, entry.pendingPayload);
+      return;
+    }
+    if (!entry.lastError) {
+      asyncJsonWriteQueueByPath.delete(targetPath);
+    }
+  })();
+}
+
+function flushAsyncJsonStoreWritesSync(filePath = '') {
+  const targetPath = String(filePath || '').trim();
+  const entries = targetPath
+    ? [[targetPath, asyncJsonWriteQueueByPath.get(targetPath)]]
+    : Array.from(asyncJsonWriteQueueByPath.entries());
+  entries.forEach(([pathKey, entry]) => {
+    if (!entry || !entry.latestPayload) return;
+    try {
+      writeJsonStore(pathKey, entry.latestPayload);
+    } catch (err) {
+      console.warn('[hyperweb-state] sync flush failed:', pathKey, String((err && err.message) || err));
+    }
+  });
 }
 
 function getReferenceRankingPath() {
@@ -7541,11 +7616,21 @@ function createDefaultHyperwebPublicSnapshotsState() {
 }
 
 function readHyperwebPublicSnapshotsState() {
+  if (hyperwebPublicSnapshotsState && typeof hyperwebPublicSnapshotsState === 'object') {
+    return {
+      ...createDefaultHyperwebPublicSnapshotsState(),
+      ...cloneValue(hyperwebPublicSnapshotsState),
+    };
+  }
   const filePath = getHyperwebPublicSnapshotsPath();
   const parsed = readJsonStore(filePath, createDefaultHyperwebPublicSnapshotsState);
-  return {
+  hyperwebPublicSnapshotsState = {
     ...createDefaultHyperwebPublicSnapshotsState(),
     ...(parsed && typeof parsed === 'object' ? parsed : {}),
+  };
+  return {
+    ...createDefaultHyperwebPublicSnapshotsState(),
+    ...cloneValue(hyperwebPublicSnapshotsState),
   };
 }
 
@@ -7554,7 +7639,8 @@ function writeHyperwebPublicSnapshotsState(state) {
     ...createDefaultHyperwebPublicSnapshotsState(),
     ...((state && typeof state === 'object') ? state : {}),
   };
-  writeJsonStore(getHyperwebPublicSnapshotsPath(), next);
+  hyperwebPublicSnapshotsState = cloneValue(next);
+  scheduleAsyncJsonStoreWrite(getHyperwebPublicSnapshotsPath(), next);
 }
 
 function pruneHyperwebPublicSnapshotsState(state) {
@@ -7606,11 +7692,21 @@ function createDefaultHyperwebPrivateSharesState() {
 }
 
 function readHyperwebPrivateSharesState() {
+  if (hyperwebPrivateSharesState && typeof hyperwebPrivateSharesState === 'object') {
+    return {
+      ...createDefaultHyperwebPrivateSharesState(),
+      ...cloneValue(hyperwebPrivateSharesState),
+    };
+  }
   const filePath = getHyperwebPrivateSharesPath();
   const parsed = readJsonStore(filePath, createDefaultHyperwebPrivateSharesState);
-  return {
+  hyperwebPrivateSharesState = {
     ...createDefaultHyperwebPrivateSharesState(),
     ...(parsed && typeof parsed === 'object' ? parsed : {}),
+  };
+  return {
+    ...createDefaultHyperwebPrivateSharesState(),
+    ...cloneValue(hyperwebPrivateSharesState),
   };
 }
 
@@ -7619,7 +7715,8 @@ function writeHyperwebPrivateSharesState(state) {
     ...createDefaultHyperwebPrivateSharesState(),
     ...((state && typeof state === 'object') ? state : {}),
   };
-  writeJsonStore(getHyperwebPrivateSharesPath(), next);
+  hyperwebPrivateSharesState = cloneValue(next);
+  scheduleAsyncJsonStoreWrite(getHyperwebPrivateSharesPath(), next);
 }
 
 function buildHyperwebShareTopicId(shareId = '') {
@@ -8401,22 +8498,34 @@ function createDefaultHyperwebSocialState() {
 
 function writeHyperwebSocialState(state) {
   const payload = (state && typeof state === 'object') ? state : createDefaultHyperwebSocialState();
-  writeJsonStore(getHyperwebSocialPath(), payload);
+  hyperwebSocialState = payload;
+  scheduleAsyncJsonStoreWrite(getHyperwebSocialPath(), payload);
 }
 
 function readHyperwebSocialState() {
+  if (hyperwebSocialState && typeof hyperwebSocialState === 'object') {
+    return {
+      ...createDefaultHyperwebSocialState(),
+      ...cloneValue(hyperwebSocialState),
+    };
+  }
   const filePath = getHyperwebSocialPath();
   if (!fs.existsSync(filePath)) {
     const initial = createDefaultHyperwebSocialState();
     writeHyperwebSocialState(initial);
-    return initial;
+    hyperwebSocialState = cloneValue(initial);
+    return cloneValue(initial);
   }
   const parsed = readJsonStore(filePath, createDefaultHyperwebSocialState);
-  if (!parsed || typeof parsed !== 'object') return createDefaultHyperwebSocialState();
-  return {
+  if (!parsed || typeof parsed !== 'object') {
+    hyperwebSocialState = createDefaultHyperwebSocialState();
+    return cloneValue(hyperwebSocialState);
+  }
+  hyperwebSocialState = {
     ...createDefaultHyperwebSocialState(),
     ...parsed,
   };
+  return cloneValue(hyperwebSocialState);
 }
 
 function getHyperwebIdentityPrivateKeyRaw() {
@@ -11096,6 +11205,17 @@ function createPrivateShare(srId, recipientIds = []) {
   const shareId = makeId('hwshare');
   const roomId = makeId('hwroom');
   const topicId = buildHyperwebShareTopicId(shareId);
+  const referencePayloadBase = sanitizePublicReference(refs[idx]);
+  const referencePayload = {
+    ...referencePayloadBase,
+    tabs: Array.isArray(referencePayloadBase.tabs) ? referencePayloadBase.tabs.slice(0, 12) : [],
+    artifacts: Array.isArray(referencePayloadBase.artifacts)
+      ? referencePayloadBase.artifacts.slice(0, 12).map((artifact) => ({
+        ...artifact,
+        content: String((artifact && artifact.content) || '').slice(0, 4000),
+      }))
+      : [],
+  };
   const recipients = cleanRecipients.map((memberId) => {
     const normalizedId = String(memberId || '').trim().toUpperCase();
     const meta = memberById.get(normalizedId) || { display_name: memberId };
@@ -11135,13 +11255,13 @@ function createPrivateShare(srId, recipientIds = []) {
     crdt_provider: 'yjs',
     updated_at: nowTs(),
   };
-  setRoomYDocContent(room, '');
+  setRoomYDocContent(room, buildPrivateShareSeedContent(referencePayload, String(owner.peer_name || ownerId)));
   refreshRoomParticipantsFromShare(room, share);
   shareState.shares.unshift(share);
   shareState.rooms.unshift(room);
   writeHyperwebPrivateSharesState(shareState);
   ensureShareTopicJoinedById(topicId);
-  broadcastPrivateShareInvite(share, room);
+  broadcastPrivateShareInvite(share, room, referencePayload);
   return { ok: true, share, room };
 }
 
@@ -11204,6 +11324,16 @@ function updateRecipientShareStatus(shareId, nextStatus) {
   }
   state.shares[idx] = share;
   writeHyperwebPrivateSharesState(state);
+  if (room) {
+    materializeWorkspaceReferenceFromPrivateShare({
+      share_id: String(share.share_id || ''),
+      room_id: String(room.room_id || ''),
+      reference_id: String(room.reference_id || share.reference_id || ''),
+      reference_title: String(room.reference_title || share.reference_title || 'Shared reference'),
+      owner_id: String(share.owner_id || '').trim().toUpperCase(),
+      owner_alias: String(share.owner_alias || ''),
+    });
+  }
   sendPrivateShareStatusUpdate(share, target);
   return { ok: true, share };
 }
@@ -11318,6 +11448,14 @@ function openSharedRoomForCurrentUser(roomId) {
   const canRead = ownerId === memberId || (recipient && recipient.read_access !== false);
   if (!canRead) return { ok: false, message: 'No access to this room.' };
   const canWrite = ownerId === memberId || (recipient && String((recipient && (recipient.write_status || recipient.status)) || '') === 'write_accepted');
+  materializeWorkspaceReferenceFromPrivateShare({
+    share_id: String(share.share_id || ''),
+    room_id: String(room.room_id || ''),
+    reference_id: String(room.reference_id || share.reference_id || ''),
+    reference_title: String(room.reference_title || share.reference_title || 'Shared reference'),
+    owner_id: ownerId,
+    owner_alias: String(room.owner_alias || share.owner_alias || ownerId),
+  });
   refreshRoomParticipantsFromShare(room, share);
   ensureShareTopicJoinedById(String(room.topic_id || share.topic_id || ''));
   if (ownerId !== memberId) requestSharedRoomState(room, share);
@@ -11388,7 +11526,7 @@ function enqueuePrivateShareNotice(peerId = '', payload = {}) {
   });
 }
 
-function broadcastPrivateShareInvite(share, room) {
+function broadcastPrivateShareInvite(share, room, referencePayload = null) {
   const recipients = Array.isArray(share && share.recipients) ? share.recipients : [];
   recipients.forEach((recipient) => {
     const peerId = String((recipient && recipient.member_id) || '').trim().toUpperCase();
@@ -11403,6 +11541,7 @@ function broadcastPrivateShareInvite(share, room) {
       owner_id: String(share.owner_id || '').trim().toUpperCase(),
       owner_alias: String(share.owner_alias || ''),
       recipients: Array.isArray(share.recipients) ? share.recipients : [],
+      reference_payload: (referencePayload && typeof referencePayload === 'object') ? referencePayload : null,
       content_state: String(room.ydoc_state || ''),
       crdt_provider: 'yjs',
     });
@@ -11547,7 +11686,13 @@ function upsertIncomingPrivateShare(message = {}) {
   else state.shares.unshift(share);
   writeHyperwebPrivateSharesState(state);
   ensureShareTopicJoinedById(topicId);
-  return { ok: true, share, room };
+  const materialized = materializeWorkspaceReferenceFromPrivateShare(message);
+  return {
+    ok: true,
+    share,
+    room,
+    materialized_reference_id: String((materialized && materialized.reference && materialized.reference.id) || '').trim(),
+  };
 }
 
 function applyIncomingShareStatusMessage(message = {}) {
@@ -16893,6 +17038,122 @@ function createCandidateReferenceFromPublic(item, query = '') {
   return candidate;
 }
 
+function buildPrivateShareSeedContent(referencePayload = {}, ownerAlias = '') {
+  const payload = (referencePayload && typeof referencePayload === 'object') ? referencePayload : {};
+  const title = String(payload.title || 'Shared reference').trim() || 'Shared reference';
+  const intent = String(payload.intent || '').trim();
+  const summary = String(payload.summary_text || '').trim();
+  const owner = String(ownerAlias || '').trim();
+  const lines = [
+    `# ${title}`,
+    '',
+  ];
+  if (owner) lines.push(`Shared by ${owner}`, '');
+  if (intent) lines.push(`Intent: ${intent}`, '');
+  if (summary) lines.push(summary, '');
+  lines.push('Use this room for live collaboration. The workspace reference is a local snapshot of the shared reference.');
+  return lines.join('\n').trim();
+}
+
+function findWorkspaceReferenceByPrivateShare(refs = [], shareId = '', roomId = '') {
+  const targetShareId = String(shareId || '').trim();
+  const targetRoomId = String(roomId || '').trim();
+  if (!targetShareId && !targetRoomId) return { ref: null, idx: -1 };
+  const list = Array.isArray(refs) ? refs : [];
+  const idx = list.findIndex((ref) => {
+    const meta = (ref && ref.source_metadata && typeof ref.source_metadata === 'object') ? ref.source_metadata : {};
+    if (targetShareId && String(meta.private_share_id || meta.share_id || '').trim() === targetShareId) return true;
+    if (targetRoomId && String(meta.private_share_room_id || meta.room_id || '').trim() === targetRoomId) return true;
+    return false;
+  });
+  return idx >= 0 ? { ref: list[idx], idx } : { ref: null, idx: -1 };
+}
+
+function materializeWorkspaceReferenceFromPrivateShare(message = {}) {
+  const shareId = String(message.share_id || '').trim();
+  const roomId = String(message.room_id || '').trim();
+  const ownerId = String(message.owner_id || message.from_peer_id || '').trim().toUpperCase();
+  if (!shareId || !roomId || !ownerId) return { ok: false, message: 'Invalid private share payload.' };
+
+  const refs = getReferences();
+  const existing = findWorkspaceReferenceByPrivateShare(refs, shareId, roomId);
+  if (existing.ref) {
+    return { ok: true, reference: existing.ref, references: refs, created: false, deduped: true };
+  }
+
+  const ownerAlias = String(message.owner_alias || ownerId).trim();
+  const referencePayload = (message.reference_payload && typeof message.reference_payload === 'object')
+    ? message.reference_payload
+    : null;
+
+  let imported = null;
+  if (referencePayload) {
+    const candidate = createCandidateReferenceFromPublic({
+      peer_id: ownerId,
+      peer_name: ownerAlias,
+      reference_id: String(message.reference_id || referencePayload.id || '').trim(),
+      source_type: 'private_share',
+      hyperweb_payload_version: Number((referencePayload && referencePayload.hyperweb_payload_version) || 1),
+      reference_payload: referencePayload,
+    }, '');
+    imported = {
+      ...candidate,
+      title: String(candidate.title || message.reference_title || 'Shared reference').replace(/^\[Public\]\s*/i, '').slice(0, 120),
+      visibility: 'private',
+      is_public_candidate: false,
+      source_type: 'private_share',
+      source_peer_id: ownerId,
+      source_peer_name: ownerAlias,
+      source_candidate_key: '',
+      is_temp_candidate: false,
+      temp_imported_at: 0,
+      source_metadata: {
+        ...(candidate.source_metadata || {}),
+        private_share: true,
+        private_share_id: shareId,
+        private_share_room_id: roomId,
+        owner_id: ownerId,
+        owner_alias: ownerAlias,
+      },
+      updated_at: nowTs(),
+    };
+  } else {
+    imported = createReferenceBase({
+      title: String(message.reference_title || 'Shared reference').slice(0, 120) || 'Shared reference',
+      intent: String(message.intent || '').trim(),
+      relation_type: 'root',
+      current_tab: { url: getDefaultSearchHomeUrl(), title: getDefaultSearchHomeTitle() },
+      visibility: 'private',
+      source_type: 'private_share',
+      source_peer_id: ownerId,
+      source_peer_name: ownerAlias,
+      source_metadata: {
+        private_share: true,
+        private_share_id: shareId,
+        private_share_room_id: roomId,
+        owner_id: ownerId,
+        owner_alias: ownerAlias,
+      },
+    });
+    imported.artifacts = [
+      createArtifact({
+        title: 'Shared Reference.md',
+        type: 'markdown',
+        content: buildPrivateShareSeedContent({
+          title: String(message.reference_title || 'Shared reference'),
+          intent: String(message.intent || ''),
+          summary_text: '',
+        }, ownerAlias),
+      }),
+    ];
+    imported.updated_at = nowTs();
+  }
+
+  refs.unshift(imported);
+  setReferences(refs);
+  return { ok: true, reference: imported, references: refs, created: true };
+}
+
 async function discoverPublicReferences(query, limit = 20) {
   const q = String(query || '').trim();
   if (!q) return [];
@@ -20198,7 +20459,7 @@ ipcMain.handle('browser:hyperwebQuery', async (_event, payload) => {
   const connectedPeers = Number((status && status.peer_count) || 0);
   const result = await hyperwebManager.query(query, {
     limit,
-    timeout_ms: connectedPeers > 0 ? 2800 : 180,
+    timeout_ms: connectedPeers > 0 ? 7000 : 1200,
   });
   return {
     ok: !!(result && result.ok),
@@ -20728,6 +20989,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  flushAsyncJsonStoreWritesSync();
   if (memorySemanticTimer) {
     clearInterval(memorySemanticTimer);
     memorySemanticTimer = null;

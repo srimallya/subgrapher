@@ -7040,8 +7040,27 @@ function setupBrowserEvents() {
     });
   }
   if (typeof api.onHyperwebChat === 'function') {
-    api.onHyperwebChat(() => {
+    api.onHyperwebChat((payload = {}) => {
+      const eventName = String((payload && payload.event) || '').trim().toLowerCase();
+      const inboxKind = String((payload && payload.kind) || '').trim().toLowerCase();
+      const touchesWorkspaceReferences = (
+        eventName === 'share_invite'
+        || eventName === 'share_status'
+        || eventName === 'share_revoke'
+        || eventName === 'share_delete'
+        || (eventName === 'inbox_entry' && inboxKind === 'share_notice')
+      );
       refreshTopbarBadges().catch(() => {});
+      if (touchesWorkspaceReferences) {
+        api.srList().then((refs) => {
+          state.references = Array.isArray(refs) ? refs : state.references;
+          renderReferences();
+          renderWorkspaceTabs();
+          renderContextFiles();
+          renderDiffPanel();
+          syncActiveSurface().catch(() => {});
+        }).catch(() => {});
+      }
       if (state.appView === 'hyperweb' && state.hyperwebActiveTab === 'chat') {
         refreshHyperwebChatData().catch(() => {});
         return;
