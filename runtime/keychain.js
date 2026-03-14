@@ -1,7 +1,7 @@
 const { execFileSync } = require('child_process');
 
 const SERVICE_NAME = 'com.subgrapher.provider-keys';
-const TRUSTCOMMONS_SERVICE = 'com.subgrapher.trustcommons';
+const DEFAULT_SECRET_SERVICE = 'com.subgrapher.secrets';
 const PROVIDER_KEY_SEP = '::';
 
 function isMac() {
@@ -71,7 +71,7 @@ function setLegacyProviderKey(provider, apiKey) {
 function setSecret(account, secret, options = {}) {
   const a = normalizeAccount(account);
   const value = String(secret || '');
-  const service = normalizeService(options.service, TRUSTCOMMONS_SERVICE);
+  const service = normalizeService(options.service, DEFAULT_SECRET_SERVICE);
   if (!a || !value) {
     return { ok: false, message: 'account and secret are required.' };
   }
@@ -88,7 +88,7 @@ function setSecret(account, secret, options = {}) {
 
 function getSecret(account, options = {}) {
   const a = normalizeAccount(account);
-  const service = normalizeService(options.service, TRUSTCOMMONS_SERVICE);
+  const service = normalizeService(options.service, DEFAULT_SECRET_SERVICE);
   if (!a) return { ok: false, message: 'account is required.' };
   if (!isMac()) {
     return { ok: false, message: 'OS keychain storage is only implemented on macOS.' };
@@ -104,7 +104,7 @@ function getSecret(account, options = {}) {
 
 function deleteSecret(account, options = {}) {
   const a = normalizeAccount(account);
-  const service = normalizeService(options.service, TRUSTCOMMONS_SERVICE);
+  const service = normalizeService(options.service, DEFAULT_SECRET_SERVICE);
   if (!a) return { ok: false, message: 'account is required.' };
   if (!isMac()) {
     return { ok: false, message: 'OS keychain storage is only implemented on macOS.' };
@@ -207,5 +207,5 @@ module.exports = {
   setSecret,
   getSecret,
   deleteSecret,
-  TRUSTCOMMONS_SERVICE,
+  DEFAULT_SECRET_SERVICE,
 };

@@ -16,9 +16,9 @@
     "build:release": "npm run build:mac && npm run build:win"
   },
   "dependencies": {
-    "@roamhq/wrtc": "^0.9.1",
-    "socket.io-client": "^4.8.3",
-    "sql.js": "^1.14.0"
+    "hyperswarm": "^4.17.0",
+    "sql.js": "^1.14.0",
+    "yjs": "^13.6.29"
   },
   "devDependencies": {
     "electron": "^28.3.3",

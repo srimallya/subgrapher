@@ -1,8 +1,12 @@
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
-const CHUNK_SIZE = 45_000;
+const Hyperswarm = require('hyperswarm');
+
 const QUERY_TIMEOUT_MS = 2_800;
+const HELLO_MESSAGE_TYPE = '__hyperweb_hello__';
+const TOPIC_MESSAGE_TYPE = '__hyperweb_topics__';
+const PUBLIC_TOPIC_DEFAULT = 'subgrapher:hyperweb:public:v1';
 
 function nowTs() {
   return Date.now();
@@ -18,6 +22,10 @@ function normalizeText(value) {
 
 function toWords(text) {
   return normalizeText(text).toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function topicBuffer(topicId = '') {
+  return crypto.createHash('sha256').update(`subgrapher-hyperweb:${normalizeText(topicId)}`).digest();
 }
 
 function scoreMatch(reference, query) {
@@ -44,55 +52,16 @@ function scoreMatch(reference, query) {
   return Math.max(0, Math.min(0.95, score));
 }
 
-function pickRtcFactory() {
-  if (typeof RTCPeerConnection !== 'undefined') {
-    return {
-      RTCPeerConnection,
-      RTCSessionDescription: typeof RTCSessionDescription !== 'undefined' ? RTCSessionDescription : null,
-      RTCIceCandidate: typeof RTCIceCandidate !== 'undefined' ? RTCIceCandidate : null,
-    };
-  }
-  for (const pkg of ['wrtc', '@roamhq/wrtc']) {
-    try {
-      const wrtc = require(pkg);
-      if (wrtc && wrtc.RTCPeerConnection) {
-        return {
-          RTCPeerConnection: wrtc.RTCPeerConnection,
-          RTCSessionDescription: wrtc.RTCSessionDescription || null,
-          RTCIceCandidate: wrtc.RTCIceCandidate || null,
-        };
-      }
-    } catch (_) {
-      // optional dependency
-    }
-  }
-  return null;
-}
-
-function pickSocketFactory() {
-  try {
-    const mod = require('socket.io-client');
-    if (typeof mod === 'function') return mod;
-    if (mod && typeof mod.io === 'function') return mod.io;
-  } catch (_) {
-    // optional dependency
-  }
-  return null;
-}
-
 class HyperwebManager extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.peerId = makeId('peer');
-    this.identity = null;
-    this.relayUrl = normalizeText(options.relayUrl || '');
+    this.publicTopicId = normalizeText(options.publicTopicId || PUBLIC_TOPIC_DEFAULT) || PUBLIC_TOPIC_DEFAULT;
     this.enabled = options.enabled !== false;
     this.logger = options.logger || console;
+    this.identity = null;
+    this.peerId = '';
 
-    this.socketFactory = pickSocketFactory();
-    this.rtcFactory = pickRtcFactory();
-
-    this.socket = null;
+    this.swarm = null;
     this.connected = false;
     this.lastError = '';
 
@@ -101,10 +70,11 @@ class HyperwebManager extends EventEmitter {
       : (() => []);
 
     this.peerStates = new Map();
+    this.socketStates = new Map();
+    this.joinedTopics = new Map();
     this.pendingQueries = new Map();
     this.pendingFetches = new Map();
     this.suggestionCache = new Map();
-    this.chunkBuffers = new Map();
 
     this.localIndexMeta = [];
     this.localFullById = new Map();
@@ -117,14 +87,15 @@ class HyperwebManager extends EventEmitter {
       display_name: normalizeText(identity.display_name),
       token: String(identity.token || ''),
     };
-  }
-
-  setRelayUrl(url) {
-    this.relayUrl = normalizeText(url);
+    this.peerId = this.identity.identity_id || this.peerId || makeId('peer');
   }
 
   setEnabled(enabled) {
     this.enabled = !!enabled;
+  }
+
+  setRelayUrl() {
+    // relay-based transport was removed in the pure P2P refactor
   }
 
   setPublicIndexProvider(fn) {
@@ -136,18 +107,17 @@ class HyperwebManager extends EventEmitter {
     return {
       ok: true,
       enabled: this.enabled,
-      relay_url: this.relayUrl,
       connected: this.connected,
-      signaling_available: !!this.socketFactory,
-      rtc_available: !!(this.rtcFactory && this.rtcFactory.RTCPeerConnection),
       peer_id: this.peerId,
-      peer_count: peers.filter((item) => item && item.channelOpen).length,
+      peer_count: peers.filter((item) => this._hasOpenSocket(item)).length,
       known_peers: peers.map((item) => ({
         peer_id: item.peerId,
-        display_name: item.displayName,
-        channel_open: !!item.channelOpen,
+        display_name: item.displayName || item.peerId,
+        channel_open: this._hasOpenSocket(item),
         has_index: Array.isArray(item.publicIndex) && item.publicIndex.length > 0,
+        topic_ids: Array.from(item.topicIds || []),
       })),
+      topic_ids: Array.from(this.joinedTopics.keys()),
       suggestions_cached: this.suggestionCache.size,
       last_error: this.lastError,
       identity_id: this.identity && this.identity.identity_id ? this.identity.identity_id : '',
@@ -159,10 +129,11 @@ class HyperwebManager extends EventEmitter {
     return Array.from(this.peerStates.values()).map((item) => ({
       peer_id: item.peerId,
       display_name: item.displayName || item.peerId,
-      channel_open: !!item.channelOpen,
+      channel_open: this._hasOpenSocket(item),
       has_index: Array.isArray(item.publicIndex) && item.publicIndex.length > 0,
       public_index: Array.isArray(item.publicIndex) ? item.publicIndex : [],
       last_seen_at: Number(item.lastSeenAt || 0),
+      topic_ids: Array.from(item.topicIds || []),
     }));
   }
 
@@ -178,11 +149,10 @@ class HyperwebManager extends EventEmitter {
       this.peerStates.set(id, {
         peerId: id,
         displayName: id,
-        pc: null,
-        channel: null,
-        channelOpen: false,
+        sockets: new Set(),
         publicIndex: [],
         lastSeenAt: nowTs(),
+        topicIds: new Set(),
       });
     }
     const state = this.peerStates.get(id);
@@ -190,158 +160,257 @@ class HyperwebManager extends EventEmitter {
     return state;
   }
 
-  _clearPeerState(peerId) {
-    const id = normalizeText(peerId);
-    if (!id) return;
-    const state = this.peerStates.get(id);
+  _getSocketStateById(socketId) {
+    return this.socketStates.get(normalizeText(socketId)) || null;
+  }
+
+  _getSocketStateFromSocket(socket) {
+    for (const state of this.socketStates.values()) {
+      if (state.socket === socket) return state;
+    }
+    return null;
+  }
+
+  _hasOpenSocket(peerState) {
+    const sockets = peerState && peerState.sockets instanceof Set ? Array.from(peerState.sockets) : [];
+    return sockets.some((socketId) => {
+      const socketState = this._getSocketStateById(socketId);
+      return !!(socketState && socketState.open && socketState.socket);
+    });
+  }
+
+  _resolveTopicIds(details = {}) {
+    const refs = [];
+    if (Array.isArray(details.topics)) refs.push(...details.topics);
+    if (details.peerInfo && Array.isArray(details.peerInfo.topics)) refs.push(...details.peerInfo.topics);
+    const ids = [];
+    refs.forEach((item) => {
+      const hex = Buffer.isBuffer(item) ? item.toString('hex') : normalizeText(item);
+      if (!hex) return;
+      for (const [topicId, entry] of this.joinedTopics.entries()) {
+        if (entry && entry.key && Buffer.isBuffer(entry.key) && entry.key.toString('hex') === hex) {
+          ids.push(topicId);
+        }
+      }
+    });
+    return Array.from(new Set(ids));
+  }
+
+  async _ensureSwarm() {
+    if (this.swarm) return this.swarm;
+    this.swarm = new Hyperswarm();
+    this.swarm.on('connection', (socket, details) => {
+      this._handleConnection(socket, details || {});
+    });
+    this.swarm.on('error', (err) => {
+      this._setError(err && err.message ? err.message : 'Hyperswarm error.');
+    });
+    return this.swarm;
+  }
+
+  _buildHelloMessage() {
+    return {
+      type: HELLO_MESSAGE_TYPE,
+      peer_id: this.peerId,
+      identity_id: this.identity && this.identity.identity_id ? this.identity.identity_id : this.peerId,
+      display_name: this.identity && this.identity.display_name ? this.identity.display_name : this.peerId,
+      topic_ids: Array.from(this.joinedTopics.keys()),
+      ts: nowTs(),
+    };
+  }
+
+  _sendRaw(socketState, message) {
+    if (!socketState || !socketState.open || !socketState.socket) return false;
+    try {
+      socketState.socket.write(`${JSON.stringify(message || {})}\n`);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _handleConnection(socket, details = {}) {
+    const socketId = makeId('hwsock');
+    const socketState = {
+      socketId,
+      socket,
+      open: true,
+      buffer: '',
+      peerId: '',
+      topicIds: new Set(this._resolveTopicIds(details)),
+    };
+    this.socketStates.set(socketId, socketState);
+
+    socket.on('data', (chunk) => {
+      const state = this._getSocketStateById(socketId);
+      if (!state) return;
+      state.buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+      let idx = state.buffer.indexOf('\n');
+      while (idx >= 0) {
+        const line = state.buffer.slice(0, idx).trim();
+        state.buffer = state.buffer.slice(idx + 1);
+        if (line) {
+          try {
+            const parsed = JSON.parse(line);
+            this._handleIncomingMessage(socketId, parsed);
+          } catch (_) {
+            // ignore malformed packets
+          }
+        }
+        idx = state.buffer.indexOf('\n');
+      }
+    });
+
+    socket.on('error', (err) => {
+      this._setError(err && err.message ? err.message : 'Peer socket error.');
+    });
+
+    socket.on('close', () => {
+      this._dropSocket(socketId);
+    });
+
+    this._sendRaw(socketState, this._buildHelloMessage());
+  }
+
+  _dropSocket(socketId) {
+    const state = this._getSocketStateById(socketId);
     if (!state) return;
-    try {
-      if (state.channel) {
-        state.channel.onopen = null;
-        state.channel.onclose = null;
-        state.channel.onerror = null;
-        state.channel.onmessage = null;
-        state.channel.close();
+    state.open = false;
+    if (state.peerId) {
+      const peerState = this.peerStates.get(state.peerId);
+      if (peerState) {
+        peerState.sockets.delete(socketId);
+        if (!this._hasOpenSocket(peerState)) {
+          peerState.publicIndex = [];
+          peerState.topicIds = new Set();
+        }
       }
-    } catch (_) {
-      // noop
     }
-    try {
-      if (state.pc) {
-        state.pc.onicecandidate = null;
-        state.pc.ondatachannel = null;
-        state.pc.onconnectionstatechange = null;
-        state.pc.close();
-      }
-    } catch (_) {
-      // noop
+    this.socketStates.delete(socketId);
+    this.emit('status', this.getStatus());
+  }
+
+  _registerPeerSocket(socketId, peerId, displayName = '', topicIds = []) {
+    const socketState = this._getSocketStateById(socketId);
+    if (!socketState) return null;
+    socketState.peerId = peerId;
+    (Array.isArray(topicIds) ? topicIds : []).forEach((topicId) => {
+      const clean = normalizeText(topicId);
+      if (clean) socketState.topicIds.add(clean);
+    });
+    const peerState = this._ensurePeerState(peerId);
+    if (!peerState) return null;
+    peerState.displayName = normalizeText(displayName) || peerState.displayName || peerId;
+    peerState.sockets.add(socketId);
+    socketState.topicIds.forEach((topicId) => peerState.topicIds.add(topicId));
+    peerState.lastSeenAt = nowTs();
+    return peerState;
+  }
+
+  _handleIncomingMessage(socketId, message) {
+    const msg = (message && typeof message === 'object') ? message : null;
+    if (!msg) return;
+    const type = normalizeText(msg.type);
+    const socketState = this._getSocketStateById(socketId);
+    if (!socketState) return;
+
+    if (type === HELLO_MESSAGE_TYPE) {
+      const peerId = normalizeText(msg.identity_id || msg.peer_id);
+      if (!peerId || peerId === this.peerId) return;
+      const peerState = this._registerPeerSocket(socketId, peerId, msg.display_name, msg.topic_ids);
+      if (!peerState) return;
+      this.emit('peer_seen', {
+        peer_id: peerId,
+        display_name: peerState.displayName,
+      });
+      this.emit('status', this.getStatus());
+      return;
     }
-    this.peerStates.delete(id);
+
+    if (type === TOPIC_MESSAGE_TYPE) {
+      const peerId = normalizeText(msg.peer_id || socketState.peerId);
+      if (!peerId) return;
+      const peerState = this._registerPeerSocket(socketId, peerId, msg.display_name, msg.topic_ids);
+      if (!peerState) return;
+      peerState.lastSeenAt = nowTs();
+      this.emit('status', this.getStatus());
+      return;
+    }
+
+    const peerId = normalizeText(socketState.peerId || msg.peer_id);
+    if (!peerId) return;
+    this._handleProtocolMessage(peerId, msg);
   }
 
   async connect(identity = null) {
     if (identity) this.setIdentity(identity);
     if (!this.enabled) return { ok: true, status: this.getStatus(), message: 'Hyperweb is disabled in settings.' };
-    if (!this.relayUrl) return { ok: false, status: this.getStatus(), message: 'Hyperweb relay URL is not configured.' };
+    if (!this.peerId) {
+      this._setError('Hyperweb identity is missing.');
+      return { ok: false, status: this.getStatus(), message: 'Hyperweb identity is missing.' };
+    }
 
     await this.refreshLocalPublicIndex();
-
-    if (!this.socketFactory) {
-      this.connected = false;
-      this._setError('socket.io-client is not installed; Hyperweb relay signaling unavailable.');
-      return {
-        ok: true,
-        degraded: true,
-        status: this.getStatus(),
-        message: 'Running in local-only Hyperweb mode. Install socket.io-client to enable peer signaling.',
-      };
-    }
-
-    if (this.socket && this.connected) {
-      return { ok: true, status: this.getStatus(), already_connected: true };
-    }
-
-    if (this.socket) {
-      try { this.socket.disconnect(); } catch (_) { /* noop */ }
-      this.socket = null;
-    }
-
-    const socket = this.socketFactory(this.relayUrl, {
-      transports: ['websocket'],
-      timeout: 8000,
-      reconnection: true,
-      reconnectionAttempts: 6,
-    });
-
-    this.socket = socket;
-
-    socket.on('connect', () => {
-      this.connected = true;
-      this.lastError = '';
-      socket.emit('hyperweb:join', {
-        peer_id: this.peerId,
-        identity_id: this.identity && this.identity.identity_id ? this.identity.identity_id : '',
-        display_name: this.identity && this.identity.display_name ? this.identity.display_name : this.peerId,
-      });
-      this.announcePublicIndex().catch(() => {});
-      this.emit('status', this.getStatus());
-    });
-
-    socket.on('disconnect', () => {
-      this.connected = false;
-      this.emit('status', this.getStatus());
-    });
-
-    socket.on('connect_error', (err) => {
-      this.connected = false;
-      this._setError(err && err.message ? err.message : 'Unable to connect to Hyperweb relay.');
-      this.emit('status', this.getStatus());
-    });
-
-    socket.on('hyperweb:peer_list', async (payload) => {
-      const peers = Array.isArray(payload && payload.peers) ? payload.peers : [];
-      for (const peer of peers) {
-        const peerId = normalizeText(peer && peer.peer_id);
-        if (!peerId || peerId === this.peerId) continue;
-        const state = this._ensurePeerState(peerId);
-        if (state) state.displayName = normalizeText(peer && peer.display_name) || peerId;
-        await this._ensureRtcConnection(peerId, { initiator: true });
-        this.emit('peer_seen', {
-          peer_id: peerId,
-          display_name: normalizeText(peer && peer.display_name) || peerId,
-        });
-      }
-    });
-
-    socket.on('hyperweb:peer_joined', async (payload) => {
-      const peerId = normalizeText(payload && payload.peer_id);
-      if (!peerId || peerId === this.peerId) return;
-      const state = this._ensurePeerState(peerId);
-      if (state) state.displayName = normalizeText(payload && payload.display_name) || peerId;
-      await this._ensureRtcConnection(peerId, { initiator: this.peerId < peerId });
-      this.emit('peer_seen', {
-        peer_id: peerId,
-        display_name: normalizeText(payload && payload.display_name) || peerId,
-      });
-    });
-
-    socket.on('hyperweb:peer_left', (payload) => {
-      const peerId = normalizeText(payload && payload.peer_id);
-      if (!peerId) return;
-      this._clearPeerState(peerId);
-      this.emit('status', this.getStatus());
-    });
-
-    socket.on('hyperweb:signal', async (payload) => {
-      await this._handleRelaySignal(payload || {});
-    });
-
-    socket.on('hyperweb:announce_public_index', (payload) => {
-      const peerId = normalizeText(payload && payload.peer_id);
-      if (!peerId || peerId === this.peerId) return;
-      const state = this._ensurePeerState(peerId);
-      if (!state) return;
-      state.publicIndex = Array.isArray(payload && payload.index) ? payload.index : [];
-      state.displayName = normalizeText(payload && payload.display_name) || state.displayName || peerId;
-      state.lastSeenAt = nowTs();
-      this.emit('status', this.getStatus());
-    });
-
+    await this._ensureSwarm();
+    await this.joinTopic(this.publicTopicId);
+    this.connected = true;
+    this.lastError = '';
+    await this.announcePublicIndex();
+    this.emit('status', this.getStatus());
     return { ok: true, status: this.getStatus() };
   }
 
+  async joinTopic(topicId) {
+    const cleanTopicId = normalizeText(topicId);
+    if (!cleanTopicId) return { ok: false, message: 'topic_id is required.' };
+    await this._ensureSwarm();
+    const existing = this.joinedTopics.get(cleanTopicId);
+    if (existing) return { ok: true, topic_id: cleanTopicId, joined: false };
+    const key = topicBuffer(cleanTopicId);
+    const discovery = this.swarm.join(key, { server: true, client: true });
+    if (discovery && typeof discovery.flushed === 'function') {
+      await discovery.flushed();
+    }
+    this.joinedTopics.set(cleanTopicId, { topicId: cleanTopicId, key, discovery });
+    this._broadcastTopicUpdate();
+    this.emit('status', this.getStatus());
+    return { ok: true, topic_id: cleanTopicId, joined: true };
+  }
+
+  async leaveTopic(topicId) {
+    const cleanTopicId = normalizeText(topicId);
+    const existing = this.joinedTopics.get(cleanTopicId);
+    if (!existing) return { ok: true, topic_id: cleanTopicId, left: false };
+    try {
+      if (existing.discovery && typeof existing.discovery.destroy === 'function') {
+        await existing.discovery.destroy();
+      }
+    } catch (_) {
+      // noop
+    }
+    this.joinedTopics.delete(cleanTopicId);
+    this._broadcastTopicUpdate();
+    this.emit('status', this.getStatus());
+    return { ok: true, topic_id: cleanTopicId, left: true };
+  }
+
   disconnect() {
-    if (this.socket) {
+    for (const state of this.socketStates.values()) {
       try {
-        this.socket.disconnect();
+        if (state.socket) state.socket.destroy();
       } catch (_) {
         // noop
       }
-      this.socket = null;
     }
+    this.socketStates.clear();
+    this.peerStates.clear();
+    const swarm = this.swarm;
+    this.swarm = null;
+    this.joinedTopics.clear();
     this.connected = false;
-    for (const peerId of Array.from(this.peerStates.keys())) {
-      this._clearPeerState(peerId);
+    this.lastError = '';
+    if (swarm) {
+      swarm.destroy().catch(() => {});
     }
     this.emit('status', this.getStatus());
     return { ok: true, status: this.getStatus() };
@@ -387,18 +456,26 @@ class HyperwebManager extends EventEmitter {
     const payload = {
       type: 'hyperweb:announce_public_index',
       peer_id: this.peerId,
-      identity_id: this.identity && this.identity.identity_id ? this.identity.identity_id : '',
+      identity_id: this.identity && this.identity.identity_id ? this.identity.identity_id : this.peerId,
       display_name: this.identity && this.identity.display_name ? this.identity.display_name : this.peerId,
       index: this.localIndexMeta,
       ts: nowTs(),
     };
-
-    this._broadcastProtocol(payload);
-    if (this.socket && this.connected) {
-      this.socket.emit('hyperweb:announce_public_index', payload);
-    }
-
+    this.broadcastProtocol(payload);
     return { ok: true, index_count: this.localIndexMeta.length };
+  }
+
+  _broadcastTopicUpdate() {
+    const message = {
+      type: TOPIC_MESSAGE_TYPE,
+      peer_id: this.peerId,
+      display_name: this.identity && this.identity.display_name ? this.identity.display_name : this.peerId,
+      topic_ids: Array.from(this.joinedTopics.keys()),
+      ts: nowTs(),
+    };
+    for (const socketState of this.socketStates.values()) {
+      this._sendRaw(socketState, message);
+    }
   }
 
   _trackSuggestion(suggestion) {
@@ -473,7 +550,6 @@ class HyperwebManager extends EventEmitter {
 
     const queryId = makeId('hwquery');
     const pending = {
-      query,
       results: [],
       resolve: null,
       done: false,
@@ -491,8 +567,7 @@ class HyperwebManager extends EventEmitter {
     }, timeoutMs);
 
     this.pendingQueries.set(queryId, pending);
-
-    this._broadcastProtocol({
+    this.broadcastProtocol({
       type: 'hyperweb:query',
       query_id: queryId,
       query,
@@ -501,19 +576,7 @@ class HyperwebManager extends EventEmitter {
       ts: nowTs(),
     });
 
-    if (this.socket && this.connected) {
-      this.socket.emit('hyperweb:query', {
-        type: 'hyperweb:query',
-        query_id: queryId,
-        query,
-        limit,
-        requester_peer_id: this.peerId,
-        ts: nowTs(),
-      });
-    }
-
     const remoteResults = await donePromise;
-
     const combined = [];
     const dedupe = new Set();
     const pushSuggestion = (item) => {
@@ -526,7 +589,6 @@ class HyperwebManager extends EventEmitter {
 
     localSuggestions.forEach(pushSuggestion);
     remoteResults.forEach((item) => pushSuggestion(this._trackSuggestion(item)));
-
     combined.sort((a, b) => Number(b && b.score || 0) - Number(a && a.score || 0));
     const trimmed = combined.slice(0, limit);
 
@@ -573,7 +635,6 @@ class HyperwebManager extends EventEmitter {
 
     const fetchId = makeId('hwfetch');
     const timeoutMs = Math.max(1200, Math.min(12000, Number(options.timeout_ms || 6000) || 6000));
-
     const waitPromise = new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pendingFetches.delete(fetchId);
@@ -582,8 +643,6 @@ class HyperwebManager extends EventEmitter {
       this.pendingFetches.set(fetchId, {
         resolve,
         timer,
-        peerId,
-        referenceId,
       });
     });
 
@@ -614,104 +673,49 @@ class HyperwebManager extends EventEmitter {
     };
   }
 
-  _serializeAndSend(channel, message) {
-    if (!channel || channel.readyState !== 'open') return false;
-    const raw = JSON.stringify(message || {});
-    if (raw.length <= CHUNK_SIZE) {
-      channel.send(raw);
-      return true;
+  _pickPeerSocket(peerId, topicId = '') {
+    const peerState = this.peerStates.get(normalizeText(peerId));
+    if (!peerState) return null;
+    const preferredTopic = normalizeText(topicId);
+    let fallback = null;
+    for (const socketId of peerState.sockets) {
+      const socketState = this._getSocketStateById(socketId);
+      if (!socketState || !socketState.open) continue;
+      if (preferredTopic && socketState.topicIds.has(preferredTopic)) return socketState;
+      if (!fallback) fallback = socketState;
     }
-
-    const chunkId = makeId('hwchunk');
-    const total = Math.ceil(raw.length / CHUNK_SIZE);
-    for (let seq = 0; seq < total; seq += 1) {
-      const start = seq * CHUNK_SIZE;
-      const part = raw.slice(start, start + CHUNK_SIZE);
-      channel.send(JSON.stringify({
-        type: 'hyperweb:chunk',
-        chunk_id: chunkId,
-        seq,
-        total,
-        payload: part,
-      }));
-    }
-    return true;
+    return fallback;
   }
 
-  _handleIncomingRaw(peerId, rawData) {
-    if (!rawData) return;
-    let parsed = null;
-    try {
-      parsed = JSON.parse(String(rawData));
-    } catch (_) {
-      return;
-    }
-
-    if (!parsed || typeof parsed !== 'object') return;
-
-    if (parsed.type === 'hyperweb:chunk') {
-      const chunkId = normalizeText(parsed.chunk_id);
-      const seq = Number(parsed.seq);
-      const total = Number(parsed.total);
-      if (!chunkId || !Number.isFinite(seq) || !Number.isFinite(total) || total <= 0) return;
-      if (!this.chunkBuffers.has(chunkId)) {
-        this.chunkBuffers.set(chunkId, {
-          peerId,
-          total,
-          parts: new Array(total),
-          updatedAt: nowTs(),
-        });
-      }
-      const slot = this.chunkBuffers.get(chunkId);
-      slot.parts[seq] = String(parsed.payload || '');
-      slot.updatedAt = nowTs();
-      const ready = slot.parts.filter((part) => typeof part === 'string').length;
-      if (ready >= slot.total) {
-        const merged = slot.parts.join('');
-        this.chunkBuffers.delete(chunkId);
-        this._handleIncomingRaw(peerId, merged);
-      }
-      return;
-    }
-
-    this._handleProtocolMessage(peerId, parsed);
+  _sendProtocolToPeer(peerId, message, options = {}) {
+    const socketState = this._pickPeerSocket(peerId, options.topic_id);
+    if (!socketState) return false;
+    return this._sendRaw(socketState, message);
   }
 
-  _sendProtocolToPeer(peerId, message) {
-    const normalizedPeerId = normalizeText(peerId);
-    const state = this.peerStates.get(normalizedPeerId);
-    if (state && state.channel && state.channel.readyState === 'open') {
-      return this._serializeAndSend(state.channel, message);
-    }
-    if (this.socket && this.connected && normalizedPeerId) {
-      try {
-        this.socket.emit('hyperweb:signal', {
-          to: normalizedPeerId,
-          from: this.peerId,
-          signal: {
-            protocol: message,
-          },
-        });
-        return true;
-      } catch (_) {
-        return false;
-      }
-    }
-    return false;
-  }
-
-  _broadcastProtocol(message) {
-    for (const [peerId] of this.peerStates.entries()) {
-      this._sendProtocolToPeer(peerId, message);
+  _broadcastProtocol(message, options = {}) {
+    const topicId = normalizeText(options.topic_id);
+    const sentPeers = new Set();
+    for (const socketState of this.socketStates.values()) {
+      if (!socketState || !socketState.open || !socketState.peerId) continue;
+      if (topicId && !socketState.topicIds.has(topicId)) continue;
+      if (sentPeers.has(socketState.peerId)) continue;
+      sentPeers.add(socketState.peerId);
+      this._sendRaw(socketState, message);
     }
   }
 
-  sendProtocolToPeer(peerId, message) {
-    return this._sendProtocolToPeer(peerId, message);
+  sendProtocolToPeer(peerId, message, options = {}) {
+    return this._sendProtocolToPeer(peerId, message, options);
   }
 
-  broadcastProtocol(message) {
-    this._broadcastProtocol(message);
+  broadcastProtocol(message, options = {}) {
+    this._broadcastProtocol(message, options);
+    return { ok: true };
+  }
+
+  broadcastTopicProtocol(topicId, message) {
+    this._broadcastProtocol(message, { topic_id: topicId });
     return { ok: true };
   }
 
@@ -738,7 +742,6 @@ class HyperwebManager extends EventEmitter {
       const q = normalizeText(message.query);
       if (!q) return;
       const limit = Math.max(1, Math.min(80, Number(message.limit || 20) || 20));
-
       const matches = [];
       for (const ref of this.localFullById.values()) {
         const score = scoreMatch(ref, q);
@@ -751,7 +754,6 @@ class HyperwebManager extends EventEmitter {
         }));
       }
       matches.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
-
       this._sendProtocolToPeer(peerId, {
         type: 'hyperweb:query_result',
         query_id: normalizeText(message.query_id),
@@ -789,7 +791,6 @@ class HyperwebManager extends EventEmitter {
       if (!referenceId || !fetchId) return;
       const ref = this.localFullById.get(referenceId);
       if (!ref) return;
-
       this._sendProtocolToPeer(peerId, {
         type: 'hyperweb:reference_payload',
         fetch_id: fetchId,
@@ -834,146 +835,6 @@ class HyperwebManager extends EventEmitter {
       peer_id: normalizeText(peerId),
       message,
     });
-  }
-
-  _attachDataChannel(peerId, channel) {
-    if (!channel) return;
-    const state = this._ensurePeerState(peerId);
-    if (!state) return;
-
-    state.channel = channel;
-    state.channelOpen = channel.readyState === 'open';
-
-    channel.onopen = () => {
-      state.channelOpen = true;
-      this.emit('status', this.getStatus());
-      this.announcePublicIndex().catch(() => {});
-    };
-
-    channel.onclose = () => {
-      state.channelOpen = false;
-      this.emit('status', this.getStatus());
-    };
-
-    channel.onerror = () => {
-      state.channelOpen = false;
-      this.emit('status', this.getStatus());
-    };
-
-    channel.onmessage = (event) => {
-      this._handleIncomingRaw(peerId, event && event.data);
-    };
-  }
-
-  async _ensureRtcConnection(peerId, options = {}) {
-    const state = this._ensurePeerState(peerId);
-    if (!state) return;
-
-    if (!this.rtcFactory || !this.rtcFactory.RTCPeerConnection) {
-      this._setError('WebRTC factory unavailable. Install wrtc or @roamhq/wrtc for main-process RTC support.');
-      return;
-    }
-
-    if (state.pc) return;
-
-    const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = this.rtcFactory;
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-    });
-
-    state.pc = pc;
-
-    pc.onicecandidate = (event) => {
-      if (!event || !event.candidate || !this.socket || !this.connected) return;
-      this.socket.emit('hyperweb:signal', {
-        to: peerId,
-        from: this.peerId,
-        signal: { candidate: event.candidate },
-      });
-    };
-
-    pc.onconnectionstatechange = () => {
-      const status = String(pc.connectionState || '').toLowerCase();
-      if (status === 'failed' || status === 'closed' || status === 'disconnected') {
-        state.channelOpen = false;
-      }
-      this.emit('status', this.getStatus());
-    };
-
-    pc.ondatachannel = (event) => {
-      if (!event || !event.channel) return;
-      this._attachDataChannel(peerId, event.channel);
-    };
-
-    if (options.initiator) {
-      const channel = pc.createDataChannel('hyperweb');
-      this._attachDataChannel(peerId, channel);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      if (this.socket && this.connected) {
-        this.socket.emit('hyperweb:signal', {
-          to: peerId,
-          from: this.peerId,
-          signal: {
-            description: pc.localDescription,
-          },
-        });
-      }
-    }
-
-    state.rtcSessionTypes = { RTCSessionDescription, RTCIceCandidate };
-  }
-
-  async _handleRelaySignal(payload = {}) {
-    const from = normalizeText(payload.from);
-    const to = normalizeText(payload.to);
-    const signal = payload.signal && typeof payload.signal === 'object' ? payload.signal : {};
-
-    if (!from || from === this.peerId) return;
-    if (to && to !== this.peerId) return;
-
-    if (signal.protocol && typeof signal.protocol === 'object') {
-      await this._handleProtocolMessage(from, signal.protocol);
-      return;
-    }
-
-    await this._ensureRtcConnection(from, { initiator: false });
-    const state = this.peerStates.get(from);
-    if (!state || !state.pc) return;
-
-    const pc = state.pc;
-    const RTCSessionDescription = (state.rtcSessionTypes && state.rtcSessionTypes.RTCSessionDescription)
-      || (this.rtcFactory && this.rtcFactory.RTCSessionDescription)
-      || null;
-    const RTCIceCandidate = (state.rtcSessionTypes && state.rtcSessionTypes.RTCIceCandidate)
-      || (this.rtcFactory && this.rtcFactory.RTCIceCandidate)
-      || null;
-
-    if (signal.description) {
-      const remoteDescription = RTCSessionDescription
-        ? new RTCSessionDescription(signal.description)
-        : signal.description;
-      await pc.setRemoteDescription(remoteDescription);
-      if (String(signal.description.type || '').toLowerCase() === 'offer') {
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        if (this.socket && this.connected) {
-          this.socket.emit('hyperweb:signal', {
-            to: from,
-            from: this.peerId,
-            signal: {
-              description: pc.localDescription,
-            },
-          });
-        }
-      }
-      return;
-    }
-
-    if (signal.candidate) {
-      const candidate = RTCIceCandidate ? new RTCIceCandidate(signal.candidate) : signal.candidate;
-      await pc.addIceCandidate(candidate);
-    }
   }
 }
 

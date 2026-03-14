@@ -58,6 +58,7 @@ const state = {
   },
   onboardingComplete: false,
   referenceCollapsed: {},
+  referenceExpandedSrId: null,
   referenceInlineRename: { srId: null, draft: '' },
   referenceSearchMatchedIds: new Set(),
   referenceColorFilter: { mode: 'all', selected: new Set() },
@@ -1067,6 +1068,13 @@ function persistReferenceCollapsedState() {
   } catch (_) {
     // noop
   }
+}
+
+function toggleReferenceInlineExpansion(srId = '') {
+  const targetId = String(srId || '').trim();
+  if (!targetId) return;
+  state.referenceExpandedSrId = state.referenceExpandedSrId === targetId ? null : targetId;
+  renderReferences();
 }
 
 function loadBrowserMarkerModePreference() {
@@ -2338,6 +2346,7 @@ function renderReferences() {
     const isSearchHit = query && matchedIds.has(srId);
     const isInlineRename = state.referenceInlineRename.srId === srId;
     const isAudible = !!state.audibleByRef.get(srId);
+    const isExpanded = String(state.referenceExpandedSrId || '') === srId;
     const colorTag = sanitizeReferenceColorTag(ref && ref.color_tag);
     const isColorPickerOpen = String((state.referenceColorPicker && state.referenceColorPicker.openSrId) || '') === srId;
     const agentMeta = (ref && ref.agent_meta && typeof ref.agent_meta === 'object') ? ref.agent_meta : {};
@@ -2391,7 +2400,7 @@ function renderReferences() {
       <div class="reference-tree-node" data-sr-id="${escapeHtml(srId)}" data-level="${level}">
         <div class="reference-item-row" data-level="${level}">
           <button type="button" class="reference-tree-caret ${hasChildren ? '' : 'placeholder'}" data-action="toggle-collapse" data-sr-id="${escapeHtml(srId)}">${hasChildren ? (collapsed ? '▸' : '▾') : ''}</button>
-          <div class="reference-item ${isActive ? 'active' : ''} ${isSearchHit ? 'search-hit' : ''} ${colorTag ? `color-${escapeHtml(colorTag)}` : ''}" data-ref-id="${escapeHtml(srId)}">
+          <div class="reference-item ${isActive ? 'active' : ''} ${isExpanded ? 'expanded' : ''} ${isSearchHit ? 'search-hit' : ''} ${colorTag ? `color-${escapeHtml(colorTag)}` : ''}" data-ref-id="${escapeHtml(srId)}">
             ${titleMarkup}
             <div class="reference-sub">${escapeHtml(subtitle)}</div>
             <div class="reference-actions">${actionButtons}</div>
@@ -2435,12 +2444,35 @@ function renderReferences() {
     });
   });
 
+  let pendingReferenceClick = null;
   list.querySelectorAll('.reference-item').forEach((node) => {
     node.addEventListener('click', async (event) => {
       if (event.target && event.target.closest('button')) return;
       if (event.target && event.target.closest('input[data-action="rename-input"]')) return;
       const srId = String(node.getAttribute('data-ref-id') || '').trim();
       if (!srId) return;
+      if (pendingReferenceClick) {
+        window.clearTimeout(pendingReferenceClick.timerId);
+        pendingReferenceClick = null;
+      }
+      pendingReferenceClick = {
+        srId,
+        timerId: window.setTimeout(() => {
+          toggleReferenceInlineExpansion(srId);
+          pendingReferenceClick = null;
+        }, 220),
+      };
+    });
+    node.addEventListener('dblclick', async (event) => {
+      if (event.target && event.target.closest('button')) return;
+      if (event.target && event.target.closest('input[data-action="rename-input"]')) return;
+      const srId = String(node.getAttribute('data-ref-id') || '').trim();
+      if (!srId) return;
+      if (pendingReferenceClick && pendingReferenceClick.srId === srId) {
+        window.clearTimeout(pendingReferenceClick.timerId);
+        pendingReferenceClick = null;
+      }
+      state.referenceExpandedSrId = srId;
       setActiveReference(srId);
     });
   });
@@ -7012,6 +7044,13 @@ function setupBrowserEvents() {
       refreshTopbarBadges().catch(() => {});
       if (state.appView === 'hyperweb' && state.hyperwebActiveTab === 'chat') {
         refreshHyperwebChatData().catch(() => {});
+        return;
+      }
+      if (state.appView === 'hyperweb') {
+        refreshHyperwebFeedAndReferences().catch(() => {});
+      }
+      if (state.appView === 'private') {
+        refreshPrivateSharesData().catch(() => {});
       }
     });
   }
@@ -8968,7 +9007,6 @@ function normalizeSettingsDraft(raw = {}) {
     telegram_allowed_usernames: telegramAllowedUsernames,
     telegram_poll_interval_sec: Number(src.telegram_poll_interval_sec || 2),
     hyperweb_enabled: !!src.hyperweb_enabled,
-    hyperweb_relay_url: String(src.hyperweb_relay_url || '').trim(),
     hyperweb_display_name: String(src.hyperweb_display_name || '').trim(),
     crawler_mode: String(src.crawler_mode || 'broad').trim().toLowerCase(),
     crawler_markdown_first: !!src.crawler_markdown_first,
@@ -8999,7 +9037,6 @@ function validateSettingsDraft(draft = {}) {
   if (!Number.isFinite(d.mail_poll_interval_sec) || d.mail_poll_interval_sec < 120 || d.mail_poll_interval_sec > 900) {
     errors.mail_poll_interval_sec = 'Mail polling interval must be 120..900 sec.';
   }
-  if (!/^https?:\/\//i.test(d.hyperweb_relay_url || '')) errors.hyperweb_relay_url = 'Relay URL must start with http:// or https://';
   if (!['safe', 'broad'].includes(d.crawler_mode)) errors.crawler_mode = 'Invalid crawler mode.';
   if (!['respect', 'ignore'].includes(d.crawler_robots_default)) errors.crawler_robots_default = 'Invalid robots setting.';
   if (!Number.isFinite(d.crawler_depth_default) || d.crawler_depth_default < 1 || d.crawler_depth_default > 6) {
@@ -9979,10 +10016,9 @@ async function refreshHyperwebStatus() {
   }
   state.hyperwebStatus = res;
   const peerCount = Number(res.peer_count || 0);
-  const relay = String(res.relay_url || '');
   const mode = res.connected ? 'connected' : 'disconnected';
-  const signalNote = res.signaling_available ? 'signaling ready' : 'signaling missing';
-  statusNode.textContent = `Hyperweb ${mode} · live peers ${peerCount} · ${signalNote}${relay ? ` · relay ${relay}` : ''}`;
+  const topicCount = Array.isArray(res.topic_ids) ? res.topic_ids.length : 0;
+  statusNode.textContent = `Hyperweb ${mode} · live peers ${peerCount} · joined topics ${topicCount}`;
   await refreshTopbarBadges();
 }
 

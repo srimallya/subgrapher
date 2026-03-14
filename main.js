@@ -5,6 +5,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
+const Y = require('yjs');
 
 const { handleChat, parseChatCommand, executeAgenticLoop, PROGRAMMATIC_TOOL_NAMES } = require('./runtime/agent_runtime');
 const { chatWithProvider, callProviderWithTools } = require('./runtime/provider_chat');
@@ -69,7 +70,6 @@ const LOCAL_SKILLS_FILENAME = 'local_skills.json';
 const PRIVATE_HISTORY_FILENAME = 'private_history.json';
 const HYPERWEB_PUBLIC_SNAPSHOTS_FILENAME = 'hyperweb_public_snapshots.json';
 const HYPERWEB_PRIVATE_SHARES_FILENAME = 'hyperweb_private_shares.json';
-const DEFAULT_HYPERWEB_RELAY_URL = 'https://relay.thetrustcommons.com';
 const HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT = 'hyperweb_identity_private_key';
 const HYPERWEB_IDENTITY_SERVICE = 'com.subgrapher.hyperweb.identity';
 const HYPERWEB_IDENTITY_DER_PREFIX = 'ed25519-pkcs8-der:';
@@ -83,6 +83,7 @@ const APP_DATA_KEY_REF = 'system:app_data_key_v1';
 const HYPERWEB_SOCIAL_FILENAME = 'hyperweb_social.json';
 const HYPERWEB_INVITE_PROTO = 'subgrapher';
 const HYPERWEB_INVITE_ROUTE = 'hyperweb-invite';
+const HYPERWEB_PUBLIC_TOPIC_ID = 'subgrapher:hyperweb:public:v1';
 const HYPERWEB_PUBLIC_LOBBY_ID = 'public-lobby';
 const HYPERWEB_PUBLIC_LOBBY_NAME = 'Global Lobby';
 const HYPERWEB_PRESENCE_RECENT_WINDOW_MS = 10 * 60 * 1000;
@@ -108,7 +109,6 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'lumino_last_provider',
   'lumino_last_model',
   'hyperweb_enabled',
-  'hyperweb_relay_url',
   'hyperweb_display_name',
   'crawler_mode',
   'crawler_markdown_first',
@@ -324,9 +324,9 @@ function resolveRagEmbeddingSettings(settings = {}) {
   };
 }
 const hyperwebManager = new HyperwebManager({
-  relayUrl: DEFAULT_HYPERWEB_RELAY_URL,
   enabled: true,
   logger: console,
+  publicTopicId: HYPERWEB_PUBLIC_TOPIC_ID,
 });
 hyperwebManager.on('peer_seen', () => {
   const state = ensureHyperwebSocialState();
@@ -340,7 +340,18 @@ hyperwebManager.on('protocol', (packet) => {
   const peerId = String((packet && packet.peer_id) || '').trim().toUpperCase();
   const message = packet && packet.message && typeof packet.message === 'object' ? packet.message : {};
   const type = String(message.type || '').trim().toLowerCase();
-  if (!type.startsWith('hyperweb:social_') && type !== 'hyperweb:invite_handshake' && type !== 'hyperweb:chat_message' && type !== 'hyperweb:chat_ack') return;
+  if (
+    !type.startsWith('hyperweb:social_')
+    && type !== 'hyperweb:invite_handshake'
+    && type !== 'hyperweb:chat_message'
+    && type !== 'hyperweb:chat_ack'
+    && type !== 'hyperweb:share_invite'
+    && type !== 'hyperweb:share_status'
+    && type !== 'hyperweb:share_revoke'
+    && type !== 'hyperweb:share_delete'
+    && type !== 'hyperweb:collab_update'
+    && type !== 'hyperweb:collab_request_state'
+  ) return;
   if (type === 'hyperweb:invite_handshake') {
     const payload = (message.payload && typeof message.payload === 'object') ? message.payload : {};
     const fingerprint = String(payload.fingerprint || '').trim().toUpperCase();
@@ -446,6 +457,44 @@ hyperwebManager.on('protocol', (packet) => {
     if (transportPeerId) hyperwebManager.sendProtocolToPeer(transportPeerId, ackPayload);
     return;
   }
+  if (type === 'hyperweb:share_invite') {
+    if (!verifyHyperwebPeerMessage(message)) return;
+    upsertIncomingPrivateShare(message);
+    sendBrowserEvent('browser:hyperwebChat', {
+      event: 'share_invite',
+      share_id: String(message.share_id || ''),
+    });
+    return;
+  }
+  if (type === 'hyperweb:share_status') {
+    if (!verifyHyperwebPeerMessage(message)) return;
+    applyIncomingShareStatusMessage(message);
+    sendBrowserEvent('browser:hyperwebChat', { event: 'share_status', share_id: String(message.share_id || '') });
+    return;
+  }
+  if (type === 'hyperweb:share_revoke') {
+    if (!verifyHyperwebPeerMessage(message)) return;
+    applyIncomingShareRevokeMessage(message);
+    sendBrowserEvent('browser:hyperwebChat', { event: 'share_revoke', share_id: String(message.share_id || '') });
+    return;
+  }
+  if (type === 'hyperweb:share_delete') {
+    if (!verifyHyperwebPeerMessage(message)) return;
+    applyIncomingShareDeleteMessage(message);
+    sendBrowserEvent('browser:hyperwebChat', { event: 'share_delete', share_id: String(message.share_id || '') });
+    return;
+  }
+  if (type === 'hyperweb:collab_update') {
+    if (!verifyHyperwebPeerMessage(message)) return;
+    applyIncomingCollabUpdateMessage(message);
+    sendBrowserEvent('browser:hyperwebChat', { event: 'collab_update', room_id: String(message.room_id || '') });
+    return;
+  }
+  if (type === 'hyperweb:collab_request_state') {
+    if (!verifyHyperwebPeerMessage(message)) return;
+    respondToSharedRoomStateRequest(message);
+    return;
+  }
   const event = (message.event && typeof message.event === 'object') ? message.event : null;
   if (!event) return;
   const signedPayload = {
@@ -464,6 +513,11 @@ hyperwebManager.on('protocol', (packet) => {
     ...signedPayload,
     signature,
   }, { skipBroadcast: true });
+  sendBrowserEvent('browser:hyperwebChat', {
+    event: 'social_sync',
+    event_id: signedPayload.event_id,
+    social_type: signedPayload.type,
+  });
 });
 luminoCrawler.on('job_update', (event) => {
   const payload = (event && typeof event === 'object') ? event : {};
@@ -4675,7 +4729,6 @@ function getDefaultSettings() {
   return {
     default_search_engine: 'ddg',
     reference_ranking_enabled: false,
-    hyperweb_relay_url: DEFAULT_HYPERWEB_RELAY_URL,
     hyperweb_enabled: true,
     hyperweb_display_name: '',
     crawler_mode: 'broad',
@@ -4723,7 +4776,6 @@ function readSettings() {
     const raw = fs.readFileSync(settingsPath, 'utf8');
     const parsed = JSON.parse(raw);
     const engine = String((parsed && parsed.default_search_engine) || defaults.default_search_engine).trim().toLowerCase();
-    const relay = String((parsed && parsed.hyperweb_relay_url) || defaults.hyperweb_relay_url).trim();
     const savedProvider = String((parsed && parsed.lumino_last_provider) || defaults.lumino_last_provider).trim().toLowerCase();
     const savedModel = String((parsed && parsed.lumino_last_model) || defaults.lumino_last_model).trim();
     const providerKeyProfiles = normalizeProviderKeyProfiles(parsed && parsed.provider_key_profiles);
@@ -4753,7 +4805,6 @@ function readSettings() {
       reference_ranking_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'reference_ranking_enabled')
         ? !!parsed.reference_ranking_enabled
         : defaults.reference_ranking_enabled,
-      hyperweb_relay_url: relay || defaults.hyperweb_relay_url,
       hyperweb_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'hyperweb_enabled')
         ? !!parsed.hyperweb_enabled
         : defaults.hyperweb_enabled,
@@ -4835,11 +4886,6 @@ function writeSettings(next) {
       ? input.default_search_engine
       : current.default_search_engine
   ).trim().toLowerCase();
-  const requestedRelay = String(
-    Object.prototype.hasOwnProperty.call(input, 'hyperweb_relay_url')
-      ? input.hyperweb_relay_url
-      : current.hyperweb_relay_url
-  ).trim();
   const requestedHyperwebDisplayName = String(
     Object.prototype.hasOwnProperty.call(input, 'hyperweb_display_name')
       ? input.hyperweb_display_name
@@ -4952,7 +4998,6 @@ function writeSettings(next) {
     reference_ranking_enabled: Object.prototype.hasOwnProperty.call(input, 'reference_ranking_enabled')
       ? !!input.reference_ranking_enabled
       : !!current.reference_ranking_enabled,
-    hyperweb_relay_url: requestedRelay || DEFAULT_HYPERWEB_RELAY_URL,
     hyperweb_enabled: Object.prototype.hasOwnProperty.call(input, 'hyperweb_enabled')
       ? !!input.hyperweb_enabled
       : !!current.hyperweb_enabled,
@@ -7538,6 +7583,125 @@ function writeHyperwebPrivateSharesState(state) {
     ...((state && typeof state === 'object') ? state : {}),
   };
   writeJsonStore(getHyperwebPrivateSharesPath(), next);
+}
+
+function buildHyperwebShareTopicId(shareId = '') {
+  return `subgrapher:hyperweb:share:${String(shareId || '').trim()}`;
+}
+
+function cloneValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function encodeBinaryBase64(buffer) {
+  if (!buffer || typeof buffer.length !== 'number') return '';
+  return Buffer.from(buffer).toString('base64');
+}
+
+function decodeBinaryBase64(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    return Buffer.from(raw, 'base64');
+  } catch (_) {
+    return null;
+  }
+}
+
+function createRoomYDoc(room = {}) {
+  const doc = new Y.Doc();
+  const text = doc.getText('content');
+  const encoded = decodeBinaryBase64(room.ydoc_state || room.crdt_state || '');
+  if (encoded && encoded.length) {
+    try {
+      Y.applyUpdate(doc, encoded);
+      return doc;
+    } catch (_) {
+      // fall through to plain text state
+    }
+  }
+  const content = String(room.content || '');
+  if (content) text.insert(0, content);
+  return doc;
+}
+
+function syncRoomFromYDoc(room, doc) {
+  const text = doc.getText('content');
+  room.content = text.toString();
+  room.ydoc_state = encodeBinaryBase64(Y.encodeStateAsUpdate(doc));
+  room.crdt_provider = 'yjs';
+  room.updated_at = nowTs();
+  return room;
+}
+
+function setRoomYDocContent(room, nextContent = '') {
+  const doc = createRoomYDoc(room);
+  const text = doc.getText('content');
+  doc.transact(() => {
+    const current = text.toString();
+    if (current.length) text.delete(0, current.length);
+    if (nextContent) text.insert(0, String(nextContent || ''));
+  });
+  const update = Y.encodeStateAsUpdate(doc);
+  syncRoomFromYDoc(room, doc);
+  return { room, update };
+}
+
+function applyYDocUpdateToRoom(room, updateBase64 = '') {
+  const binary = decodeBinaryBase64(updateBase64);
+  if (!binary || !binary.length) return { ok: false, message: 'Invalid collaboration update.' };
+  const doc = createRoomYDoc(room);
+  try {
+    Y.applyUpdate(doc, binary);
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to apply collaboration update.') };
+  }
+  syncRoomFromYDoc(room, doc);
+  return { ok: true, room };
+}
+
+function buildSignedHyperwebPeerMessage(message = {}) {
+  const clone = cloneValue(message);
+  delete clone.signature;
+  return clone;
+}
+
+function signHyperwebPeerMessage(message = {}) {
+  return signHyperwebPayload(buildSignedHyperwebPeerMessage(message));
+}
+
+function verifyHyperwebPeerMessage(message = {}) {
+  const signed = buildSignedHyperwebPeerMessage(message);
+  const fromPeerId = String(signed.from_peer_id || signed.owner_id || '').trim().toUpperCase();
+  const signature = String(message.signature || '').trim();
+  if (!fromPeerId || !signature) return false;
+  const state = ensureHyperwebSocialState();
+  const known = state.known_peers && state.known_peers[fromPeerId] ? state.known_peers[fromPeerId] : null;
+  const pubkey = String((known && known.pubkey) || '').trim();
+  if (!pubkey) return false;
+  return verifyHyperwebPayload(signed, signature, pubkey);
+}
+
+function ensureShareTopicJoinedById(topicId = '') {
+  const clean = String(topicId || '').trim();
+  if (!clean) return;
+  hyperwebManager.joinTopic(clean).catch(() => {});
+}
+
+function getShareParticipantIds(share = {}) {
+  const ownerId = String((share && share.owner_id) || '').trim().toUpperCase();
+  const recipients = Array.isArray(share && share.recipients) ? share.recipients : [];
+  return Array.from(new Set([
+    ownerId,
+    ...recipients.map((item) => String((item && item.member_id) || '').trim().toUpperCase()).filter(Boolean),
+  ].filter(Boolean)));
+}
+
+function findPrivateShareByRoomId(state, roomId) {
+  const room = (Array.isArray(state && state.rooms) ? state.rooms : []).find((item) => String((item && item.room_id) || '') === String(roomId || '').trim());
+  if (!room) return { room: null, share: null };
+  const share = (Array.isArray(state && state.shares) ? state.shares : []).find((item) => String((item && item.share_id) || '') === String((room && room.share_id) || ''));
+  return { room, share: share || null };
 }
 
 function getPrivateHistoryPath() {
@@ -10536,6 +10700,7 @@ function createPrivateShare(srId, recipientIds = []) {
 
   const shareId = makeId('hwshare');
   const roomId = makeId('hwroom');
+  const topicId = buildHyperwebShareTopicId(shareId);
   const recipients = cleanRecipients.map((memberId) => {
     const normalizedId = String(memberId || '').trim().toUpperCase();
     const meta = memberById.get(normalizedId) || { display_name: memberId };
@@ -10551,10 +10716,12 @@ function createPrivateShare(srId, recipientIds = []) {
   const share = {
     share_id: shareId,
     room_id: roomId,
+    topic_id: topicId,
     reference_id: refId,
     reference_title: String((refs[idx] && refs[idx].title) || 'Shared reference'),
     owner_id: ownerId,
     owner_alias: String(owner.peer_name || ownerId),
+    recipient_fingerprints: cleanRecipients.map((item) => String(item || '').trim().toUpperCase()),
     recipients,
     created_at: nowTs(),
     updated_at: nowTs(),
@@ -10562,18 +10729,24 @@ function createPrivateShare(srId, recipientIds = []) {
   const room = {
     room_id: roomId,
     share_id: shareId,
+    topic_id: topicId,
     reference_id: refId,
     reference_title: share.reference_title,
     owner_id: ownerId,
     owner_alias: share.owner_alias,
     participants: [],
     content: '',
+    ydoc_state: '',
+    crdt_provider: 'yjs',
     updated_at: nowTs(),
   };
+  setRoomYDocContent(room, '');
   refreshRoomParticipantsFromShare(room, share);
   shareState.shares.unshift(share);
   shareState.rooms.unshift(room);
   writeHyperwebPrivateSharesState(shareState);
+  ensureShareTopicJoinedById(topicId);
+  broadcastPrivateShareInvite(share, room);
   return { ok: true, share, room };
 }
 
@@ -10599,6 +10772,7 @@ function listPrivateSharesForCurrentUser() {
     incoming.push({
       share_id: String(share.share_id || ''),
       room_id: String(share.room_id || ''),
+      topic_id: String(share.topic_id || ''),
       reference_id: String(share.reference_id || ''),
       reference_title: String(share.reference_title || ''),
       owner_id: ownerId,
@@ -10635,6 +10809,7 @@ function updateRecipientShareStatus(shareId, nextStatus) {
   }
   state.shares[idx] = share;
   writeHyperwebPrivateSharesState(state);
+  sendPrivateShareStatusUpdate(share, target);
   return { ok: true, share };
 }
 
@@ -10660,6 +10835,7 @@ function revokeShareAccess(shareId) {
   }
   state.shares[idx] = share;
   writeHyperwebPrivateSharesState(state);
+  broadcastPrivateShareRevoke(share);
   return { ok: true, share };
 }
 
@@ -10686,6 +10862,7 @@ function deletePrivateShare(shareId) {
     .filter((_, itemIdx) => itemIdx !== idx);
   state.rooms = nextRooms;
   writeHyperwebPrivateSharesState(state);
+  broadcastPrivateShareDelete(share);
   return {
     ok: true,
     deleted: true,
@@ -10711,6 +10888,7 @@ function listSharedRoomsForCurrentUser() {
     .map((room) => ({
       room_id: String((room && room.room_id) || ''),
       share_id: String((room && room.share_id) || ''),
+      topic_id: String((room && room.topic_id) || ''),
       reference_id: String((room && room.reference_id) || ''),
       reference_title: String((room && room.reference_title) || ''),
       owner_id: String((room && room.owner_id) || ''),
@@ -10719,6 +10897,16 @@ function listSharedRoomsForCurrentUser() {
     }))
     .sort((a, b) => Number((b && b.updated_at) || 0) - Number((a && a.updated_at) || 0));
   return { ok: true, rooms };
+}
+
+function ensureAccessibleShareTopicsJoined() {
+  const rooms = listSharedRoomsForCurrentUser();
+  const list = Array.isArray(rooms && rooms.rooms) ? rooms.rooms : [];
+  list.forEach((room) => {
+    const topicId = String((room && room.topic_id) || '').trim();
+    if (!topicId) return;
+    ensureShareTopicJoinedById(topicId);
+  });
 }
 
 function openSharedRoomForCurrentUser(roomId) {
@@ -10736,17 +10924,21 @@ function openSharedRoomForCurrentUser(roomId) {
   if (!canRead) return { ok: false, message: 'No access to this room.' };
   const canWrite = ownerId === memberId || (recipient && String((recipient && (recipient.write_status || recipient.status)) || '') === 'write_accepted');
   refreshRoomParticipantsFromShare(room, share);
+  ensureShareTopicJoinedById(String(room.topic_id || share.topic_id || ''));
+  if (ownerId !== memberId) requestSharedRoomState(room, share);
   return {
     ok: true,
     room: {
       room_id: String(room.room_id || ''),
       share_id: String(room.share_id || ''),
+      topic_id: String(room.topic_id || share.topic_id || ''),
       reference_id: String(room.reference_id || ''),
       reference_title: String(room.reference_title || ''),
       owner_id: ownerId,
       owner_alias: String(room.owner_alias || ''),
       participants: Array.isArray(room.participants) ? room.participants : [],
       content: String(room.content || ''),
+      crdt_provider: String(room.crdt_provider || 'yjs'),
       can_write: !!canWrite,
       updated_at: Number(room.updated_at || 0),
     },
@@ -10761,11 +10953,278 @@ function applySharedRoomUpdate(roomId, update = {}) {
   const roomIdx = (Array.isArray(state.rooms) ? state.rooms : []).findIndex((item) => String((item && item.room_id) || '') === String(roomId || '').trim());
   if (roomIdx < 0) return { ok: false, message: 'Room not found.' };
   const room = state.rooms[roomIdx];
-  room.content = String((update && update.content) || room.content || '');
-  room.updated_at = nowTs();
+  const nextContent = String((update && update.content) || room.content || '');
+  const applied = setRoomYDocContent(room, nextContent);
   state.rooms[roomIdx] = room;
   writeHyperwebPrivateSharesState(state);
+  broadcastSharedRoomUpdate(room, applied.update);
   return openSharedRoomForCurrentUser(roomId);
+}
+
+function sendSignedPeerProtocol(peerId, message = {}, options = {}) {
+  const targetPeerId = String(peerId || '').trim().toUpperCase();
+  if (!targetPeerId) return false;
+  const payload = {
+    ...cloneValue(message),
+    from_peer_id: String((message && message.from_peer_id) || currentHyperwebMemberId()).trim().toUpperCase(),
+    ts: Number((message && message.ts) || nowTs()),
+  };
+  payload.signature = signHyperwebPeerMessage(payload);
+  return hyperwebManager.sendProtocolToPeer(targetPeerId, payload, options || {});
+}
+
+function broadcastPrivateShareInvite(share, room) {
+  const recipients = Array.isArray(share && share.recipients) ? share.recipients : [];
+  recipients.forEach((recipient) => {
+    const peerId = String((recipient && recipient.member_id) || '').trim().toUpperCase();
+    if (!peerId) return;
+    sendSignedPeerProtocol(peerId, {
+      type: 'hyperweb:share_invite',
+      share_id: String(share.share_id || ''),
+      room_id: String(room.room_id || ''),
+      topic_id: String(share.topic_id || room.topic_id || ''),
+      reference_id: String(share.reference_id || ''),
+      reference_title: String(share.reference_title || ''),
+      owner_id: String(share.owner_id || '').trim().toUpperCase(),
+      owner_alias: String(share.owner_alias || ''),
+      recipients: Array.isArray(share.recipients) ? share.recipients : [],
+      content_state: String(room.ydoc_state || ''),
+      crdt_provider: 'yjs',
+    });
+  });
+}
+
+function sendPrivateShareStatusUpdate(share, recipient) {
+  const ownerId = String((share && share.owner_id) || '').trim().toUpperCase();
+  if (!ownerId) return false;
+  return sendSignedPeerProtocol(ownerId, {
+    type: 'hyperweb:share_status',
+    share_id: String(share.share_id || ''),
+    room_id: String(share.room_id || ''),
+    member_id: String((recipient && recipient.member_id) || '').trim().toUpperCase(),
+    write_status: String((recipient && (recipient.write_status || recipient.status)) || 'write_pending'),
+    read_access: recipient ? recipient.read_access !== false : true,
+  });
+}
+
+function broadcastPrivateShareRevoke(share) {
+  getShareParticipantIds(share).forEach((peerId) => {
+    if (peerId === String((share && share.owner_id) || '').trim().toUpperCase()) return;
+    sendSignedPeerProtocol(peerId, {
+      type: 'hyperweb:share_revoke',
+      share_id: String(share.share_id || ''),
+      room_id: String(share.room_id || ''),
+    });
+  });
+}
+
+function broadcastPrivateShareDelete(share) {
+  getShareParticipantIds(share).forEach((peerId) => {
+    if (peerId === String((share && share.owner_id) || '').trim().toUpperCase()) return;
+    sendSignedPeerProtocol(peerId, {
+      type: 'hyperweb:share_delete',
+      share_id: String(share.share_id || ''),
+      room_id: String(share.room_id || ''),
+    });
+  });
+  hyperwebManager.leaveTopic(String((share && share.topic_id) || '')).catch(() => {});
+}
+
+function broadcastSharedRoomUpdate(room, updateBuffer) {
+  const state = readHyperwebPrivateSharesState();
+  const share = (Array.isArray(state.shares) ? state.shares : []).find((item) => String((item && item.share_id) || '') === String((room && room.share_id) || ''));
+  if (!share) return;
+  const updateBase64 = encodeBinaryBase64(updateBuffer);
+  getShareParticipantIds(share).forEach((peerId) => {
+    if (peerId === currentHyperwebMemberId()) return;
+    sendSignedPeerProtocol(peerId, {
+      type: 'hyperweb:collab_update',
+      share_id: String(share.share_id || ''),
+      room_id: String(room.room_id || ''),
+      topic_id: String(room.topic_id || share.topic_id || ''),
+      update_b64: updateBase64,
+      crdt_provider: 'yjs',
+      full_state: false,
+    }, { topic_id: String(room.topic_id || share.topic_id || '') });
+  });
+}
+
+function requestSharedRoomState(room, share) {
+  const participantIds = getShareParticipantIds(share).filter((peerId) => peerId !== currentHyperwebMemberId());
+  participantIds.forEach((peerId) => {
+    sendSignedPeerProtocol(peerId, {
+      type: 'hyperweb:collab_request_state',
+      share_id: String(share.share_id || ''),
+      room_id: String(room.room_id || ''),
+      topic_id: String(room.topic_id || share.topic_id || ''),
+    }, { topic_id: String(room.topic_id || share.topic_id || '') });
+  });
+}
+
+function upsertIncomingPrivateShare(message = {}) {
+  const ownerId = String(message.owner_id || message.from_peer_id || '').trim().toUpperCase();
+  const shareId = String(message.share_id || '').trim();
+  const roomId = String(message.room_id || '').trim();
+  const topicId = String(message.topic_id || buildHyperwebShareTopicId(shareId)).trim();
+  if (!ownerId || !shareId || !roomId) return { ok: false, message: 'Invalid share invitation.' };
+  const state = readHyperwebPrivateSharesState();
+  state.shares = Array.isArray(state.shares) ? state.shares : [];
+  state.rooms = Array.isArray(state.rooms) ? state.rooms : [];
+  const localId = currentHyperwebMemberId();
+  const recipients = Array.isArray(message.recipients) ? message.recipients : [];
+  const normalizedRecipients = recipients.map((item) => ({
+    member_id: String((item && item.member_id) || '').trim().toUpperCase(),
+    display_name: String((item && item.display_name) || ''),
+    read_access: item && item.read_access !== false,
+    write_status: String((item && (item.write_status || item.status)) || 'write_accepted'),
+    status: String((item && (item.write_status || item.status)) || 'write_accepted'),
+    updated_at: Number((item && item.updated_at) || nowTs()),
+  })).filter((item) => item.member_id);
+  if (!normalizedRecipients.some((item) => item.member_id === localId)) {
+    normalizedRecipients.push({
+      member_id: localId,
+      display_name: String((((ensureHyperwebSocialState() || {}).identity || {}).display_alias) || localId),
+      read_access: true,
+      write_status: 'write_accepted',
+      status: 'write_accepted',
+      updated_at: nowTs(),
+    });
+  }
+  const share = {
+    share_id: shareId,
+    room_id: roomId,
+    topic_id: topicId,
+    reference_id: String(message.reference_id || ''),
+    reference_title: String(message.reference_title || 'Shared reference'),
+    owner_id: ownerId,
+    owner_alias: String(message.owner_alias || ownerId),
+    recipient_fingerprints: normalizedRecipients.map((item) => item.member_id),
+    recipients: normalizedRecipients,
+    created_at: Number(message.ts || nowTs()),
+    updated_at: nowTs(),
+  };
+  let room = (Array.isArray(state.rooms) ? state.rooms : []).find((item) => String((item && item.room_id) || '') === roomId);
+  if (!room) {
+    room = {
+      room_id: roomId,
+      share_id: shareId,
+      topic_id: topicId,
+      reference_id: String(message.reference_id || ''),
+      reference_title: String(message.reference_title || 'Shared reference'),
+      owner_id: ownerId,
+      owner_alias: String(message.owner_alias || ownerId),
+      participants: [],
+      content: '',
+      ydoc_state: '',
+      crdt_provider: 'yjs',
+      updated_at: nowTs(),
+    };
+    state.rooms.unshift(room);
+  }
+  if (message.content_state) {
+    room.ydoc_state = String(message.content_state || '');
+    const doc = createRoomYDoc(room);
+    syncRoomFromYDoc(room, doc);
+  }
+  refreshRoomParticipantsFromShare(room, share);
+  const idx = state.shares.findIndex((item) => String((item && item.share_id) || '') === shareId);
+  if (idx >= 0) state.shares[idx] = share;
+  else state.shares.unshift(share);
+  writeHyperwebPrivateSharesState(state);
+  ensureShareTopicJoinedById(topicId);
+  return { ok: true, share, room };
+}
+
+function applyIncomingShareStatusMessage(message = {}) {
+  const shareId = String(message.share_id || '').trim();
+  const memberId = String(message.member_id || message.from_peer_id || '').trim().toUpperCase();
+  if (!shareId || !memberId) return { ok: false, message: 'Invalid share status.' };
+  const state = readHyperwebPrivateSharesState();
+  const { share, idx } = findPrivateShareById(state, shareId);
+  if (!share || idx < 0) return { ok: false, message: 'Share not found.' };
+  const recipient = (Array.isArray(share.recipients) ? share.recipients : []).find((item) => String((item && item.member_id) || '').trim().toUpperCase() === memberId);
+  if (!recipient) return { ok: false, message: 'Recipient not found.' };
+  recipient.read_access = message.read_access !== false;
+  recipient.write_status = String(message.write_status || recipient.write_status || recipient.status || 'write_pending');
+  recipient.status = recipient.write_status;
+  recipient.updated_at = nowTs();
+  share.updated_at = nowTs();
+  const room = (Array.isArray(state.rooms) ? state.rooms : []).find((item) => String((item && item.share_id) || '') === shareId);
+  if (room) refreshRoomParticipantsFromShare(room, share);
+  state.shares[idx] = share;
+  writeHyperwebPrivateSharesState(state);
+  return { ok: true, share };
+}
+
+function applyIncomingShareRevokeMessage(message = {}) {
+  const shareId = String(message.share_id || '').trim();
+  const state = readHyperwebPrivateSharesState();
+  const { share, idx } = findPrivateShareById(state, shareId);
+  if (!share || idx < 0) return { ok: false, message: 'Share not found.' };
+  const localId = currentHyperwebMemberId();
+  share.recipients = (Array.isArray(share.recipients) ? share.recipients : []).map((item) => {
+    const memberId = String((item && item.member_id) || '').trim().toUpperCase();
+    if (memberId !== localId) return item;
+    return {
+      ...item,
+      read_access: false,
+      write_status: 'revoked',
+      status: 'revoked',
+      updated_at: nowTs(),
+    };
+  });
+  share.updated_at = nowTs();
+  const room = (Array.isArray(state.rooms) ? state.rooms : []).find((item) => String((item && item.share_id) || '') === shareId);
+  if (room) refreshRoomParticipantsFromShare(room, share);
+  state.shares[idx] = share;
+  writeHyperwebPrivateSharesState(state);
+  return { ok: true, share };
+}
+
+function applyIncomingShareDeleteMessage(message = {}) {
+  const shareId = String(message.share_id || '').trim();
+  const state = readHyperwebPrivateSharesState();
+  const { idx } = findPrivateShareById(state, shareId);
+  if (idx < 0) return { ok: false, message: 'Share not found.' };
+  state.shares = state.shares.filter((_, itemIdx) => itemIdx !== idx);
+  state.rooms = (Array.isArray(state.rooms) ? state.rooms : []).filter((item) => String((item && item.share_id) || '') !== shareId);
+  writeHyperwebPrivateSharesState(state);
+  return { ok: true };
+}
+
+function applyIncomingCollabUpdateMessage(message = {}) {
+  const shareId = String(message.share_id || '').trim();
+  const roomId = String(message.room_id || '').trim();
+  const updateBase64 = String(message.update_b64 || '').trim();
+  if (!shareId || !roomId || !updateBase64) return { ok: false, message: 'Invalid collaboration update.' };
+  const state = readHyperwebPrivateSharesState();
+  const roomIdx = (Array.isArray(state.rooms) ? state.rooms : []).findIndex((item) => String((item && item.room_id) || '') === roomId);
+  if (roomIdx < 0) return { ok: false, message: 'Room not found.' };
+  const room = state.rooms[roomIdx];
+  const applied = applyYDocUpdateToRoom(room, updateBase64);
+  if (!applied.ok) return applied;
+  state.rooms[roomIdx] = room;
+  writeHyperwebPrivateSharesState(state);
+  return { ok: true, room };
+}
+
+function respondToSharedRoomStateRequest(message = {}) {
+  const roomId = String(message.room_id || '').trim();
+  const fromPeerId = String(message.from_peer_id || '').trim().toUpperCase();
+  if (!roomId || !fromPeerId) return false;
+  const state = readHyperwebPrivateSharesState();
+  const { room, share } = findPrivateShareByRoomId(state, roomId);
+  if (!room || !share) return false;
+  if (!getShareParticipantIds(share).includes(fromPeerId)) return false;
+  return sendSignedPeerProtocol(fromPeerId, {
+    type: 'hyperweb:collab_update',
+    share_id: String(share.share_id || ''),
+    room_id: String(room.room_id || ''),
+    topic_id: String(room.topic_id || share.topic_id || ''),
+    update_b64: String(room.ydoc_state || ''),
+    crdt_provider: 'yjs',
+    full_state: true,
+  }, { topic_id: String(room.topic_id || share.topic_id || '') });
 }
 
 function normalizeInvitePayload(input = {}) {
@@ -10931,12 +11390,10 @@ async function applySettingsRuntimeEffects(previousSettings, nextSettings) {
 
   const hyperwebChanged = (
     prev.hyperweb_enabled !== next.hyperweb_enabled
-    || String(prev.hyperweb_relay_url || '') !== String(next.hyperweb_relay_url || '')
     || String(prev.hyperweb_display_name || '') !== String(next.hyperweb_display_name || '')
   );
   if (hyperwebChanged) {
     applied.hyperweb.changed = true;
-    hyperwebManager.setRelayUrl(String(next.hyperweb_relay_url || DEFAULT_HYPERWEB_RELAY_URL));
     hyperwebManager.setEnabled(!!next.hyperweb_enabled);
     syncHyperwebIdentityAliasFromSettings(next);
     if (!next.hyperweb_enabled) {
@@ -11026,12 +11483,14 @@ function confirmTypedResetPhrase(phrase = 'RESET') {
 async function connectHyperweb(options = {}) {
   const settings = readSettings();
   const identity = getHyperwebNetworkIdentity(settings);
-  hyperwebManager.setRelayUrl(settings.hyperweb_relay_url || DEFAULT_HYPERWEB_RELAY_URL);
   hyperwebManager.setEnabled(!!settings.hyperweb_enabled);
   hyperwebManager.setIdentity(identity);
   const connectRes = settings.hyperweb_enabled
     ? await hyperwebManager.connect(identity)
     : { ok: true, status: hyperwebManager.getStatus(), message: 'Hyperweb disabled in settings.' };
+  if (settings.hyperweb_enabled && connectRes && connectRes.ok) {
+    ensureAccessibleShareTopicsJoined();
+  }
   if (connectRes && connectRes.ok && options.broadcastHandshake !== false) {
     broadcastHyperwebInviteHandshake();
   }
@@ -19806,7 +20265,6 @@ if (gotSingleInstanceLock) app.whenReady().then(() => {
   consumePendingInviteTokenIfAny();
   hyperwebManager.setPublicIndexProvider(() => getPublicReferencesForHyperweb());
   const settings = readSettings();
-  hyperwebManager.setRelayUrl(settings.hyperweb_relay_url || DEFAULT_HYPERWEB_RELAY_URL);
   hyperwebManager.setEnabled(!!settings.hyperweb_enabled);
   applySettingsRuntimeEffects(settings, settings).catch((err) => {
     console.warn('[runtime] settings effects failed:', String((err && err.message) || err));

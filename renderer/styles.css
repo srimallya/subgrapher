@@ -797,13 +797,13 @@ summary:focus-visible {
   display: none;
 }
 
-.reference-item:hover .reference-sub,
+.reference-item.expanded .reference-sub,
 .reference-item.active .reference-sub,
 .reference-item:focus-within .reference-sub {
   display: block;
 }
 
-.reference-item:hover .reference-actions,
+.reference-item.expanded .reference-actions,
 .reference-item.active .reference-actions,
 .reference-item:focus-within .reference-actions {
   display: flex;
