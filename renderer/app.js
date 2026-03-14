@@ -217,6 +217,8 @@ const MAIL_SMART_FOLDER_LABELS = {
 };
 const HYPERWEB_LAST_SEEN_KEY = 'subgrapher_hyperweb_last_seen_v1';
 let passiveNoticeTimer = null;
+let hyperwebChatRefreshPromise = null;
+let hyperwebChatRefreshQueuedMode = '';
 
 function e(id) {
   return document.getElementById(id);
@@ -251,6 +253,68 @@ function formatAgo(ts) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function mergeHyperwebChatRefreshMode(currentMode = '', nextMode = '') {
+  const rank = { '': 0, history: 1, incremental: 2, full: 3 };
+  return (rank[nextMode] || 0) > (rank[currentMode] || 0) ? nextMode : currentMode;
+}
+
+function resolveHyperwebChatRefreshMode(payload = {}) {
+  const eventName = String((payload && payload.event) || '').trim().toLowerCase();
+  const inboxKind = String((payload && payload.kind) || '').trim().toLowerCase();
+  const socialType = String((payload && payload.social_type) || '').trim().toLowerCase();
+  if (eventName === 'ack') return 'history';
+  if (eventName === 'message') return 'incremental';
+  if (eventName === 'inbox_entry') {
+    if (inboxKind === 'dm_message') return 'incremental';
+    if (inboxKind === 'delivery_ack' || inboxKind === 'read_ack') return 'history';
+    return '';
+  }
+  if (eventName === 'social_sync') {
+    if (socialType === 'social_chat_message_private') return 'incremental';
+    if (socialType === 'social_chat_receipt' || socialType === 'social_chat_delete' || socialType === 'social_thread_delete' || socialType === 'social_thread_policy') {
+      return 'history';
+    }
+    return '';
+  }
+  return 'full';
+}
+
+async function runHyperwebChatRefresh(mode = 'full') {
+  if (mode === 'incremental') {
+    await Promise.all([
+      refreshHyperwebChatConversations(),
+      refreshHyperwebChatHistory(),
+    ]);
+    return;
+  }
+  if (mode === 'history') {
+    await refreshHyperwebChatHistory();
+    return;
+  }
+  await refreshHyperwebChatData();
+}
+
+function scheduleHyperwebChatRefresh(mode = 'full') {
+  const nextMode = String(mode || 'full').trim().toLowerCase();
+  if (!nextMode) return Promise.resolve();
+  if (hyperwebChatRefreshPromise) {
+    hyperwebChatRefreshQueuedMode = mergeHyperwebChatRefreshMode(hyperwebChatRefreshQueuedMode, nextMode);
+    return hyperwebChatRefreshPromise;
+  }
+  hyperwebChatRefreshPromise = (async () => {
+    let modeToRun = nextMode;
+    while (modeToRun) {
+      hyperwebChatRefreshQueuedMode = '';
+      await runHyperwebChatRefresh(modeToRun);
+      modeToRun = hyperwebChatRefreshQueuedMode;
+    }
+  })().finally(() => {
+    hyperwebChatRefreshPromise = null;
+    hyperwebChatRefreshQueuedMode = '';
+  });
+  return hyperwebChatRefreshPromise;
 }
 
 function snapHyperwebRatio(rawRatio) {
@@ -7062,7 +7126,10 @@ function setupBrowserEvents() {
         }).catch(() => {});
       }
       if (state.appView === 'hyperweb' && state.hyperwebActiveTab === 'chat') {
-        refreshHyperwebChatData().catch(() => {});
+        const chatRefreshMode = resolveHyperwebChatRefreshMode(payload);
+        if (chatRefreshMode) {
+          scheduleHyperwebChatRefresh(chatRefreshMode).catch(() => {});
+        }
         return;
       }
       if (state.appView === 'hyperweb') {
@@ -7943,6 +8010,39 @@ function renderHyperwebDmConversationList() {
   });
 }
 
+function base64ToBytes(value = '') {
+  const raw = window.atob(String(value || ''));
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) {
+    bytes[index] = raw.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function downloadHyperwebChatAttachment(messageId = '') {
+  if (!api.hyperwebChatAttachment) return;
+  const targetId = String(messageId || '').trim();
+  if (!targetId) return;
+  const res = await api.hyperwebChatAttachment(targetId);
+  if (!res || !res.ok || !res.file) {
+    setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to load attachment.');
+    return;
+  }
+  const file = res.file || {};
+  const bytes = base64ToBytes(String(file.data_base64 || ''));
+  const blob = new Blob([bytes], { type: String(file.mime || 'application/octet-stream') });
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = String(file.name || 'file.bin');
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => {
+    window.URL.revokeObjectURL(url);
+  }, 1000);
+}
+
 function renderHyperwebChatThread() {
   const holder = e('hyperweb-chat-thread');
   renderHyperwebChatThreadHeader();
@@ -7974,7 +8074,7 @@ function renderHyperwebChatThread() {
           <span>${escapeHtml(formatAgo(item && item.ts))}${outgoing ? ` · ${escapeHtml(receipt)}` : ''}</span>
         </div>
         ${text ? `<div class="hyperweb-chat-text">${text}</div>` : ''}
-        ${file ? `<div class="hyperweb-chat-file"><a href="data:${escapeHtml(String(file.mime || 'application/octet-stream'))};base64,${escapeHtml(String(file.data_base64 || ''))}" download="${escapeHtml(String(file.name || 'file.bin'))}">Download ${escapeHtml(String(file.name || 'file.bin'))}</a> (${escapeHtml(String(file.size || 0))} bytes)</div>` : ''}
+        ${file ? `<div class="hyperweb-chat-file"><button type="button" class="hyperweb-chat-download-btn" data-message-id="${messageId}">Download ${escapeHtml(String(file.name || 'file.bin'))}</button> (${escapeHtml(String(file.size || 0))} bytes)</div>` : ''}
         <div class="hyperweb-chat-item-actions">
           <button class="hyperweb-chat-delete-btn" data-message-id="${messageId}">Delete</button>
           ${canUndo ? `<button class="hyperweb-chat-undo-btn" data-message-id="${messageId}">Undo send</button>` : ''}
@@ -7983,6 +8083,18 @@ function renderHyperwebChatThread() {
     `;
   }).join('');
   holder.scrollTop = holder.scrollHeight;
+  holder.querySelectorAll('.hyperweb-chat-download-btn').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const messageId = String(button.getAttribute('data-message-id') || '').trim();
+      if (!messageId) return;
+      button.disabled = true;
+      try {
+        await downloadHyperwebChatAttachment(messageId);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
   holder.querySelectorAll('.hyperweb-chat-delete-btn').forEach((button) => {
     button.addEventListener('click', async () => {
       if (!api.hyperwebChatDeleteMessage) return;
@@ -7993,7 +8105,7 @@ function renderHyperwebChatThread() {
         setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to delete message.');
         return;
       }
-      await refreshHyperwebChatData();
+      await scheduleHyperwebChatRefresh('incremental');
     });
   });
   holder.querySelectorAll('.hyperweb-chat-undo-btn').forEach((button) => {
@@ -8006,7 +8118,7 @@ function renderHyperwebChatThread() {
         setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to undo message.');
         return;
       }
-      await refreshHyperwebChatData();
+      await scheduleHyperwebChatRefresh('incremental');
     });
   });
 }
@@ -11382,7 +11494,7 @@ function bindControls() {
     await api.hyperwebResetFilter();
     renderHyperwebIdentityLine();
     if (state.hyperwebActiveTab === 'chat') {
-      await refreshHyperwebChatData();
+      await scheduleHyperwebChatRefresh('full');
       return;
     }
     if (state.hyperwebActiveTab === 'refs') {
@@ -11546,7 +11658,7 @@ function bindControls() {
     if (input) input.value = '';
     state.hyperwebChatPendingFile = null;
     if (fileInput) fileInput.value = '';
-    await refreshHyperwebChatData();
+    await scheduleHyperwebChatRefresh('incremental');
   });
   e('hyperweb-chat-input')?.addEventListener('keydown', async (event) => {
     if (event.key !== 'Enter' || event.shiftKey) return;

@@ -263,6 +263,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     hyperwebChatSend: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatSend', payload || {}),
     hyperwebChatConversations: () => ipcRenderer.invoke('browser:hyperwebChatConversations'),
     hyperwebChatHistory: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatHistory', payload || {}),
+    hyperwebChatAttachment: (messageId = '') => ipcRenderer.invoke('browser:hyperwebChatAttachment', { message_id: messageId }),
     hyperwebChatMarkRead: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatMarkRead', payload || {}),
     hyperwebChatRoomCreate: (payload = {}) => ipcRenderer.invoke('browser:hyperwebChatRoomCreate', payload || {}),
     hyperwebChatDeleteMessage: (messageId = '') => ipcRenderer.invoke('browser:hyperwebChatDeleteMessage', { message_id: messageId }),

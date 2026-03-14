@@ -446,7 +446,7 @@ hyperwebManager.on('protocol', (packet) => {
     maybeNotifyIncomingHyperwebMessage(persist.message || {});
     sendBrowserEvent('browser:hyperwebChat', {
       event: 'message',
-      message: persist.message,
+      message: sanitizeHyperwebChatMessageForRenderer(persist.message),
       peer_id: peerId,
     });
     const ackPayload = {
@@ -2554,10 +2554,13 @@ async function writeJsonStoreAsync(filePath, payload) {
   return true;
 }
 
-function scheduleAsyncJsonStoreWrite(filePath, payload) {
+function scheduleAsyncJsonStoreWrite(filePath, payload, options = {}) {
   const targetPath = String(filePath || '').trim();
   if (!targetPath) return;
-  const snapshot = cloneValue((payload && typeof payload === 'object') ? payload : {});
+  const clonePayload = options.clone !== false;
+  const snapshot = clonePayload
+    ? cloneValue((payload && typeof payload === 'object') ? payload : {})
+    : ((payload && typeof payload === 'object') ? payload : {});
   let entry = asyncJsonWriteQueueByPath.get(targetPath);
   if (!entry) {
     entry = {
@@ -2565,11 +2568,13 @@ function scheduleAsyncJsonStoreWrite(filePath, payload) {
       latestPayload: snapshot,
       pendingPayload: snapshot,
       lastError: '',
+      clonePayload,
     };
     asyncJsonWriteQueueByPath.set(targetPath, entry);
   } else {
     entry.latestPayload = snapshot;
     entry.pendingPayload = snapshot;
+    entry.clonePayload = clonePayload;
   }
   if (entry.active) return;
   entry.active = true;
@@ -2588,7 +2593,7 @@ function scheduleAsyncJsonStoreWrite(filePath, payload) {
     }
     entry.active = false;
     if (entry.pendingPayload) {
-      scheduleAsyncJsonStoreWrite(targetPath, entry.pendingPayload);
+      scheduleAsyncJsonStoreWrite(targetPath, entry.pendingPayload, { clone: entry.clonePayload !== false });
       return;
     }
     if (!entry.lastError) {
@@ -7639,8 +7644,8 @@ function writeHyperwebPublicSnapshotsState(state) {
     ...createDefaultHyperwebPublicSnapshotsState(),
     ...((state && typeof state === 'object') ? state : {}),
   };
-  hyperwebPublicSnapshotsState = cloneValue(next);
-  scheduleAsyncJsonStoreWrite(getHyperwebPublicSnapshotsPath(), next);
+  hyperwebPublicSnapshotsState = next;
+  scheduleAsyncJsonStoreWrite(getHyperwebPublicSnapshotsPath(), next, { clone: false });
 }
 
 function pruneHyperwebPublicSnapshotsState(state) {
@@ -7715,8 +7720,8 @@ function writeHyperwebPrivateSharesState(state) {
     ...createDefaultHyperwebPrivateSharesState(),
     ...((state && typeof state === 'object') ? state : {}),
   };
-  hyperwebPrivateSharesState = cloneValue(next);
-  scheduleAsyncJsonStoreWrite(getHyperwebPrivateSharesPath(), next);
+  hyperwebPrivateSharesState = next;
+  scheduleAsyncJsonStoreWrite(getHyperwebPrivateSharesPath(), next, { clone: false });
 }
 
 function buildHyperwebShareTopicId(shareId = '') {
@@ -8499,7 +8504,7 @@ function createDefaultHyperwebSocialState() {
 function writeHyperwebSocialState(state) {
   const payload = (state && typeof state === 'object') ? state : createDefaultHyperwebSocialState();
   hyperwebSocialState = payload;
-  scheduleAsyncJsonStoreWrite(getHyperwebSocialPath(), payload);
+  scheduleAsyncJsonStoreWrite(getHyperwebSocialPath(), payload, { clone: false });
 }
 
 function readHyperwebSocialState() {
@@ -8877,6 +8882,25 @@ function normalizeChatFilePayload(file = {}) {
     mime: String(item.mime || 'application/octet-stream').slice(0, 120),
     size,
     data_base64: data,
+  };
+}
+
+function describeHyperwebChatFile(file = {}) {
+  const item = normalizeChatFilePayload(file || {});
+  if (!item) return null;
+  return {
+    name: String(item.name || 'file.bin'),
+    mime: String(item.mime || 'application/octet-stream'),
+    size: Number(item.size || 0),
+    has_data: true,
+  };
+}
+
+function sanitizeHyperwebChatMessageForRenderer(message = {}) {
+  const item = (message && typeof message === 'object') ? message : {};
+  return {
+    ...item,
+    file: describeHyperwebChatFile(item.file || {}),
   };
 }
 
@@ -10413,6 +10437,7 @@ function appendPrivateInboxEntry(input = {}, options = {}) {
   const entry = buildPrivateInboxEntry(input);
   const persisted = persistPrivateInboxEntry(entry);
   if (!persisted || !persisted.ok) return persisted;
+  const directPeerId = String((options && options.direct_peer_id) || '').trim().toUpperCase();
   if (options.broadcast !== false) {
     hyperwebManager.broadcastTopicProtocol(String(entry.topic_id || ''), {
       type: 'hyperweb:inbox_entry',
@@ -10420,6 +10445,14 @@ function appendPrivateInboxEntry(input = {}, options = {}) {
       entry,
       ts: nowTs(),
     });
+  }
+  if (directPeerId) {
+    hyperwebManager.sendProtocolToPeer(directPeerId, {
+      type: 'hyperweb:inbox_entry',
+      topic_id: String(entry.topic_id || ''),
+      entry,
+      ts: nowTs(),
+    }, { topic_id: String(entry.topic_id || '') });
   }
   return { ok: true, entry };
 }
@@ -10614,6 +10647,7 @@ function materializePrivateInboxEntry(entry = {}) {
       status: 'delivered',
     });
     if (res && res.ok && !hasLocalInboxAckForEntry(entryId, 'delivery_ack')) {
+      const senderTransportPeerId = resolveHyperwebTransportPeerId(String(item.from_fingerprint || '').trim().toUpperCase());
       appendPrivateInboxEntry({
         kind: 'delivery_ack',
         to_fingerprint: String(item.from_fingerprint || '').trim().toUpperCase(),
@@ -10624,7 +10658,7 @@ function materializePrivateInboxEntry(entry = {}) {
           ack_kind: 'delivered',
           entry_id: entryId,
         },
-      });
+      }, { direct_peer_id: senderTransportPeerId });
     }
   } else if (kind === 'share_notice') {
     if (String(item.to_fingerprint || '').trim().toUpperCase() !== localId) return { ok: true, skipped: true };
@@ -10637,6 +10671,7 @@ function materializePrivateInboxEntry(entry = {}) {
     else if (noticeKind === 'revoke') res = applyIncomingShareRevokeMessage(payload);
     else if (noticeKind === 'delete') res = applyIncomingShareDeleteMessage(payload);
     if (res && res.ok && !hasLocalInboxAckForEntry(entryId, 'delivery_ack')) {
+      const senderTransportPeerId = resolveHyperwebTransportPeerId(String(item.from_fingerprint || '').trim().toUpperCase());
       appendPrivateInboxEntry({
         kind: 'delivery_ack',
         to_fingerprint: String(item.from_fingerprint || '').trim().toUpperCase(),
@@ -10646,7 +10681,7 @@ function materializePrivateInboxEntry(entry = {}) {
           entry_id: entryId,
           share_id: String((payload && payload.share_id) || ''),
         },
-      });
+      }, { direct_peer_id: senderTransportPeerId });
     }
   } else if (kind === 'delivery_ack' || kind === 'read_ack') {
     const payload = (item.payload && typeof item.payload === 'object') ? item.payload : {};
@@ -10716,7 +10751,10 @@ function sendHyperwebChatAck(toPeerId = '', messageId = '', logicalId = '', room
         ack_kind: String(ackType || '').trim().toLowerCase() === 'read' ? 'read' : 'delivered',
         message_id: String(messageId || '').trim(),
       },
-    }, { broadcast: true });
+    }, {
+      broadcast: true,
+      direct_peer_id: transportPeerId,
+    });
   }
   return { ok: true, realtime_sent: !!sent };
 }
@@ -10822,6 +10860,7 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
     recipients.forEach((recipientId) => {
       const encryptedPayload = String(recipientPayloads[recipientId] || '').trim();
       if (!encryptedPayload) return;
+      const transportPeerId = resolveHyperwebTransportPeerId(recipientId);
       appendPrivateInboxEntry({
         kind: 'dm_message',
         to_fingerprint: recipientId,
@@ -10833,7 +10872,7 @@ function hyperwebChatSend(peerId = '', text = '', options = {}) {
           mode: 'dm',
         },
         encrypted_payload: encryptedPayload,
-      });
+      }, { direct_peer_id: transportPeerId });
     });
   }
   recipients.forEach((recipientId) => {
@@ -11515,6 +11554,7 @@ function enqueuePrivateShareNotice(peerId = '', payload = {}) {
   if (!chatPubkey) return { ok: false, message: 'Trusted peer chat key is unavailable.' };
   const encrypted = encryptHyperwebChatEnvelope(payload, chatPubkey);
   if (!encrypted || !encrypted.ok) return { ok: false, message: String((encrypted && encrypted.message) || 'Unable to encrypt share notice.') };
+  const transportPeerId = resolveHyperwebTransportPeerId(targetPeerId);
   return appendPrivateInboxEntry({
     kind: 'share_notice',
     to_fingerprint: targetPeerId,
@@ -11523,7 +11563,18 @@ function enqueuePrivateShareNotice(peerId = '', payload = {}) {
       notice_kind: String((payload && payload.notice_kind) || '').trim().toLowerCase(),
     },
     encrypted_payload: String(encrypted.text || ''),
-  });
+  }, { direct_peer_id: transportPeerId });
+}
+
+function resolveHyperwebChatAttachment(messageId = '') {
+  const targetId = String(messageId || '').trim();
+  if (!targetId) return { ok: false, message: 'message_id is required.' };
+  const state = ensureHyperwebSocialState();
+  const message = (Array.isArray(state.chat_messages) ? state.chat_messages : []).find((item) => String((item && item.message_id) || '').trim() === targetId);
+  if (!message) return { ok: false, message: 'Attachment message not found.' };
+  const file = normalizeChatFilePayload((message && message.file) || {});
+  if (!file) return { ok: false, message: 'Attachment data is unavailable.' };
+  return { ok: true, file };
 }
 
 function broadcastPrivateShareInvite(share, room, referencePayload = null) {
@@ -20687,7 +20738,7 @@ ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
   const rooms = listHyperwebChatRooms();
   return {
     ok: true,
-    messages,
+    messages: messages.map((item) => sanitizeHyperwebChatMessageForRenderer(item)),
     rooms: (rooms && rooms.ok) ? rooms.rooms : [],
     members,
     thread_id: threadId,
@@ -20696,6 +20747,13 @@ ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
     active_presence: activePresence,
     live_peer_count: Number((hyperwebManager.getStatus() && hyperwebManager.getStatus().peer_count) || 0),
   };
+});
+
+ipcMain.handle('browser:hyperwebChatAttachment', async (_event, payload) => {
+  const auth = requireHyperwebIdentity();
+  if (!auth.ok) return auth;
+  const messageId = String((payload && payload.message_id) || '').trim();
+  return resolveHyperwebChatAttachment(messageId);
 });
 
 ipcMain.handle('browser:hyperwebChatConversations', async () => {
