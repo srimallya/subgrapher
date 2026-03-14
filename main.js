@@ -11308,6 +11308,7 @@ function listPrivateSharesForCurrentUser() {
   const memberId = currentHyperwebMemberId();
   const state = readHyperwebPrivateSharesState();
   const shares = Array.isArray(state.shares) ? state.shares : [];
+  const refs = getReferences();
   const incoming = [];
   const outgoing = [];
   shares.forEach((share) => {
@@ -11323,6 +11324,7 @@ function listPrivateSharesForCurrentUser() {
     }
     const mine = recipients.find((item) => String((item && item.member_id) || '').trim().toUpperCase() === memberId);
     if (!mine) return;
+    const existing = findWorkspaceReferenceByPrivateShare(refs, String(share.share_id || ''), String(share.room_id || ''));
     incoming.push({
       share_id: String(share.share_id || ''),
       room_id: String(share.room_id || ''),
@@ -11333,6 +11335,7 @@ function listPrivateSharesForCurrentUser() {
       owner_alias: String(share.owner_alias || ''),
       read_access: !!(mine && mine.read_access !== false),
       write_status: String((mine && mine.write_status) || String((mine && mine.status) || 'write_pending')),
+      workspace_reference_id: String((existing.ref && existing.ref.id) || ''),
       created_at: Number(share.created_at || 0),
       updated_at: Number((mine && mine.updated_at) || share.updated_at || 0),
     });
@@ -11363,8 +11366,9 @@ function updateRecipientShareStatus(shareId, nextStatus) {
   }
   state.shares[idx] = share;
   writeHyperwebPrivateSharesState(state);
+  let materialized = null;
   if (room) {
-    materializeWorkspaceReferenceFromPrivateShare({
+    materialized = materializeWorkspaceReferenceFromPrivateShare({
       share_id: String(share.share_id || ''),
       room_id: String(room.room_id || ''),
       reference_id: String(room.reference_id || share.reference_id || ''),
@@ -11374,7 +11378,11 @@ function updateRecipientShareStatus(shareId, nextStatus) {
     });
   }
   sendPrivateShareStatusUpdate(share, target);
-  return { ok: true, share };
+  return {
+    ok: true,
+    share,
+    reference: materialized && materialized.ok ? materialized.reference : null,
+  };
 }
 
 function revokeShareAccess(shareId) {
@@ -11438,6 +11446,7 @@ function deletePrivateShare(shareId) {
 function listSharedRoomsForCurrentUser() {
   const memberId = currentHyperwebMemberId();
   const state = readHyperwebPrivateSharesState();
+  const refs = getReferences();
   const sharesById = new Map((Array.isArray(state.shares) ? state.shares : []).map((item) => [String((item && item.share_id) || ''), item]));
   const rooms = (Array.isArray(state.rooms) ? state.rooms : [])
     .filter((room) => {
@@ -11449,16 +11458,21 @@ function listSharedRoomsForCurrentUser() {
         .find((item) => String((item && item.member_id) || '').trim().toUpperCase() === memberId);
       return !!recipient && recipient.read_access !== false;
     })
-    .map((room) => ({
-      room_id: String((room && room.room_id) || ''),
-      share_id: String((room && room.share_id) || ''),
-      topic_id: String((room && room.topic_id) || ''),
-      reference_id: String((room && room.reference_id) || ''),
-      reference_title: String((room && room.reference_title) || ''),
-      owner_id: String((room && room.owner_id) || ''),
-      owner_alias: String((room && room.owner_alias) || ''),
-      updated_at: Number((room && room.updated_at) || 0),
-    }))
+    .map((room) => {
+      const existing = findWorkspaceReferenceByPrivateShare(refs, String((room && room.share_id) || ''), String((room && room.room_id) || ''));
+      return {
+        room_id: String((room && room.room_id) || ''),
+        share_id: String((room && room.share_id) || ''),
+        topic_id: String((room && room.topic_id) || ''),
+        reference_id: String((room && room.reference_id) || ''),
+        reference_title: String((room && room.reference_title) || ''),
+        owner_id: String((room && room.owner_id) || ''),
+        owner_alias: String((room && room.owner_alias) || ''),
+        workspace_reference_id: String((existing.ref && existing.ref.id) || ''),
+        workspace_reference_title: String((existing.ref && existing.ref.title) || ''),
+        updated_at: Number((room && room.updated_at) || 0),
+      };
+    })
     .sort((a, b) => Number((b && b.updated_at) || 0) - Number((a && a.updated_at) || 0));
   return { ok: true, rooms };
 }
@@ -11487,7 +11501,7 @@ function openSharedRoomForCurrentUser(roomId) {
   const canRead = ownerId === memberId || (recipient && recipient.read_access !== false);
   if (!canRead) return { ok: false, message: 'No access to this room.' };
   const canWrite = ownerId === memberId || (recipient && String((recipient && (recipient.write_status || recipient.status)) || '') === 'write_accepted');
-  materializeWorkspaceReferenceFromPrivateShare({
+  const materialized = materializeWorkspaceReferenceFromPrivateShare({
     share_id: String(share.share_id || ''),
     room_id: String(room.room_id || ''),
     reference_id: String(room.reference_id || share.reference_id || ''),
@@ -11512,6 +11526,8 @@ function openSharedRoomForCurrentUser(roomId) {
       content: String(room.content || ''),
       crdt_provider: String(room.crdt_provider || 'yjs'),
       can_write: !!canWrite,
+      workspace_reference_id: String((materialized && materialized.reference && materialized.reference.id) || ''),
+      workspace_reference_title: String((materialized && materialized.reference && materialized.reference.title) || ''),
       updated_at: Number(room.updated_at || 0),
     },
   };

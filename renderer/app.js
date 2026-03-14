@@ -7493,6 +7493,52 @@ function shareStatusClass(status) {
   return 'pending';
 }
 
+async function refreshWorkspaceReferenceState() {
+  if (typeof api.srList !== 'function') return state.references;
+  const refs = await api.srList();
+  if (!Array.isArray(refs)) return state.references;
+  state.references = refs;
+  renderReferences();
+  renderWorkspaceTabs();
+  renderContextFiles();
+  renderDiffPanel();
+  return refs;
+}
+
+function findWorkspaceReferenceForPrivateShare(options = {}) {
+  const shareId = String((options && options.share_id) || '').trim();
+  const roomId = String((options && options.room_id) || '').trim();
+  return (Array.isArray(state.references) ? state.references : []).find((ref) => {
+    const meta = (ref && ref.source_metadata && typeof ref.source_metadata === 'object') ? ref.source_metadata : {};
+    if (shareId && String(meta.private_share_id || meta.share_id || '').trim() === shareId) return true;
+    if (roomId && String(meta.private_share_room_id || meta.room_id || '').trim() === roomId) return true;
+    return false;
+  }) || null;
+}
+
+async function openWorkspaceReferenceFromPrivateShare(options = {}) {
+  let refs = await refreshWorkspaceReferenceState();
+  if (!Array.isArray(refs)) return false;
+  let match = findWorkspaceReferenceForPrivateShare(options);
+  const roomId = String((options && options.room_id) || '').trim();
+  if (!match && roomId && typeof api.hyperwebOpenSharedRoom === 'function') {
+    const openRes = await api.hyperwebOpenSharedRoom(roomId);
+    if (openRes && openRes.ok && openRes.room) {
+      state.privateActiveRoomId = roomId;
+      applySharedRoomState(openRes.room);
+    }
+    refs = await refreshWorkspaceReferenceState();
+    match = findWorkspaceReferenceForPrivateShare(options);
+  }
+  if (!match || !match.id) {
+    setStatusText('shares-status-line', 'Shared reference is available, but its workspace snapshot was not found.');
+    return false;
+  }
+  await setAppView('workspace');
+  await activateReferenceSurface(String(match.id || '').trim());
+  return true;
+}
+
 function renderShareMemberList() {
   const holder = e('share-member-list');
   if (!holder) return;
@@ -7601,6 +7647,7 @@ function renderIncomingShares() {
         <div class="muted small">From ${owner} · ${escapeHtml(formatAgo(item && item.created_at))}</div>
         <div class="share-row-actions">
           <button data-share-open="${shareId}" data-share-room="${roomId}">Open (Read)</button>
+          <button data-share-open-workspace="${shareId}" data-share-room="${roomId}">Open in Workspace</button>
           <button data-share-accept="${shareId}" ${status === 'write_accepted' ? 'disabled' : ''}>Accept Write</button>
           <button data-share-decline="${shareId}" ${(status === 'declined' || status === 'revoked') ? 'disabled' : ''}>Decline Write</button>
         </div>
@@ -7616,9 +7663,21 @@ function renderIncomingShares() {
       await openSharedRoom(roomId);
     });
   });
+  holder.querySelectorAll('button[data-share-open-workspace]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const shareId = String(button.getAttribute('data-share-open-workspace') || '').trim();
+      const roomId = String(button.getAttribute('data-share-room') || '').trim();
+      if (!shareId && !roomId) return;
+      await openWorkspaceReferenceFromPrivateShare({
+        share_id: shareId,
+        room_id: roomId,
+      });
+    });
+  });
   holder.querySelectorAll('button[data-share-accept]').forEach((button) => {
     button.addEventListener('click', async () => {
       const shareId = String(button.getAttribute('data-share-accept') || '').trim();
+      const roomId = String(button.getAttribute('data-share-room') || '').trim();
       if (!shareId || !api.hyperwebAcceptShareWrite) return;
       const res = await api.hyperwebAcceptShareWrite(shareId);
       if (!res || !res.ok) {
@@ -7626,6 +7685,17 @@ function renderIncomingShares() {
         return;
       }
       await refreshPrivateSharesData();
+      const referenceId = String((res && res.reference && res.reference.id) || '').trim();
+      if (referenceId) {
+        await refreshWorkspaceReferenceState();
+        await setAppView('workspace');
+        await activateReferenceSurface(referenceId);
+        return;
+      }
+      await openWorkspaceReferenceFromPrivateShare({
+        share_id: shareId,
+        room_id: roomId,
+      });
     });
   });
   holder.querySelectorAll('button[data-share-decline]').forEach((button) => {
@@ -7711,10 +7781,12 @@ function renderOutgoingShares() {
 function applySharedRoomState(room) {
   state.privateActiveRoom = room || null;
   const header = e('shares-room-header');
+  const workspaceBtn = e('shares-room-open-workspace-btn');
   const note = e('shares-room-readonly-note');
   const editor = e('shares-room-editor');
   if (!room) {
     if (header) header.textContent = 'Select a room to start collaborating.';
+    if (workspaceBtn) workspaceBtn.classList.add('hidden');
     if (note) note.classList.add('hidden');
     if (editor) {
       editor.value = '';
@@ -7725,6 +7797,11 @@ function applySharedRoomState(room) {
   const owner = String(room.owner_alias || room.owner_id || 'owner');
   const participants = Array.isArray(room.participants) ? room.participants.length : 0;
   if (header) header.textContent = `${String(room.reference_title || 'Room')} · owner ${owner} · participants ${participants}`;
+  if (workspaceBtn) {
+    workspaceBtn.classList.toggle('hidden', !String((room && room.workspace_reference_id) || '').trim());
+    workspaceBtn.dataset.roomId = String((room && room.room_id) || '');
+    workspaceBtn.dataset.shareId = String((room && room.share_id) || '');
+  }
   const canWrite = !!room.can_write;
   if (note) note.classList.toggle('hidden', canWrite);
   if (editor) {
@@ -7776,6 +7853,16 @@ async function openSharedRoom(roomId) {
     return;
   }
   state.privateActiveRoomId = id;
+  if (res && res.room) {
+    state.privateSharedRooms = (Array.isArray(state.privateSharedRooms) ? state.privateSharedRooms : []).map((room) => {
+      if (String((room && room.room_id) || '') !== id) return room;
+      return {
+        ...room,
+        workspace_reference_id: String((res.room && res.room.workspace_reference_id) || (room && room.workspace_reference_id) || ''),
+        workspace_reference_title: String((res.room && res.room.workspace_reference_title) || (room && room.workspace_reference_title) || ''),
+      };
+    });
+  }
   applySharedRoomState(res.room || null);
   renderSharedRooms();
 }
@@ -8422,6 +8509,11 @@ function renderHyperwebReferenceResults(list) {
       renderContextFiles();
       renderDiffPanel();
       setStatusText('hyperweb-ref-status', `Imported "${(res.imported && res.imported.title) || 'reference'}".`);
+      const importedId = String((res && res.imported && res.imported.id) || '').trim();
+      if (importedId) {
+        await setAppView('workspace');
+        await activateReferenceSurface(importedId);
+      }
     });
   });
 
@@ -10745,6 +10837,16 @@ function bindControls() {
   e('shares-tab-incoming-btn')?.addEventListener('click', () => setSharesTab('incoming'));
   e('shares-tab-outgoing-btn')?.addEventListener('click', () => setSharesTab('outgoing'));
   e('shares-tab-rooms-btn')?.addEventListener('click', () => setSharesTab('rooms'));
+  e('shares-room-open-workspace-btn')?.addEventListener('click', async (event) => {
+    const button = event && event.currentTarget ? event.currentTarget : null;
+    const shareId = String((button && button.dataset && button.dataset.shareId) || '').trim();
+    const roomId = String((button && button.dataset && button.dataset.roomId) || '').trim();
+    if (!shareId && !roomId) return;
+    await openWorkspaceReferenceFromPrivateShare({
+      share_id: shareId,
+      room_id: roomId,
+    });
+  });
 
   e('hyperweb-tab-feed-btn')?.addEventListener('click', async () => {
     await setHyperwebSurfaceTab('feed');
