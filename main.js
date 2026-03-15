@@ -8379,7 +8379,8 @@ function sanitizePublicReference(ref) {
       id: String((artifact && artifact.id) || ''),
       type: String((artifact && artifact.type) || 'markdown'),
       title: String((artifact && artifact.title) || ''),
-      content: String((artifact && artifact.content) || '').slice(0, 8000),
+      // Public snapshot imports need the full artifact body; truncation silently corrupts HTML artifacts.
+      content: String((artifact && artifact.content) || ''),
       updated_at: Number((artifact && artifact.updated_at) || nowTs()),
     })),
     program: String((ref && ref.program) || ''),
