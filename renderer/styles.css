@@ -180,6 +180,25 @@ summary:focus-visible {
   border-color: var(--border-strong);
 }
 
+.topbar-hyperweb-status {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 0 4px;
+}
+
+.topbar-hyperweb-status-label {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.1;
+}
+
+.topbar-hyperweb-status-value {
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .primary-nav {
   gap: 6px;
   flex-wrap: nowrap;
@@ -1271,7 +1290,6 @@ summary:focus-visible {
 .skill-item,
 .mail-row,
 .mail-thread-item,
-.mail-message,
 .settings-user-row,
 .settings-provider-key-row,
 .share-member-row {
@@ -1303,6 +1321,17 @@ summary:focus-visible {
 .settings-user-row + .settings-user-row,
 .settings-provider-key-row + .settings-provider-key-row {
   margin-top: 8px;
+}
+
+.mail-message {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: #242424;
 }
 
 .skill-item pre {
@@ -1853,12 +1882,27 @@ summary:focus-visible {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.settings-hyperweb-invite-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin-top: 12px;
+}
+
 .settings-field {
   display: flex;
   flex-direction: column;
   gap: 6px;
   color: #d7d1c7;
   min-width: 0;
+}
+
+.settings-hyperweb-invite-panel {
+  min-height: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .settings-field > span:first-child,
@@ -2610,7 +2654,8 @@ body.chat-collapsed #chat-panel-resizer {
   .settings-grid-3,
   .settings-grid-status-2x2,
   .settings-grid-rag-footer,
-  .settings-grid-telegram-main {
+  .settings-grid-telegram-main,
+  .settings-hyperweb-invite-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -2877,6 +2922,14 @@ body.chat-collapsed #chat-panel-resizer {
   white-space: pre-wrap;
   color: var(--text);
   line-height: 1.5;
+}
+
+.mail-message-body-wrap {
+  width: 100%;
+}
+
+.mail-message-body {
+  max-width: 92ch;
 }
 
 .mail-message-body p {

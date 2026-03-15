@@ -26,6 +26,10 @@
     <div class="top-controls">
       <button id="workspace-left-rail-toggle-btn" class="top-btn workspace-chrome-toggle" type="button" aria-controls="references-panel" aria-expanded="false">References</button>
       <button id="workspace-right-rail-toggle-btn" class="top-btn workspace-chrome-toggle" type="button" aria-controls="chat-panel" aria-expanded="true">Lumino</button>
+      <div id="topbar-hyperweb-status" class="topbar-hyperweb-status">
+        <div class="topbar-hyperweb-status-label">Network Status</div>
+        <div id="hyperweb-status" class="topbar-hyperweb-status-value">Checking...</div>
+      </div>
       <div class="app-tools">
         <button id="app-tools-btn" class="top-btn" type="button" aria-haspopup="true" aria-expanded="false">More</button>
         <div id="app-tools-menu" class="app-tools-menu hidden">
@@ -406,10 +410,10 @@
         <div class="settings-section-content">
         <div class="settings-grid settings-grid-2">
           <label class="settings-field settings-boolean-field">
-            <span>Hyperweb</span>
+            <span>Allow Hyperweb</span>
             <span class="settings-toggle-card">
               <input id="settings-hyperweb-enabled" data-setting="hyperweb_enabled" type="checkbox" />
-              <span>Enabled</span>
+              <span>Allow this app to use Hyperweb.</span>
             </span>
           </label>
           <label class="settings-field">Display Name
@@ -418,28 +422,34 @@
         </div>
         <div class="settings-grid settings-grid-2">
           <div class="settings-field">
-            <span>Connection</span>
+            <span>Network Status</span>
+            <div id="settings-hyperweb-network-status" class="muted small">Checking...</div>
             <div class="settings-inline-actions">
-              <button id="settings-hyperweb-connect-btn" type="button">Connect</button>
-              <button id="settings-hyperweb-disconnect-btn" type="button">Disconnect</button>
+              <button id="settings-hyperweb-connect-btn" type="button">Go Online</button>
+              <button id="settings-hyperweb-disconnect-btn" type="button">Go Offline</button>
             </div>
           </div>
-          <label class="settings-field">Your Invite Key
-            <textarea id="settings-hyperweb-invite-output" rows="4" readonly placeholder="Generate a key to share with another Subgrapher user"></textarea>
-          </label>
           <div class="settings-field">
-            <span>Invite Actions</span>
+            <span>Peer Management</span>
+            <div class="muted small">Invite a peer, then remove them here if you want a full local purge of trust, DM history, and private-share communication.</div>
+          </div>
+        </div>
+        <div class="settings-hyperweb-invite-grid">
+          <div class="settings-field settings-hyperweb-invite-panel">
+            <span>Your Invite Key</span>
+            <textarea id="settings-hyperweb-invite-output" rows="4" readonly placeholder="Generate a key to share with another Subgrapher user"></textarea>
             <div class="settings-inline-actions">
               <button id="settings-hyperweb-invite-generate-btn" type="button">Generate Key</button>
               <button id="settings-hyperweb-invite-copy-btn" type="button">Copy Key</button>
             </div>
           </div>
-          <label class="settings-field">Received Invite Key
+          <div class="settings-field settings-hyperweb-invite-panel">
+            <span>Received Invite Key</span>
             <textarea id="settings-hyperweb-invite-input" rows="4" placeholder="Paste a key or subgrapher://hyperweb-invite link"></textarea>
-          </label>
-        </div>
-        <div class="settings-inline-actions">
-          <button id="settings-hyperweb-invite-accept-btn" type="button">Accept Key</button>
+            <div class="settings-inline-actions">
+              <button id="settings-hyperweb-invite-accept-btn" type="button">Accept Key</button>
+            </div>
+          </div>
         </div>
         <div class="settings-grid settings-grid-1">
           <div class="settings-field settings-field-wide">

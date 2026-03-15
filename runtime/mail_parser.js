@@ -1,5 +1,6 @@
 const path = require('path');
 const crypto = require('crypto');
+const { TextDecoder } = require('util');
 
 function normalizeWhitespace(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -23,14 +24,99 @@ function decodeQuotedPrintable(value = '') {
     .replace(/=([A-Fa-f0-9]{2})/g, (_m, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
 }
 
-function decodeMimeWords(value = '') {
-  return String(value || '').replace(/=\?([^?]+)\?([BQbq])\?([^?]*)\?=/g, (_m, _charset, encoding, content) => {
+function decodeQuotedPrintableToBuffer(value = '') {
+  const input = String(value || '').replace(/=\r?\n/g, '');
+  const bytes = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (char === '=' && /^[A-Fa-f0-9]{2}$/.test(input.slice(index + 1, index + 3))) {
+      bytes.push(Number.parseInt(input.slice(index + 1, index + 3), 16));
+      index += 2;
+      continue;
+    }
+    bytes.push(input.charCodeAt(index) & 0xff);
+  }
+  return Buffer.from(bytes);
+}
+
+function normalizeCharsetLabel(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return 'utf-8';
+  if (raw === 'utf8') return 'utf-8';
+  if (raw === 'us-ascii' || raw === 'ascii') return 'utf-8';
+  if (raw === 'latin1' || raw === 'latin-1' || raw === 'iso-8859-1' || raw === 'iso8859-1') return 'iso-8859-1';
+  if (raw === 'cp1252' || raw === 'windows1252' || raw === 'windows-1252') return 'windows-1252';
+  if (raw === 'utf16' || raw === 'utf-16') return 'utf-16le';
+  return raw;
+}
+
+function decodeWindows1252Buffer(buffer) {
+  const chars = [];
+  const table = {
+    0x80: 0x20ac,
+    0x82: 0x201a,
+    0x83: 0x0192,
+    0x84: 0x201e,
+    0x85: 0x2026,
+    0x86: 0x2020,
+    0x87: 0x2021,
+    0x88: 0x02c6,
+    0x89: 0x2030,
+    0x8a: 0x0160,
+    0x8b: 0x2039,
+    0x8c: 0x0152,
+    0x8e: 0x017d,
+    0x91: 0x2018,
+    0x92: 0x2019,
+    0x93: 0x201c,
+    0x94: 0x201d,
+    0x95: 0x2022,
+    0x96: 0x2013,
+    0x97: 0x2014,
+    0x98: 0x02dc,
+    0x99: 0x2122,
+    0x9a: 0x0161,
+    0x9b: 0x203a,
+    0x9c: 0x0153,
+    0x9e: 0x017e,
+    0x9f: 0x0178,
+  };
+  for (const byte of buffer) {
+    if (table[byte]) {
+      chars.push(String.fromCodePoint(table[byte]));
+      continue;
+    }
+    chars.push(String.fromCharCode(byte));
+  }
+  return chars.join('');
+}
+
+function decodeBufferWithCharset(buffer, charset = 'utf-8') {
+  const payload = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
+  const normalized = normalizeCharsetLabel(charset);
+  try {
+    if (normalized === 'windows-1252') return decodeWindows1252Buffer(payload);
+    if (normalized === 'iso-8859-1') return payload.toString('latin1');
+    const decoder = new TextDecoder(normalized, { fatal: false });
+    return decoder.decode(payload);
+  } catch (_) {
     try {
+      return payload.toString('utf8');
+    } catch (_) {
+      return payload.toString('latin1');
+    }
+  }
+}
+
+function decodeMimeWords(value = '') {
+  return String(value || '').replace(/=\?([^?]+)\?([BQbq])\?([^?]*)\?=/g, (_m, charset, encoding, content) => {
+    try {
+      const normalizedCharset = normalizeCharsetLabel(charset);
       if (String(encoding || '').toUpperCase() === 'B') {
-        return Buffer.from(String(content || ''), 'base64').toString('utf8');
+        return decodeBufferWithCharset(Buffer.from(String(content || ''), 'base64'), normalizedCharset);
       }
-      const qp = String(content || '').replace(/_/g, ' ');
-      return decodeQuotedPrintable(qp);
+      const qp = String(content || '').replace(/_/g, '=20');
+      return decodeBufferWithCharset(decodeQuotedPrintableToBuffer(qp), normalizedCharset);
     } catch (_) {
       return String(content || '');
     }
@@ -110,7 +196,7 @@ function decodeBody(bodyRaw = '', encoding = '') {
     }
   }
   if (normalized === 'quoted-printable') {
-    return Buffer.from(decodeQuotedPrintable(String(bodyRaw || '')), 'utf8');
+    return decodeQuotedPrintableToBuffer(String(bodyRaw || ''));
   }
   return Buffer.from(String(bodyRaw || ''), 'utf8');
 }
@@ -139,6 +225,7 @@ function parseMimePart(raw = '', out = null) {
   const disposition = getHeader(headers, 'content-disposition');
   const transferEncoding = getHeader(headers, 'content-transfer-encoding');
   const boundary = getParam(contentType, 'boundary');
+  const charset = getParam(contentType, 'charset') || 'utf-8';
   const mimeType = String(contentType.split(';')[0] || 'text/plain').trim().toLowerCase();
 
   if (mimeType.startsWith('multipart/') && boundary) {
@@ -166,10 +253,10 @@ function parseMimePart(raw = '', out = null) {
     return target;
   }
   if (mimeType === 'text/html') {
-    target.htmlParts.push(payload.toString('utf8'));
+    target.htmlParts.push(decodeBufferWithCharset(payload, charset));
     return target;
   }
-  target.textParts.push(payload.toString('utf8'));
+  target.textParts.push(decodeBufferWithCharset(payload, charset));
   return target;
 }
 

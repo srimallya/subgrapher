@@ -5245,6 +5245,7 @@ function renderMailPreviewMarkup(preview) {
     String((preview && preview.sent_at) || '').trim(),
   ].filter(Boolean).join(' · ');
   const unread = !!(preview && preview.is_unread);
+  const bodyValue = String((preview && preview.body_text) || (preview && preview.snippet) || '');
   return `
     <div class="mail-message ${unread ? 'unread' : ''}">
       <div class="mail-message-head">
@@ -5254,7 +5255,9 @@ function renderMailPreviewMarkup(preview) {
         ${formatAddressLine('To', preview && preview.to)}
         ${formatAddressLine('Cc', preview && preview.cc)}
       </div>
-      <div class="mail-message-body">${formatMailBodyForDisplay((preview && preview.body_text) || (preview && preview.snippet) || '')}</div>
+      <div class="mail-message-body-wrap">
+        <div class="mail-message-body">${formatMailBodyForDisplay(bodyValue)}</div>
+      </div>
       ${attachmentsMarkup}
     </div>
   `;
@@ -9382,6 +9385,7 @@ function renderSettingsForm() {
   renderSettingsAbstractionStatus();
   renderSettingsRagStatus();
   renderSettingsStatusLine();
+  renderSettingsHyperwebControls();
   renderSettingsConfiguredState();
 }
 
@@ -9411,6 +9415,36 @@ function renderSettingsDiagnostics() {
   if (pythonDownloadBtn) {
     pythonDownloadBtn.hidden = !(electronApi && electronApi.platform === 'win32');
   }
+  renderSettingsHyperwebControls();
+}
+
+function renderSettingsHyperwebControls() {
+  const statusNode = e('settings-hyperweb-network-status');
+  const connectBtn = e('settings-hyperweb-connect-btn');
+  const disconnectBtn = e('settings-hyperweb-disconnect-btn');
+  const draft = normalizeSettingsDraft(state.settingsDraft || {});
+  const diag = state.settingsDiagnostics || {};
+  const hyper = (diag && diag.hyperweb && typeof diag.hyperweb === 'object') ? diag.hyperweb : {};
+  const allowed = !!draft.hyperweb_enabled;
+  const connected = !!hyper.connected;
+  const degraded = !!hyper.degraded;
+  const peerCount = Math.max(0, Number(hyper.peer_count || 0));
+  const pendingEntries = Math.max(0, Number(hyper.pending_private_entries || 0));
+
+  if (statusNode) {
+    if (!allowed) {
+      statusNode.textContent = 'Disabled. Turn on "Allow Hyperweb" before going online.';
+    } else if (connected && degraded) {
+      statusNode.textContent = `Online with issues. ${peerCount} peer${peerCount === 1 ? '' : 's'} connected${pendingEntries > 0 ? ` · ${pendingEntries} pending private entr${pendingEntries === 1 ? 'y' : 'ies'}` : ''}.`;
+    } else if (connected) {
+      statusNode.textContent = `Online. ${peerCount} peer${peerCount === 1 ? '' : 's'} connected${pendingEntries > 0 ? ` · ${pendingEntries} pending private entr${pendingEntries === 1 ? 'y' : 'ies'}` : ''}.`;
+    } else {
+      statusNode.textContent = 'Offline. Trusted peers stay saved, but live sync and direct delivery are paused.';
+    }
+  }
+
+  if (connectBtn) connectBtn.disabled = !allowed || connected;
+  if (disconnectBtn) disconnectBtn.disabled = !connected;
 }
 
 function formatTrustedPeerFingerprint(peerId = '') {
