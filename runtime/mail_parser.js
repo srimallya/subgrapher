@@ -240,8 +240,28 @@ function stripHtml(value = '') {
   );
 }
 
+function createMimeAccumulator() {
+  return { textParts: [], htmlParts: [], attachments: [] };
+}
+
+function mergeMimeAccumulator(target, source) {
+  if (!target || !source) return target;
+  if (Array.isArray(source.textParts) && source.textParts.length) target.textParts.push(...source.textParts);
+  if (Array.isArray(source.htmlParts) && source.htmlParts.length) target.htmlParts.push(...source.htmlParts);
+  if (Array.isArray(source.attachments) && source.attachments.length) target.attachments.push(...source.attachments);
+  return target;
+}
+
+function choosePreferredAlternative(parts = []) {
+  const items = Array.isArray(parts) ? parts : [];
+  return items.find((item) => Array.isArray(item.textParts) && item.textParts.length)
+    || items.find((item) => Array.isArray(item.htmlParts) && item.htmlParts.length)
+    || items[0]
+    || createMimeAccumulator();
+}
+
 function parseMimePart(raw = '', out = null) {
-  const target = out || { textParts: [], htmlParts: [], attachments: [] };
+  const target = out || createMimeAccumulator();
   const { headersRaw, bodyRaw } = splitHeadersAndBody(raw);
   const headers = parseHeaderBlock(headersRaw);
   const contentType = getHeader(headers, 'content-type') || 'text/plain';
@@ -254,11 +274,19 @@ function parseMimePart(raw = '', out = null) {
   if (mimeType.startsWith('multipart/') && boundary) {
     const marker = `--${boundary}`;
     const chunks = String(bodyRaw || '').split(marker).slice(1);
+    const childResults = [];
     chunks.forEach((chunk) => {
       const clean = chunk.replace(/^\r?\n/, '').replace(/\r?\n--\s*$/, '').trim();
       if (!clean || clean === '--') return;
-      parseMimePart(clean, target);
+      const childTarget = createMimeAccumulator();
+      parseMimePart(clean, childTarget);
+      childResults.push(childTarget);
     });
+    if (mimeType === 'multipart/alternative') {
+      mergeMimeAccumulator(target, choosePreferredAlternative(childResults));
+      return target;
+    }
+    childResults.forEach((child) => mergeMimeAccumulator(target, child));
     return target;
   }
 
