@@ -118,14 +118,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     srRemoveContextFile: (srId, fileId) => ipcRenderer.invoke('browser:srRemoveContextFile', { srId, fileId }),
     srListMailThreads: (srId) => ipcRenderer.invoke('browser:srListMailThreads', { srId }),
     srGetMailThread: (srId, threadId) => ipcRenderer.invoke('browser:srGetMailThread', { srId, threadId }),
-    srAttachMailThreads: (srId, sources = [], sourceKind = 'apple_mail_local') => ipcRenderer.invoke('browser:srAttachMailThreads', {
+    srAttachMailThreads: (srId, sources = [], sourceKind = 'apple_mail_local', mailTabId = '') => ipcRenderer.invoke('browser:srAttachMailThreads', {
       srId,
       sources,
       source_kind: sourceKind,
+      mail_tab_id: mailTabId,
     }),
-    srAttachMailThreadsFromStore: (srId, threadIds = []) => ipcRenderer.invoke('browser:srAttachMailThreadsFromStore', {
+    srAttachMailThreadsFromStore: (srId, threadIds = [], mailTabId = '') => ipcRenderer.invoke('browser:srAttachMailThreadsFromStore', {
       srId,
       thread_ids: threadIds,
+      mail_tab_id: mailTabId,
     }),
     srImportMailFiles: (srId, absolutePaths = []) => ipcRenderer.invoke('browser:srImportMailFiles', { srId, absolutePaths }),
     mailStatus: () => ipcRenderer.invoke('browser:mailStatus'),

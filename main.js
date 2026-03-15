@@ -12497,6 +12497,9 @@ function createMailTab(seed = {}) {
     title: String(seed.title || 'Mail').slice(0, 120),
     mail_view_state: {
       query: String(mailViewState.query || '').trim(),
+      account_id: String(mailViewState.account_id || '').trim(),
+      mailbox_path: String(mailViewState.mailbox_path || '').trim(),
+      smart_view: String(mailViewState.smart_view || 'inbox').trim() || 'inbox',
       selected_thread_id: String(mailViewState.selected_thread_id || '').trim(),
     },
     snapshot_at: nowTs(),
@@ -12505,12 +12508,44 @@ function createMailTab(seed = {}) {
   };
 }
 
+function getNextMailTabTitle(ref, preferredTitle = 'Mail') {
+  const baseTitle = String(preferredTitle || 'Mail').trim() || 'Mail';
+  const mailTabs = Array.isArray(ref && ref.tabs)
+    ? ref.tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail')
+    : [];
+  const used = new Set();
+  mailTabs.forEach((tab) => {
+    const title = String((tab && tab.title) || '').trim();
+    if (!title) return;
+    if (title === baseTitle) {
+      used.add(1);
+      return;
+    }
+    const match = title.match(new RegExp(`^${baseTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+(\\d+)$`));
+    if (!match) return;
+    const index = Number(match[1]);
+    if (Number.isFinite(index) && index > 1) used.add(index);
+  });
+  let nextIndex = 1;
+  while (used.has(nextIndex)) nextIndex += 1;
+  return nextIndex <= 1 ? baseTitle : `${baseTitle} ${nextIndex}`;
+}
+
 function ensureSingleMailTab(ref, seed = {}) {
   if (!ref || typeof ref !== 'object') return null;
   ref.tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
-  const existing = ref.tabs.find((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail') || null;
-  if (existing) return { created: false, deduped: false, tab: existing };
-  const tab = createMailTab(seed);
+  const targetTabId = String((seed && seed.mail_tab_id) || '').trim();
+  if (targetTabId) {
+    const existing = ref.tabs.find((tab) => (
+      String((tab && tab.id) || '') === targetTabId
+      && String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail'
+    )) || null;
+    if (existing) return { created: false, deduped: false, tab: existing };
+  }
+  const tab = createMailTab({
+    ...seed,
+    title: getNextMailTabTitle(ref, String((seed && seed.title) || 'Mail').trim() || 'Mail'),
+  });
   ref.tabs.push(tab);
   return { created: true, deduped: false, tab };
 }
@@ -19604,7 +19639,10 @@ async function attachMailSourcesToReference(srId, sourceItems = [], options = {}
     importedThreads.push(thread);
   });
 
-  const mailTabRes = ensureSingleMailTab(refs[idx], { title: 'Mail' });
+  const mailTabRes = ensureSingleMailTab(refs[idx], {
+    title: 'Mail',
+    mail_tab_id: String((options && options.mail_tab_id) || '').trim(),
+  });
   refs[idx].active_tab_id = mailTabRes && mailTabRes.tab ? mailTabRes.tab.id : refs[idx].active_tab_id;
   refs[idx].updated_at = nowTs();
   setReferences(refs);
@@ -19645,6 +19683,7 @@ ipcMain.handle('browser:srAttachMailThreads', async (_event, payload) => {
   const sourceItems = Array.isArray(payload && payload.sources) ? payload.sources : [];
   return attachMailSourcesToReference(srId, sourceItems, {
     source_kind: String((payload && payload.source_kind) || 'manual_import'),
+    mail_tab_id: String((payload && payload.mail_tab_id) || '').trim(),
   });
 });
 
@@ -19665,6 +19704,7 @@ ipcMain.handle('browser:srAttachMailThreadsFromStore', async (_event, payload) =
   });
   return attachMailSourcesToReference(srId, sources, {
     source_kind: 'imap_sync',
+    mail_tab_id: String((payload && payload.mail_tab_id) || '').trim(),
   });
 });
 
