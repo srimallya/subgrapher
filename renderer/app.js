@@ -9424,7 +9424,9 @@ function renderSettingsHyperwebControls() {
   const disconnectBtn = e('settings-hyperweb-disconnect-btn');
   const draft = normalizeSettingsDraft(state.settingsDraft || {});
   const diag = state.settingsDiagnostics || {};
-  const hyper = (diag && diag.hyperweb && typeof diag.hyperweb === 'object') ? diag.hyperweb : {};
+  const hyper = (state.hyperwebStatus && typeof state.hyperwebStatus === 'object')
+    ? state.hyperwebStatus
+    : ((diag && diag.hyperweb && typeof diag.hyperweb === 'object') ? diag.hyperweb : {});
   const allowed = !!draft.hyperweb_enabled;
   const connected = !!hyper.connected;
   const degraded = !!hyper.degraded;
@@ -9881,6 +9883,7 @@ async function loadSettingsData() {
   try { await refreshAbstractionStatus(); } catch (_) {}
   try { await refreshRagStatus(); } catch (_) {}
   try { await refreshAppDataProtectionStatus(); } catch (_) {}
+  try { await refreshHyperwebStatus(); } catch (_) {}
   try { await refreshSettingsTrustedPeers(); } catch (_) {}
   if (diagnostics && diagnostics.ok) {
     state.settingsDiagnostics = diagnostics;
@@ -11545,6 +11548,7 @@ function bindControls() {
 
   e('settings-hyperweb-connect-btn')?.addEventListener('click', async () => {
     await api.hyperwebConnect();
+    await refreshHyperwebStatus();
     await refreshSettingsTrustedPeers();
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
@@ -11555,6 +11559,7 @@ function bindControls() {
 
   e('settings-hyperweb-disconnect-btn')?.addEventListener('click', async () => {
     await api.hyperwebDisconnect();
+    await refreshHyperwebStatus();
     await refreshSettingsTrustedPeers();
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
