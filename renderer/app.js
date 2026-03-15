@@ -124,6 +124,7 @@ const state = {
   settingsDirty: false,
   settingsValidationErrors: {},
   settingsDiagnostics: null,
+  settingsTrustedPeers: [],
   mailStatus: null,
   mailUnreadCount: 0,
   hyperwebUnreadCount: 0,
@@ -9412,6 +9413,129 @@ function renderSettingsDiagnostics() {
   }
 }
 
+function formatTrustedPeerFingerprint(peerId = '') {
+  const clean = String(peerId || '').trim().toUpperCase();
+  if (!clean) return '';
+  if (clean.length <= 16) return clean;
+  return `${clean.slice(0, 8)}...${clean.slice(-6)}`;
+}
+
+function trustedPeerPresenceLabel(peer = {}) {
+  const presence = String((peer && peer.presence_status) || '').trim().toLowerCase();
+  if (presence === 'online') return 'online';
+  if (presence === 'seen_recently') return 'seen recently';
+  return 'offline';
+}
+
+function renderSettingsTrustedPeers() {
+  const holder = e('settings-hyperweb-trusted-peers');
+  if (!holder) return;
+  const peers = Array.isArray(state.settingsTrustedPeers) ? state.settingsTrustedPeers : [];
+  if (peers.length === 0) {
+    holder.innerHTML = '<div class="settings-hyperweb-trusted-peer-empty">No trusted peers yet.</div>';
+    return;
+  }
+  holder.innerHTML = peers.map((peer) => {
+    const peerId = String((peer && peer.peer_id) || '').trim().toUpperCase();
+    const alias = escapeHtml(String((peer && peer.alias) || peerId || 'Peer'));
+    const detailParts = [
+      formatTrustedPeerFingerprint(peerId),
+      trustedPeerPresenceLabel(peer),
+    ];
+    if (Number((peer && peer.last_seen_at) || 0) > 0 && String((peer && peer.presence_status) || '').trim().toLowerCase() !== 'online') {
+      detailParts.push(formatAgo(Number(peer.last_seen_at || 0)));
+    }
+    if (String((peer && peer.relay_peer_id) || '').trim()) {
+      detailParts.push(`relay ${formatTrustedPeerFingerprint(String(peer.relay_peer_id || ''))}`);
+    }
+    return `
+      <div class="settings-hyperweb-trusted-peer-row">
+        <div class="settings-hyperweb-trusted-peer-meta">
+          <div class="settings-hyperweb-trusted-peer-name">${alias}</div>
+          <div class="settings-hyperweb-trusted-peer-detail" title="${escapeHtml(peerId)}">${escapeHtml(detailParts.filter(Boolean).join(' · '))}</div>
+        </div>
+        <button type="button" data-settings-remove-peer="${escapeHtml(peerId)}">Remove</button>
+      </div>
+    `;
+  }).join('');
+  holder.querySelectorAll('button[data-settings-remove-peer]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const peerId = String(button.getAttribute('data-settings-remove-peer') || '').trim().toUpperCase();
+      if (!peerId || !api || typeof api.hyperwebForgetPeer !== 'function') return;
+      const confirmed = window.confirm(
+        'Remove this trusted peer locally?\n\nTrust will be removed, DM history deleted, private-share communication and history deleted, and shared access revoked locally.'
+      );
+      if (!confirmed) return;
+      button.disabled = true;
+      try {
+        const res = await api.hyperwebForgetPeer(peerId);
+        if (!res || !res.ok) {
+          state.settingsSaveState = (res && res.message) ? res.message : 'Unable to remove trusted peer.';
+          renderSettingsStatusLine();
+          return;
+        }
+        state.settingsSaveState = 'Trusted peer removed locally.';
+        renderSettingsStatusLine();
+        await handleTrustedPeerRemoved(res, peerId);
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
+}
+
+async function refreshSettingsTrustedPeers() {
+  if (!api || typeof api.hyperwebTrustedPeersList !== 'function') {
+    state.settingsTrustedPeers = [];
+    renderSettingsTrustedPeers();
+    return;
+  }
+  const res = await api.hyperwebTrustedPeersList();
+  state.settingsTrustedPeers = (res && res.ok && Array.isArray(res.peers)) ? res.peers : [];
+  renderSettingsTrustedPeers();
+}
+
+async function handleTrustedPeerRemoved(res = {}, peerId = '') {
+  const targetId = String(peerId || '').trim().toUpperCase();
+  const removedRoomIds = new Set(Array.isArray(res && res.removed_room_ids) ? res.removed_room_ids.map((id) => String(id || '').trim()) : []);
+  const removedActiveDm = String(state.hyperwebChatPeerId || '').trim().toUpperCase() === targetId;
+  const removedActiveRoom = removedRoomIds.has(String(state.privateActiveRoomId || '').trim());
+
+  await refreshSettingsTrustedPeers();
+  try {
+    const diagnostics = await api.settingsDiagnostics();
+    if (diagnostics && diagnostics.ok) {
+      state.settingsDiagnostics = diagnostics;
+      renderSettingsDiagnostics();
+    }
+  } catch (_) {}
+  try { await refreshShareMemberDirectory(); } catch (_) {}
+  try { await refreshHyperwebStatus(); } catch (_) {}
+  try { await refreshPrivateSharesData(); } catch (_) {}
+  if (state.appView === 'hyperweb' && state.hyperwebActiveTab === 'chat') {
+    try { await refreshHyperwebChatData(); } catch (_) {}
+  }
+
+  if (removedActiveDm) {
+    state.hyperwebChatPeerId = '';
+    state.hyperwebChatMessages = [];
+    state.hyperwebChatThreadId = '';
+    state.hyperwebChatThreadPolicy = { retention: 'off' };
+    state.hyperwebChatActivePresence = null;
+    state.hyperwebChatLivePeerCount = 0;
+    renderHyperwebChatSelectors();
+    renderHyperwebDmConversationList();
+    renderHyperwebChatThread();
+    setStatusText('hyperweb-chat-status', 'Trusted peer removed locally. Conversation cleared.');
+  }
+
+  if (removedActiveRoom) {
+    state.privateActiveRoomId = '';
+    applySharedRoomState(null);
+    renderSharedRooms();
+  }
+}
+
 function normalizeHyperwebInviteTokenInput(value = '') {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -9723,6 +9847,7 @@ async function loadSettingsData() {
   try { await refreshAbstractionStatus(); } catch (_) {}
   try { await refreshRagStatus(); } catch (_) {}
   try { await refreshAppDataProtectionStatus(); } catch (_) {}
+  try { await refreshSettingsTrustedPeers(); } catch (_) {}
   if (diagnostics && diagnostics.ok) {
     state.settingsDiagnostics = diagnostics;
     renderSettingsDiagnostics();
@@ -11376,6 +11501,7 @@ function bindControls() {
     renderSettingsStatusLine();
     await refreshHyperwebChatData();
     await refreshHyperwebStatus();
+    await refreshSettingsTrustedPeers();
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
       state.settingsDiagnostics = diagnostics;
@@ -11385,6 +11511,7 @@ function bindControls() {
 
   e('settings-hyperweb-connect-btn')?.addEventListener('click', async () => {
     await api.hyperwebConnect();
+    await refreshSettingsTrustedPeers();
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
       state.settingsDiagnostics = diagnostics;
@@ -11394,6 +11521,7 @@ function bindControls() {
 
   e('settings-hyperweb-disconnect-btn')?.addEventListener('click', async () => {
     await api.hyperwebDisconnect();
+    await refreshSettingsTrustedPeers();
     const diagnostics = await api.settingsDiagnostics();
     if (diagnostics && diagnostics.ok) {
       state.settingsDiagnostics = diagnostics;

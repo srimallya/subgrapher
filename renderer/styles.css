@@ -2006,6 +2006,53 @@ summary:focus-visible {
   gap: 10px;
 }
 
+.settings-hyperweb-trusted-peers {
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #1f1f1f;
+}
+
+.settings-hyperweb-trusted-peer-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.settings-hyperweb-trusted-peer-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-hyperweb-trusted-peer-meta {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.settings-hyperweb-trusted-peer-name {
+  font-weight: 500;
+}
+
+.settings-hyperweb-trusted-peer-detail {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.settings-hyperweb-trusted-peer-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .settings-mail-accounts-list {
   display: grid;
   gap: 10px;

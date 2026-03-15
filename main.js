@@ -10265,6 +10265,276 @@ function listHyperwebMembers() {
   });
 }
 
+function listHyperwebTrustedPeers() {
+  const state = ensureHyperwebSocialState();
+  const onlineSet = getHyperwebOnlinePeerIds();
+  const presenceByPeer = (state.presence_by_peer && typeof state.presence_by_peer === 'object') ? state.presence_by_peer : {};
+  const localId = currentHyperwebMemberId();
+  const peers = Object.entries(state.known_peers || {}).map(([fingerprint, peer]) => {
+    const peerId = String(fingerprint || '').trim().toUpperCase();
+    const relayPeerId = String((peer && peer.relay_peer_id) || '').trim().toUpperCase();
+    const lastSeenAt = Number(((presenceByPeer[peerId] || {}).last_seen_at) || Number((peer && peer.updated_at) || 0));
+    let presenceStatus = 'offline';
+    if (peerId && (onlineSet.has(peerId) || (relayPeerId && onlineSet.has(relayPeerId)))) {
+      presenceStatus = 'online';
+    } else if (lastSeenAt > 0 && (nowTs() - lastSeenAt) <= HYPERWEB_PRESENCE_RECENT_WINDOW_MS) {
+      presenceStatus = 'seen_recently';
+    }
+    return {
+      peer_id: peerId,
+      alias: String((peer && peer.alias) || peerId || 'peer'),
+      presence_status: presenceStatus,
+      last_seen_at: lastSeenAt,
+      relay_peer_id: relayPeerId,
+      is_self: peerId === localId,
+    };
+  }).filter((peer) => peer.peer_id && !peer.is_self);
+  peers.sort((a, b) => {
+    const aliasDiff = String(a.alias || '').localeCompare(String(b.alias || ''));
+    if (aliasDiff !== 0) return aliasDiff;
+    return String(a.peer_id || '').localeCompare(String(b.peer_id || ''));
+  });
+  return peers;
+}
+
+function forgetHyperwebTrustedPeer(peerId = '') {
+  const targetId = String(peerId || '').trim().toUpperCase();
+  const localId = currentHyperwebMemberId();
+  if (!targetId) return { ok: false, message: 'peer_id is required.' };
+  if (!localId) return { ok: false, message: 'Hyperweb identity is unavailable.' };
+  if (targetId === localId) return { ok: false, message: 'You cannot remove your own identity.' };
+
+  const socialState = ensureHyperwebSocialState();
+  const knownPeer = (socialState.known_peers && socialState.known_peers[targetId]) ? socialState.known_peers[targetId] : null;
+  if (!knownPeer) return { ok: false, message: 'Trusted peer not found.' };
+
+  const inboxTopicId = buildHyperwebInboxTopicId(localId, targetId);
+  const removedMessageIds = new Set();
+  const removedThreadIds = new Set();
+  const removedEntryIds = new Set();
+  const removedRoomIds = new Set();
+  const removedShareIds = new Set();
+  const removedTopicIds = new Set();
+
+  const collectDmThreadId = (payload = {}, authorId = '') => {
+    const mode = String((payload && payload.mode) || 'dm').trim().toLowerCase() === 'room' ? 'room' : 'dm';
+    if (mode !== 'dm') return '';
+    const normalizedAuthorId = String(authorId || '').trim().toUpperCase();
+    const recipientIds = Array.isArray(payload.recipient_ids)
+      ? payload.recipient_ids.map((id) => String(id || '').trim().toUpperCase()).filter(Boolean)
+      : [];
+    if (normalizedAuthorId !== targetId && !recipientIds.includes(targetId)) return '';
+    const targetPeerId = recipientIds.find((id) => id !== normalizedAuthorId) || '';
+    return String((payload && payload.thread_id) || computeHyperwebThreadId('dm', targetPeerId, '', normalizedAuthorId)).trim();
+  };
+
+  (Array.isArray(socialState.chat_messages) ? socialState.chat_messages : []).forEach((message) => {
+    if (!message || typeof message !== 'object') return;
+    if (String((message && message.mode) || '').trim().toLowerCase() !== 'dm') return;
+    const fromPeerId = String((message && message.from_peer_id) || '').trim().toUpperCase();
+    const toPeerId = String((message && message.to_peer_id) || '').trim().toUpperCase();
+    if (fromPeerId !== targetId && toPeerId !== targetId) return;
+    const messageId = String((message && message.message_id) || '').trim();
+    const threadId = String((message && message.thread_id) || computeHyperwebThreadId('dm', targetId, '', localId)).trim();
+    if (messageId) removedMessageIds.add(messageId);
+    if (threadId) removedThreadIds.add(threadId);
+  });
+
+  (Array.isArray(socialState.hyperweb_social_log) ? socialState.hyperweb_social_log : []).forEach((event) => {
+    if (!event || typeof event !== 'object') return;
+    const type = String(event.type || '').trim().toLowerCase();
+    const payload = (event.payload && typeof event.payload === 'object') ? event.payload : {};
+    if (type !== 'social_chat_message_private') return;
+    const messageId = String(payload.message_id || event.event_id || '').trim();
+    const threadId = collectDmThreadId(payload, String(payload.author_fingerprint || event.signer_fingerprint || ''));
+    if (messageId && threadId) {
+      removedMessageIds.add(messageId);
+      removedThreadIds.add(threadId);
+    }
+  });
+
+  socialState.hyperweb_social_log = (Array.isArray(socialState.hyperweb_social_log) ? socialState.hyperweb_social_log : []).filter((event) => {
+    if (!event || typeof event !== 'object') return false;
+    const type = String(event.type || '').trim().toLowerCase();
+    const payload = (event.payload && typeof event.payload === 'object') ? event.payload : {};
+    if (type === 'social_chat_message_private') {
+      const messageId = String(payload.message_id || event.event_id || '').trim();
+      return !removedMessageIds.has(messageId);
+    }
+    if (type === 'social_chat_receipt') {
+      const messageId = String(payload.message_id || '').trim();
+      const actorId = String(payload.actor_fingerprint || event.signer_fingerprint || '').trim().toUpperCase();
+      return !removedMessageIds.has(messageId) && actorId !== targetId;
+    }
+    if (type === 'social_chat_delete') {
+      const messageId = String(payload.message_id || '').trim();
+      return !removedMessageIds.has(messageId);
+    }
+    if (type === 'social_thread_delete' || type === 'social_thread_policy') {
+      const threadId = String(payload.thread_id || '').trim();
+      return !removedThreadIds.has(threadId);
+    }
+    return true;
+  });
+
+  socialState.chat_messages = (Array.isArray(socialState.chat_messages) ? socialState.chat_messages : []).filter((message) => {
+    const messageId = String((message && message.message_id) || '').trim();
+    return messageId && !removedMessageIds.has(messageId);
+  });
+
+  const nextChatReceipts = {};
+  Object.entries(socialState.chat_receipts || {}).forEach(([messageId, receipt]) => {
+    if (removedMessageIds.has(String(messageId || '').trim())) return;
+    const deliveredBy = { ...(((receipt || {}).delivered_by && typeof receipt.delivered_by === 'object') ? receipt.delivered_by : {}) };
+    const readBy = { ...(((receipt || {}).read_by && typeof receipt.read_by === 'object') ? receipt.read_by : {}) };
+    delete deliveredBy[targetId];
+    delete readBy[targetId];
+    nextChatReceipts[messageId] = { ...receipt, delivered_by: deliveredBy, read_by: readBy };
+  });
+  socialState.chat_receipts = nextChatReceipts;
+
+  const nextMessageDeletes = {};
+  Object.entries(socialState.message_deletes || {}).forEach(([messageId, item]) => {
+    if (removedMessageIds.has(String(messageId || '').trim())) return;
+    nextMessageDeletes[messageId] = item;
+  });
+  socialState.message_deletes = nextMessageDeletes;
+
+  const nextThreadPolicies = {};
+  Object.entries(socialState.thread_policies || {}).forEach(([threadId, item]) => {
+    if (removedThreadIds.has(String(threadId || '').trim())) return;
+    nextThreadPolicies[threadId] = item;
+  });
+  socialState.thread_policies = nextThreadPolicies;
+
+  const nextThreadDeletes = {};
+  Object.entries(socialState.thread_deletes || {}).forEach(([threadId, item]) => {
+    if (removedThreadIds.has(String(threadId || '').trim())) return;
+    nextThreadDeletes[threadId] = item;
+  });
+  socialState.thread_deletes = nextThreadDeletes;
+
+  socialState.private_inbox_entries = (Array.isArray(socialState.private_inbox_entries) ? socialState.private_inbox_entries : []).filter((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const topicId = String((entry && entry.topic_id) || '').trim();
+    const entryId = String((entry && entry.entry_id) || '').trim();
+    if (topicId === inboxTopicId) {
+      if (entryId) removedEntryIds.add(entryId);
+      return false;
+    }
+    return true;
+  });
+
+  const nextInboxCursors = {};
+  Object.entries(socialState.private_inbox_cursors || {}).forEach(([key, value]) => {
+    if (String(key || '').startsWith(`${inboxTopicId}::`)) return;
+    nextInboxCursors[key] = value;
+  });
+  socialState.private_inbox_cursors = nextInboxCursors;
+
+  const nextInboxApplied = {};
+  Object.entries(socialState.private_inbox_applied || {}).forEach(([entryId, value]) => {
+    if (removedEntryIds.has(String(entryId || '').trim())) return;
+    nextInboxApplied[entryId] = value;
+  });
+  socialState.private_inbox_applied = nextInboxApplied;
+
+  const nextInboxReceipts = {};
+  Object.entries(socialState.private_inbox_receipts || {}).forEach(([entryId, receipt]) => {
+    if (removedEntryIds.has(String(entryId || '').trim())) return;
+    const deliveredBy = { ...(((receipt || {}).delivered_by && typeof receipt.delivered_by === 'object') ? receipt.delivered_by : {}) };
+    const readBy = { ...(((receipt || {}).read_by && typeof receipt.read_by === 'object') ? receipt.read_by : {}) };
+    delete deliveredBy[targetId];
+    delete readBy[targetId];
+    nextInboxReceipts[entryId] = { ...receipt, delivered_by: deliveredBy, read_by: readBy };
+  });
+  socialState.private_inbox_receipts = nextInboxReceipts;
+
+  delete socialState.known_peers[targetId];
+  socialState.peer_relations = (Array.isArray(socialState.peer_relations) ? socialState.peer_relations : []).filter((relation) => {
+    const inviterId = String((relation && relation.inviter_fingerprint) || '').trim().toUpperCase();
+    const inviteeId = String((relation && relation.invitee_fingerprint) || '').trim().toUpperCase();
+    return inviterId !== targetId && inviteeId !== targetId;
+  });
+
+  const privateShareState = readHyperwebPrivateSharesState();
+  const keptShares = [];
+  const survivingSharesById = new Map();
+  (Array.isArray(privateShareState.shares) ? privateShareState.shares : []).forEach((share) => {
+    if (!share || typeof share !== 'object') return;
+    const ownerId = String((share.owner_id) || '').trim().toUpperCase();
+    const shareId = String((share.share_id) || '').trim();
+    const roomId = String((share.room_id) || '').trim();
+    const topicId = String((share.topic_id) || '').trim();
+    if (ownerId === targetId) {
+      if (shareId) removedShareIds.add(shareId);
+      if (roomId) removedRoomIds.add(roomId);
+      if (topicId) removedTopicIds.add(topicId);
+      return;
+    }
+    if (ownerId === localId) {
+      const recipients = Array.isArray(share.recipients) ? share.recipients : [];
+      const nextRecipients = recipients.filter((recipient) => String((recipient && recipient.member_id) || '').trim().toUpperCase() !== targetId);
+      if (nextRecipients.length !== recipients.length) {
+        if (nextRecipients.length === 0) {
+          if (shareId) removedShareIds.add(shareId);
+          if (roomId) removedRoomIds.add(roomId);
+          if (topicId) removedTopicIds.add(topicId);
+          return;
+        }
+        share.recipients = nextRecipients;
+        share.updated_at = nowTs();
+      }
+    }
+    keptShares.push(share);
+    if (shareId) survivingSharesById.set(shareId, share);
+  });
+  privateShareState.shares = keptShares;
+  privateShareState.rooms = (Array.isArray(privateShareState.rooms) ? privateShareState.rooms : []).filter((room) => {
+    if (!room || typeof room !== 'object') return false;
+    const roomId = String((room.room_id) || '').trim();
+    const shareId = String((room.share_id) || '').trim();
+    const topicId = String((room.topic_id) || '').trim();
+    if (removedRoomIds.has(roomId) || removedShareIds.has(shareId) || !survivingSharesById.has(shareId)) {
+      if (roomId) removedRoomIds.add(roomId);
+      if (topicId) removedTopicIds.add(topicId);
+      return false;
+    }
+    const share = survivingSharesById.get(shareId);
+    if (share) {
+      refreshRoomParticipantsFromShare(room, share);
+      room.updated_at = Math.max(Number(room.updated_at || 0), Number(share.updated_at || 0));
+    }
+    return true;
+  });
+
+  rebuildHyperwebSocialMaterialized(socialState);
+  if (socialState.presence_by_peer && typeof socialState.presence_by_peer === 'object') {
+    delete socialState.presence_by_peer[targetId];
+  }
+  writeHyperwebSocialState(socialState);
+  hyperwebSocialState = socialState;
+  writeHyperwebPrivateSharesState(privateShareState);
+
+  if (inboxTopicId) {
+    hyperwebManager.leaveTopic(inboxTopicId).catch(() => {});
+  }
+  Array.from(removedTopicIds).forEach((topicId) => {
+    if (!topicId) return;
+    hyperwebManager.leaveTopic(topicId).catch(() => {});
+  });
+
+  return {
+    ok: true,
+    peer_id: targetId,
+    removed_share_ids: Array.from(removedShareIds),
+    removed_room_ids: Array.from(removedRoomIds),
+    removed_message_ids: Array.from(removedMessageIds),
+    removed_entry_ids: Array.from(removedEntryIds),
+    removed_topic_ids: Array.from(removedTopicIds),
+  };
+}
+
 function getHyperwebOnlinePeerIds() {
   const state = ensureHyperwebSocialState();
   const peers = hyperwebManager.listPeers();
@@ -20578,6 +20848,22 @@ ipcMain.handle('browser:hyperwebListPeers', async () => {
     peers: hyperwebManager.listPeers(),
     known_peers: state.known_peers || {},
   };
+});
+
+ipcMain.handle('browser:hyperwebTrustedPeersList', async () => {
+  const auth = requireHyperwebIdentity();
+  if (!auth.ok) return auth;
+  return {
+    ok: true,
+    peers: listHyperwebTrustedPeers(),
+  };
+});
+
+ipcMain.handle('browser:hyperwebForgetPeer', async (_event, payload) => {
+  const auth = requireHyperwebIdentity();
+  if (!auth.ok) return auth;
+  const peerId = String((payload && payload.peer_id) || '').trim();
+  return forgetHyperwebTrustedPeer(peerId);
 });
 
 ipcMain.handle('browser:hyperwebCreateInvite', async () => {

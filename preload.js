@@ -234,6 +234,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     hyperwebCreateInvite: () => ipcRenderer.invoke('browser:hyperwebCreateInvite'),
     hyperwebAcceptInvite: (token) => ipcRenderer.invoke('browser:hyperwebAcceptInvite', { token }),
     hyperwebListPeers: () => ipcRenderer.invoke('browser:hyperwebListPeers'),
+    hyperwebTrustedPeersList: () => ipcRenderer.invoke('browser:hyperwebTrustedPeersList'),
+    hyperwebForgetPeer: (peerId) => ipcRenderer.invoke('browser:hyperwebForgetPeer', { peer_id: peerId }),
     hyperwebPostCreate: (body) => ipcRenderer.invoke('browser:hyperwebPostCreate', { body }),
     hyperwebPostReply: (postId, body) => ipcRenderer.invoke('browser:hyperwebPostReply', { post_id: postId, body }),
     hyperwebVoteSet: (targetId, value) => ipcRenderer.invoke('browser:hyperwebVoteSet', { target_id: targetId, value }),

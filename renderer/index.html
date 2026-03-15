@@ -416,6 +416,37 @@
             <input id="settings-hyperweb-display-name" data-setting="hyperweb_display_name" type="text" placeholder="Your public alias" />
           </label>
         </div>
+        <div class="settings-grid settings-grid-2">
+          <div class="settings-field">
+            <span>Connection</span>
+            <div class="settings-inline-actions">
+              <button id="settings-hyperweb-connect-btn" type="button">Connect</button>
+              <button id="settings-hyperweb-disconnect-btn" type="button">Disconnect</button>
+            </div>
+          </div>
+          <label class="settings-field">Your Invite Key
+            <textarea id="settings-hyperweb-invite-output" rows="4" readonly placeholder="Generate a key to share with another Subgrapher user"></textarea>
+          </label>
+          <div class="settings-field">
+            <span>Invite Actions</span>
+            <div class="settings-inline-actions">
+              <button id="settings-hyperweb-invite-generate-btn" type="button">Generate Key</button>
+              <button id="settings-hyperweb-invite-copy-btn" type="button">Copy Key</button>
+            </div>
+          </div>
+          <label class="settings-field">Received Invite Key
+            <textarea id="settings-hyperweb-invite-input" rows="4" placeholder="Paste a key or subgrapher://hyperweb-invite link"></textarea>
+          </label>
+        </div>
+        <div class="settings-inline-actions">
+          <button id="settings-hyperweb-invite-accept-btn" type="button">Accept Key</button>
+        </div>
+        <div class="settings-grid settings-grid-1">
+          <div class="settings-field settings-field-wide">
+            <span>Trusted Peers</span>
+            <div id="settings-hyperweb-trusted-peers" class="settings-hyperweb-trusted-peers"></div>
+          </div>
+        </div>
         </div>
       </details>
 
@@ -832,30 +863,6 @@
         </div>
         <div class="settings-inline-actions">
           <button id="settings-refresh-diagnostics-btn">Refresh Diagnostics</button>
-          <button id="settings-hyperweb-connect-btn">Hyperweb Connect</button>
-          <button id="settings-hyperweb-disconnect-btn">Hyperweb Disconnect</button>
-        </div>
-        </div>
-      </details>
-
-      <details class="settings-section settings-accordion" id="settings-hyperweb-invites" data-settings-section="hyperweb-invites">
-        <summary>Hyperweb Invites</summary>
-        <div class="settings-section-content">
-        <p class="muted small">Generate a manual invite key, copy it, and paste a key from another Subgrapher user to add them as a chat peer.</p>
-        <div class="settings-grid settings-grid-1">
-          <label class="settings-field">Your Invite Key
-            <textarea id="settings-hyperweb-invite-output" rows="4" readonly placeholder="Generate a key to share with another Subgrapher user"></textarea>
-          </label>
-          <div class="settings-inline-actions">
-            <button id="settings-hyperweb-invite-generate-btn" type="button">Generate Key</button>
-            <button id="settings-hyperweb-invite-copy-btn" type="button">Copy Key</button>
-          </div>
-          <label class="settings-field">Received Invite Key
-            <textarea id="settings-hyperweb-invite-input" rows="4" placeholder="Paste a key or subgrapher://hyperweb-invite link"></textarea>
-          </label>
-          <div class="settings-inline-actions">
-            <button id="settings-hyperweb-invite-accept-btn" type="button">Accept Key</button>
-          </div>
         </div>
         </div>
       </details>
