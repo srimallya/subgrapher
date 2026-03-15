@@ -5085,12 +5085,74 @@ function normalizeMailUiWhitespace(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+const MAIL_WINDOWS_1252_REVERSE_MAP = new Map([
+  [0x20ac, 0x80],
+  [0x201a, 0x82],
+  [0x0192, 0x83],
+  [0x201e, 0x84],
+  [0x2026, 0x85],
+  [0x2020, 0x86],
+  [0x2021, 0x87],
+  [0x02c6, 0x88],
+  [0x2030, 0x89],
+  [0x0160, 0x8a],
+  [0x2039, 0x8b],
+  [0x0152, 0x8c],
+  [0x017d, 0x8e],
+  [0x2018, 0x91],
+  [0x2019, 0x92],
+  [0x201c, 0x93],
+  [0x201d, 0x94],
+  [0x2022, 0x95],
+  [0x2013, 0x96],
+  [0x2014, 0x97],
+  [0x02dc, 0x98],
+  [0x2122, 0x99],
+  [0x0161, 0x9a],
+  [0x203a, 0x9b],
+  [0x0153, 0x9c],
+  [0x017e, 0x9e],
+  [0x0178, 0x9f],
+]);
+
+function scoreMailMojibake(value = '') {
+  const text = String(value || '');
+  if (!text) return 0;
+  const suspicious = text.match(/(?:Ã.|Â.|â[\u0080-\u00bf€™œ\u009d€¢–—…]|ðŸ|ï¿½)/g) || [];
+  const replacement = text.match(/\uFFFD/g) || [];
+  return (suspicious.length * 3) + (replacement.length * 5);
+}
+
+function repairLikelyMailMojibake(value = '') {
+  const text = String(value || '');
+  if (!text || !/(?:Ã.|Â.|â[\u0080-\u00ff]|ðŸ|ï¿½)/.test(text) || typeof TextDecoder !== 'function') return text;
+  const bytes = [];
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code <= 0xff) {
+      bytes.push(code);
+      continue;
+    }
+    const mapped = MAIL_WINDOWS_1252_REVERSE_MAP.get(code);
+    if (typeof mapped !== 'number') return text;
+    bytes.push(mapped);
+  }
+  try {
+    const candidate = new TextDecoder('utf-8', { fatal: false }).decode(Uint8Array.from(bytes));
+    return scoreMailMojibake(candidate) < scoreMailMojibake(text) ? candidate : text;
+  } catch (_) {
+    return text;
+  }
+}
+
 function decodeMailText(value = '') {
-  let text = String(value || '');
+  let text = repairLikelyMailMojibake(value);
   const replacements = [
     ['â€™', '\''],
+    ['â€˜', '\''],
     ['â€œ', '"'],
     ['â€\u009d', '"'],
+    ['â€¢', '•'],
     ['â€“', '-'],
     ['â€”', '-'],
     ['â€¦', '...'],
@@ -5105,6 +5167,25 @@ function decodeMailText(value = '') {
     text = textarea.value;
   }
   return text;
+}
+
+function stripMailHtmlForDisplay(value = '') {
+  return decodeMailText(
+    String(value || '')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])>/gi, '\n')
+      .replace(/<li[^>]*>/gi, '- ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;/gi, '\'')
+  )
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
 }
 
 function normalizeMailSnippet(value = '') {
@@ -5245,7 +5326,12 @@ function renderMailPreviewMarkup(preview) {
     String((preview && preview.sent_at) || '').trim(),
   ].filter(Boolean).join(' · ');
   const unread = !!(preview && preview.is_unread);
-  const bodyValue = String((preview && preview.body_text) || (preview && preview.snippet) || '');
+  const bodyValue = String(
+    (preview && preview.body_text)
+    || stripMailHtmlForDisplay(preview && preview.body_html)
+    || (preview && preview.snippet)
+    || ''
+  );
   return `
     <div class="mail-message ${unread ? 'unread' : ''}">
       <div class="mail-message-head">

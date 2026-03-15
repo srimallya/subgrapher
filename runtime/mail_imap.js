@@ -262,7 +262,8 @@ class ImapClient {
 
   async fetchRawMessage(uid) {
     const res = await this.sendCommand(`UID FETCH ${Math.round(Number(uid || 0))} (UID FLAGS RFC822)`, { collectLiterals: true });
-    const raw = Buffer.concat(res.literals).toString('utf8');
+    // Preserve original byte values so the MIME parser can decode each part using its declared charset.
+    const raw = Buffer.concat(res.literals).toString('latin1');
     if (!raw) throw new Error(`No RFC822 payload returned for UID ${uid}.`);
     const fetchLine = res.lines.find((line) => /^\*\s+\d+\s+FETCH\b/i.test(line)) || '';
     return {

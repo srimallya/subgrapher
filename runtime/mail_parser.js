@@ -91,14 +91,36 @@ function decodeWindows1252Buffer(buffer) {
   return chars.join('');
 }
 
+function mojibakeScore(value = '') {
+  const text = String(value || '');
+  if (!text) return 0;
+  const suspicious = text.match(/(?:Ã.|Â.|â[\u0080-\u00bf€™œ\u009d€¢–—…]|ðŸ|ï¿½)/g) || [];
+  const replacement = text.match(/\uFFFD/g) || [];
+  return (suspicious.length * 3) + (replacement.length * 5);
+}
+
+function shouldPreferUtf8Fallback(decoded = '', utf8Candidate = '', charset = '') {
+  const normalized = normalizeCharsetLabel(charset);
+  if (!utf8Candidate || normalized === 'utf-8' || normalized === 'utf-16le') return false;
+  if (!['iso-8859-1', 'windows-1252'].includes(normalized)) return false;
+  return mojibakeScore(utf8Candidate) + 1 < mojibakeScore(decoded);
+}
+
 function decodeBufferWithCharset(buffer, charset = 'utf-8') {
   const payload = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
   const normalized = normalizeCharsetLabel(charset);
   try {
-    if (normalized === 'windows-1252') return decodeWindows1252Buffer(payload);
-    if (normalized === 'iso-8859-1') return payload.toString('latin1');
-    const decoder = new TextDecoder(normalized, { fatal: false });
-    return decoder.decode(payload);
+    let decoded = '';
+    if (normalized === 'windows-1252') decoded = decodeWindows1252Buffer(payload);
+    else if (normalized === 'iso-8859-1') decoded = payload.toString('latin1');
+    else {
+      const decoder = new TextDecoder(normalized, { fatal: false });
+      decoded = decoder.decode(payload);
+    }
+    if (shouldPreferUtf8Fallback(decoded, payload.toString('utf8'), normalized)) {
+      return payload.toString('utf8');
+    }
+    return decoded;
   } catch (_) {
     try {
       return payload.toString('utf8');
@@ -198,7 +220,7 @@ function decodeBody(bodyRaw = '', encoding = '') {
   if (normalized === 'quoted-printable') {
     return decodeQuotedPrintableToBuffer(String(bodyRaw || ''));
   }
-  return Buffer.from(String(bodyRaw || ''), 'utf8');
+  return Buffer.from(String(bodyRaw || ''), 'latin1');
 }
 
 function stripHtml(value = '') {
@@ -214,6 +236,7 @@ function stripHtml(value = '') {
       .replace(/&lt;/gi, '<')
       .replace(/&gt;/gi, '>')
       .replace(/&quot;/gi, '"')
+      .replace(/&apos;/gi, '\'')
   );
 }
 
@@ -266,8 +289,8 @@ function parseRawEmailText(raw = '', sourcePath = '') {
   const headers = parseHeaderBlock(headersRaw);
   const contentType = getHeader(headers, 'content-type') || 'text/plain';
   const parsed = parseMimePart(`${headersRaw}\n\n${bodyRaw}`);
-  const textBody = normalizeTextBody(parsed.textParts.join('\n\n'));
   const htmlBody = parsed.htmlParts.join('\n');
+  const textBody = normalizeTextBody(parsed.textParts.join('\n\n') || stripHtml(htmlBody));
   const snippet = normalizeWhitespace(textBody || stripHtml(htmlBody)).slice(0, 320);
   const subject = decodeMimeWords(getHeader(headers, 'subject') || path.basename(sourcePath || 'Mail'));
   const sourceKey = crypto.createHash('sha1').update(`${sourcePath}:${getHeader(headers, 'message-id')}:${subject}`).digest('hex');
