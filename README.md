@@ -1,245 +1,68 @@
 # Subgrapher
 
-> **References are liquid apps. The context graph is the memory. The agent is the runtime.**
+Subgrapher is a desktop app for building, browsing, and sharing knowledge as semantic references.
 
-Traditional software gives you apps that run programs. Subgrapher gives you a different primitive: the **semantic reference** — a fluid, intentioned knowledge container that accretes web tabs, AI-generated artifacts, highlighted text, tags, and relations to other references. References aren't bookmarks and they aren't apps in the installed-software sense. They're liquid: they flow, reshape, fork, merge, and share.
+A semantic reference is the core unit in the app. Inside a reference you can browse the web, write notes, attach folders, attach mail threads, generate HTML visualizations, and let an AI agent reason over that context. References can be forked, shared publicly, or shared privately with trusted peers.
 
-The **context graph** is the memory. The network of references — root, child, related — with everything embedded in them (what you browsed, what you highlighted, what the agent produced) is the persistent knowledge state. Not a filesystem. Not a database. A living semantic graph that grows with your thinking.
+Subgrapher also works as:
 
-The **agent** is the runtime. It doesn't assist with browsing — it executes the liquid app. It creates artifacts, diffs them, generates visualizations, queries the Hyperweb for what others have referenced, and indexes local folders as context. The agent is what makes a reference computable rather than static.
+- a local-first AI workspace
+- a mail client
+- a decentralized knowledge and message sharing platform
+- a remote interface for reasoning over your work through Telegram with local models
 
-This is a post-app computing model. The unit is not the program — it's the intentioned context. And the agent is what runs it.
+The project exists because I wanted a better way to share research with other people. It is open source and still in progress.
 
----
+## What it does
 
-Subgrapher is a standalone desktop browser workspace app scaffold built from the architecture in `browser_tab_architecture_+_agent.md`.
+- Uses semantic references as reusable knowledge containers
+- Lets the agent reason inside a reference and open tabs or generate visualizations for you
+- Supports local models through LM Studio in a sandboxed setup
+- Uses DuckDuckGo for privacy-focused web search
+- Attaches folders, local files, and mail threads to the same working context
+- Supports private peer sharing and public publishing
+- Connects a Telegram bot so you can use your local models remotely
 
-## Current build
+## Links
 
-This implementation delivers:
+- Source: [github.com/srimallya/subgrapher](https://github.com/srimallya/subgrapher)
+- Demo: [youtu.be/l4z1ddCcjEQ](https://youtu.be/l4z1ddCcjEQ?si=r8v6ysC6w99PYNu7)
+- Download: [thetrustcommons.com/apps](https://thetrustcommons.com/apps)
 
-- 3-panel workspace core: references, browser/artifact surface, and Lumino chat.
-- App-level pages for `Workspace`, `Hyperweb`, `Private Shares`, `Settings`, and `History`.
-- Native Electron `BrowserView` runtime for web tabs (including marker mode and URL history capture).
-- Unified artifact runtime:
-  - artifact types: `markdown` and `html`
-  - `html` artifacts run in preview by default, with `Code` as a secondary toggle and `Refresh` for manual rerender
-  - iframe sandbox: `allow-scripts allow-forms allow-pointer-lock allow-downloads` (no same-origin grant)
-- Legacy visualization migration:
-  - old `viz` tab payloads are auto-mapped into markdown artifacts on load
-  - dedicated viz tabs are deprecated
-- Workspace surfaces and tabs:
-  - `web`, `artifact`, `files`, `skills`, `mail`
-  - URL-bar artifact commands: `/add`, `/create`, `/rename/<name>`, `/rm`
-- Reference graph lifecycle:
-  - create root
-  - fork child
-  - commit current page into active reference
-- Lumino dual lane runtime:
-  - Path A: scoped reference execution
-  - Path B: orchestrator lane for reference resolution, web intake, and Path A delegation
-- Context ingestion:
-  - mount folders as read-only indexed context (recursive with limits)
-  - indexed extensions include text/code, common docs (`.pdf`, Office/OpenDocument, `.msg`, `.eml`), and common images (`.png`, `.jpg/.jpeg`, `.gif`, `.webp`, `.bmp`, `.tif/.tiff`, `.heic/.heif`)
-  - default folder mount limits: up to 500 files, up to 32MB per file
-  - import local context files across the same supported extension set (text/code/docs/images)
-  - Files preview renders mounted images directly; docs/binary files show extracted fragments + summaries
-  - web crawler commands: `/crawl <url>`, `/crawl status`, `/crawl stop`
-- Mail runtime:
-  - local mail store backed by `mail_store.sqlite` under app `userData`
-  - account setup lives in `Settings -> Mail`
-  - supported account modes:
-    - generic IMAP/SMTP with password auth
-    - Gmail / Google Workspace OAuth bootstrap from Settings
-  - credentials and OAuth secrets are stored in the OS keychain, not in reference data
-  - sync is IMAP-driven with a main-process polling scheduler:
-    - global `Mail Sync` toggle in Settings
-    - app-level polling interval in Settings (`mail_poll_interval_sec`, default 300 sec)
-    - `Sync` per account in Settings
-    - `Sync Selected` from Settings
-    - `Sync` from the global Mail page / reference Mail tab
-  - per-account sync state is tracked and shown in Settings / global Mail:
-    - `idle | syncing | error`
-    - `last_sync_at`
-    - `last_success_at`
-    - `last_error`
-    - `new_threads_count`
-    - `new_messages_count`
-  - per-account notifications can be toggled in Settings
-  - OS notifications are emitted for new inbound unread mail detected after sync
-  - clicking a mail notification opens the global `Mail` page on the matching account/thread
-  - IMAP IDLE is not implemented yet; v1 uses polling only
-  - sync indexes the configured mailbox plus discovered/common sent, drafts, archive, and trash folders where available
-  - mail is normalized into local accounts, mailboxes, messages, and reconstructed threads
-  - incompatible legacy `mail_store.sqlite` files are discarded on startup; the app rebuilds the local mail store with the current schema and requires a fresh sync
-  - both the global `Mail` page and reference `mail` tab search the local Subgrapher mail store, not Apple Mail and not live mailbox APIs
-  - available mail actions today:
-    - search threads by query/account/folder/smart view
-    - preview normalized thread content
-    - compose, reply, save draft, send
-    - attach local files to outgoing mail
-    - mark thread read/unread
-    - archive thread when provider capabilities allow it
-    - move thread to trash
-    - attach selected synced threads into the active reference
-    - reference mail attach flow is two-step:
-      - select one or more synced threads in the full list
-      - `Add Selected` attaches that set to the active reference and switches the tab into an attached-thread review view
-      - `Back` returns to the full list while preserving the current attached selection so more threads can be added and attached again
-  - mail layouts are fixed and practical:
-    - reference mail tab: search/actions, thread list, content preview
-    - global Mail page: account/folder nav, thread list, content preview, composer
-  - mail preview preserves readable paragraphs, headers, quoted reply blocks, and mailbox/account metadata where possible
-  - Path B mail tooling is available against the normalized local store:
-    - `mail_search`
-    - `mail_read_thread`
-    - `mail_open_thread`
-- Web research reliability:
-  - shared web search path is used across Path A, Path B, and Telegram orchestration
-  - fallback chain: DDG API -> DDG HTML -> Bing HTML parser
-  - empty search result sets are surfaced as valid no-result responses (not transport failures)
-  - explicit web/search intent now requires at least one web-evidence step in agent mode
-  - deterministic recovery executes `web_search` (+ top-result `fetch_webpage`) when a model skips tool calls
-  - citation gate validates deliverable artifact content (when present), avoiding false failures on concise chat acks
-- Skills runtime:
-  - save/run local or global skills
-  - skills are reference-linkable and manageable from the `skills` tab
-- Memory replay mode:
-  - periodic + semantic checkpoints
-  - lane filters, replay controls, checkpoint diff, and fork-from-checkpoint flow
-- Private history page:
-  - search and inspect visited URLs
-  - semantic map clustering + embedded preview
-- Provider/runtime support:
-  - providers: `openai`, `cerebras`, `google`, `anthropic`, `lmstudio`
-  - per-provider key profiles (multiple keys + primary selection)
-  - model fetch per provider/key
-  - LM Studio base URL, default model, optional token
-  - unified image analysis tool path:
-    - tries active provider native image understanding first (when available for selected model)
-    - falls back automatically to LM Studio image analysis on native failure/unavailability
-    - supports `image_url`, `local_path`, and mounted-file `context_file_id`
-  - local OCR for mounted images:
-    - `ocr_context_images` runs bundled Python OCR over image context files without using model vision
-    - returns raw OCR text plus filename-like candidates for batch extraction workflows
-- Local-file abstraction routing:
-  - when abstraction is enabled and a non-LM Studio provider is selected, local mounted files are abstracted before remote use
-  - image/doc/pdf/binary context files can be analyzed through LM Studio during abstraction copy generation
-  - `read_context_file` auto-attempts LM Studio vision summaries for image files with metadata fallback on failure
-- Local evidence RAG:
-  - hybrid local evidence search uses BM25 + semantic vectors
-  - persistent SQLite index per reference (`semantic_references/<ref>/rag/index.sqlite`)
-  - primary embeddings via LM Studio (`/v1/embeddings`), with automatic local hash-embedding fallback
-  - Settings controls: `rag_enabled`, `rag_embedding_model`, `rag_top_k`, index status, and manual reindex for active workspace
-- Key/secret storage:
-  - provider keys and secure refs are stored via platform secure storage
-  - on macOS this uses Keychain; on Windows/Linux it uses Electron `safeStorage` with encrypted local metadata
-  - mailbox passwords are stored in secure storage; they are not written to the reference store
-- Data-at-rest protection:
-  - core reference/metadata stores are encrypted at rest (AES-256-GCM envelope)
-  - plaintext legacy stores are migrated on read to encrypted format
-  - Settings includes app-data `Lock/Unlock` controls with system auth:
-    - Touch ID when available
-    - macOS account password fallback
-- Telegram + orchestrator controls:
-  - bot token management and test ping
-  - user registration tracking
-  - job controls (`/jobs`, `/job_create`, `/job_edit`, `/job_pause`, `/job_resume`, `/job_delete`)
-- Hyperweb and sharing:
-  - pure P2P Hyperweb runtime over Hyperswarm topic discovery and peer replication
-  - public feed posting, semantic reference search/import, snapshot publishing, and one global public lobby
-  - invite-based trusted-peer identity graph keyed by fingerprint
-  - durable offline delivery for trusted-peer DM text, DM file attachments, and private share notices
-  - private reference sharing with trusted peers and live shared rooms
-- First-run onboarding:
-  - default search engine selection (`google`, `bing`, `ddg`)
-  - Chrome/Safari import
-  - default browser setup helper
-  - provider key save + model fetch
-- Python runtime policy:
-  - packaged builds use immutable runtime policy (`pip install` disabled at runtime)
-  - if bundled Python is missing in Windows packaging, app falls back to system Python for tool execution where available
-  - `requests` is available via bundled dependency and sandbox fallback shim
-  - bundled OCR dependencies include `Pillow` and `rapidocr-onnxruntime`
-  - pygame compatibility is gated: pygame runtime hooks are enabled only when user code imports/uses `pygame`
+## Screenshots
 
-## Run
+![Reference workspace](screengrabs/01-reference-workspace.jpg)
+![Browser and chat](screengrabs/02-browser-and-chat.jpg)
+![Reference graph](screengrabs/03-reference-graph.jpg)
+![Mail client](screengrabs/04-mail-client.jpg)
+![Private shares](screengrabs/05-private-shares.jpg)
+![Settings](screengrabs/06-settings.jpg)
+![History](screengrabs/07-history.jpg)
+
+## Run locally
 
 ```bash
 npm install
 npm start
 ```
 
-## Build installers
-
-Local packaging commands:
+## Build
 
 ```bash
-npm run build:release
 npm run build:mac
 npm run build:win
+npm run build:release
 ```
 
-- macOS output: `dist/Subgrapher-<version>-mac.dmg` (unsigned, arm64)
-- Windows output: `dist/Subgrapher-<version>-setup.exe` (NSIS installer, x64)
+Build output goes to `dist/`.
 
-## GitHub release pipeline
+## Current stack
 
-- Workflow file: `.github/workflows/release.yml`
-- Triggered on tags matching `v*` and manual dispatch.
-- Builds DMG on `macos-latest` and NSIS EXE on `windows-latest`.
-- Uploads artifacts to GitHub Release when run from a tag.
-
-Windows signing is optional in CI:
-
-- `WIN_CSC_LINK`: certificate path or base64-encoded certificate payload
-- `WIN_CSC_KEY_PASSWORD`: certificate password
-- `WIN_CSC_TIMESTAMP_SERVER` (optional): timestamp server URL
-
-If signing secrets are missing, CI still builds an unsigned `.exe`.
-
-## Install and invite links
-
-`subgrapher://...` invite links only work after Subgrapher is installed and protocol-registered.
-
-For new users:
-1. Share the GitHub Release URL first (`.dmg` / `.exe` download).
-2. User installs and launches Subgrapher.
-3. Then user opens the invite link.
-
-## Important notes
-
-- This is a clean standalone project.
-- Context files imported from mounted folders are read-only by default.
-- Mail sync is IMAP-based and local to Subgrapher's own database; Apple Mail folder scanning and AppleScript control are not part of the active mail path.
-- Use chat commands for direct workspace mutations:
-  - `/artifact title: content`
-  - `/viz <title>` (creates an HTML artifact scaffold)
-  - `/crawl <url>` / `/crawl status` / `/crawl stop`
-  - `/diff artifact <artifactId> <text>`
-
-## File map
-
-- `main.js`: Electron main process + IPC + reference store.
-- `preload.js`: secure renderer bridge.
-- `browser_view_preload.js`: marker selection capture.
-- `renderer/index.html`: 3-panel UI shell.
-- `renderer/styles.css`: UI theme/layout.
-- `renderer/app.js`: UI behavior and runtime patch application.
-- `runtime/agent_runtime.js`: local agentic response engine.
-- `runtime/lumino_path_a.js`: scoped Path A execution runtime.
-- `runtime/lumino_path_b.js`: orchestrator Path B runtime.
-- `runtime/hyperweb_manager.js`: Hyperweb P2P swarm transport and topic manager.
-- `runtime/file_indexer.js`: folder ingestion/indexing.
-- `runtime/lumino_crawler.js`: crawl and ingestion pipeline.
-- `runtime/keychain.js`: macOS keychain provider key storage.
-- `runtime/mail_imap.js`: read-only IMAP client used for mailbox sync.
-- `runtime/mail_store.js`: local mail database and thread search/export layer.
-- `runtime/mail_parser.js`: raw email parsing and body normalization.
+- Electron desktop app
+- Local and remote model provider support, including LM Studio
+- Hyperswarm-based sharing primitives
+- Local mail storage and sync
 
 ## License
 
-This project is licensed under the GNU Affero General Public License, version 3 or later (`AGPL-3.0-or-later`).
-
-- Full license text: `LICENSE`
-- If you distribute modified versions (including networked deployments), you must provide corresponding source under AGPL terms.
+AGPL-3.0-or-later. See `LICENSE`.
