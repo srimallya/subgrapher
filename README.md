@@ -13,6 +13,14 @@ Subgrapher also works as:
 
 The project exists because I wanted a better way to share research with other people. It is open source and still in progress.
 
+## Why
+
+Human knowledge usually lives in semantic containers, not in flat lists of links or isolated files.
+
+Most software keeps knowledge trapped in separate apps, inboxes, and private silos. Most sharing tools also depend on centralized servers.
+
+Subgrapher is an attempt to build for the open web and open communication instead: a system where references, research, messages, and agents can move across those walls without defaulting to closed platforms.
+
 ## What it does
 
 - Uses semantic references as reusable knowledge containers
