@@ -54,10 +54,6 @@ jobs:
 
   build-win:
     runs-on: windows-latest
-    env:
-      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-      WIN_CSC_TIMESTAMP_SERVER: ${{ secrets.WIN_CSC_TIMESTAMP_SERVER }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,17 +70,15 @@ jobs:
       - name: Prepare bundled Python runtime (win x64)
         run: npm run prepare:python:win-x64
 
-      - name: Signing mode
+      - name: Build Windows NSIS EXE
         shell: bash
         run: |
-          if [ -n "${CSC_LINK}" ] && [ -n "${CSC_KEY_PASSWORD}" ]; then
-            echo "Windows signing configured; signed build path will be attempted."
-          else
-            echo "Windows signing secrets not set; producing unsigned installer."
-          fi
-
-      - name: Build Windows NSIS EXE
-        run: npx electron-builder --win nsis --x64 --publish never
+          unset CSC_LINK
+          unset CSC_KEY_PASSWORD
+          unset WIN_CSC_LINK
+          unset WIN_CSC_KEY_PASSWORD
+          unset WIN_CSC_TIMESTAMP_SERVER
+          npx electron-builder --win nsis --x64 --publish never
 
       - name: Upload workflow artifact (win)
         uses: actions/upload-artifact@v4
