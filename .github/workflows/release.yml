@@ -29,7 +29,7 @@ jobs:
         run: npm run prepare:python:mac-arm64
 
       - name: Build macOS DMG (arm64, unsigned)
-        run: npx electron-builder --mac dmg --arm64
+        run: npx electron-builder --mac dmg --arm64 --publish never
 
       - name: Upload workflow artifact (mac)
         uses: actions/upload-artifact@v4
@@ -84,7 +84,7 @@ jobs:
           fi
 
       - name: Build Windows NSIS EXE
-        run: npx electron-builder --win nsis --x64
+        run: npx electron-builder --win nsis --x64 --publish never
 
       - name: Upload workflow artifact (win)
         uses: actions/upload-artifact@v4
