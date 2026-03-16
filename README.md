@@ -18,8 +18,11 @@ The project exists because I wanted a better way to share research with other pe
 - Uses semantic references as reusable knowledge containers
 - Lets the agent reason inside a reference and open tabs or generate visualizations for you
 - Supports local models through LM Studio in a sandboxed setup
+- Supports API models from OpenAI, Google, Anthropic, and Cerebras
 - Uses DuckDuckGo for privacy-focused web search
+- Includes a marker tool for capturing and working with web content inside references
 - Attaches folders, local files, and mail threads to the same working context
+- Keeps semantic history so past browsing and research can be searched and revisited
 - Supports private peer sharing and public publishing
 - Connects a Telegram bot so you can use your local models remotely
 
@@ -59,7 +62,7 @@ Build output goes to `dist/`.
 ## Current stack
 
 - Electron desktop app
-- Local and remote model provider support, including LM Studio
+- Model providers: OpenAI, Google, Anthropic, Cerebras, and LM Studio
 - Hyperswarm-based sharing primitives
 - Local mail storage and sync
 
