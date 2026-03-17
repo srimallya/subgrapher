@@ -7271,6 +7271,17 @@ function setupBrowserEvents() {
       }
     });
   }
+  if (typeof api.onHyperwebStatus === 'function') {
+    api.onHyperwebStatus((payload = {}) => {
+      state.hyperwebStatus = payload && typeof payload === 'object' ? payload : null;
+      const statusNode = e('hyperweb-status');
+      if (statusNode && state.hyperwebStatus) {
+        statusNode.textContent = formatHyperwebStatusText(state.hyperwebStatus);
+      }
+      renderSettingsHyperwebControls();
+      refreshTopbarBadges().catch(() => {});
+    });
+  }
   if (typeof api.onHyperwebOpenThread === 'function') {
     api.onHyperwebOpenThread((payload) => {
       const mode = String((payload && payload.mode) || 'dm').trim().toLowerCase() === 'room' ? 'room' : 'dm';
@@ -8043,9 +8054,18 @@ function renderHyperwebIdentityLine() {
   const alias = String(identity.display_alias || 'node');
   const fp = String(identity.fingerprint || '').slice(0, 12);
   const filter = String(state.hyperwebFilterFingerprint || '').trim();
-  line.textContent = filter
+  const availability = getHyperwebIdentityAvailability();
+  const base = filter
     ? `You: ${alias} (${fp}) · filter active: ${filter}`
     : `You: ${alias} (${fp})`;
+  if (availability.degraded) {
+    const suffix = availability.identityState === 'identity_mismatch'
+      ? 'restored read-only'
+      : 'identity unavailable';
+    line.textContent = `${base} · ${suffix}`;
+    return;
+  }
+  line.textContent = base;
 }
 
 function hyperwebChatMemberLabel(member) {
@@ -9545,6 +9565,51 @@ function renderSettingsDiagnostics() {
   renderSettingsHyperwebControls();
 }
 
+function getHyperwebIdentityAvailability() {
+  const diag = state.settingsDiagnostics || {};
+  const identityDiag = (diag && diag.hyperweb_identity && typeof diag.hyperweb_identity === 'object')
+    ? diag.hyperweb_identity
+    : {};
+  const hyper = (state.hyperwebStatus && typeof state.hyperwebStatus === 'object')
+    ? state.hyperwebStatus
+    : ((diag && diag.hyperweb && typeof diag.hyperweb === 'object') ? diag.hyperweb : {});
+  const identityState = String(identityDiag.identity_state || hyper.identity_state || 'ok').trim().toLowerCase();
+  const canConnect = !!(identityDiag.can_connect ?? hyper.can_connect ?? true);
+  const canSign = !!(identityDiag.can_sign ?? hyper.can_sign ?? true);
+  return {
+    identityState,
+    canConnect,
+    canSign,
+    degraded: identityState && identityState !== 'ok',
+  };
+}
+
+function renderHyperwebActionAvailability() {
+  const availability = getHyperwebIdentityAvailability();
+  const sendBtn = e('hyperweb-chat-send-btn');
+  const chatInput = e('hyperweb-chat-input');
+  const fileBtn = e('hyperweb-chat-file-btn');
+  const connectMenuBtn = e('hyperweb-connect-menu-btn');
+  const inviteGenerateBtn = e('settings-hyperweb-invite-generate-btn');
+  const inviteAcceptBtn = e('settings-hyperweb-invite-accept-btn');
+  const sendDisabled = !availability.canSign;
+  const connectDisabled = !availability.canConnect;
+  if (sendBtn) sendBtn.disabled = sendDisabled;
+  if (chatInput) chatInput.disabled = sendDisabled;
+  if (fileBtn) fileBtn.disabled = sendDisabled;
+  if (connectMenuBtn) connectMenuBtn.disabled = connectDisabled;
+  if (inviteGenerateBtn) inviteGenerateBtn.disabled = sendDisabled;
+  if (inviteAcceptBtn) inviteAcceptBtn.disabled = sendDisabled;
+}
+
+function formatHyperwebStatusText(status = {}) {
+  const peerCount = Number(status.peer_count || 0);
+  const mode = status.degraded ? 'identity unavailable' : (status.connected ? 'connected' : 'disconnected');
+  const topicCount = Array.isArray(status.topic_ids) ? status.topic_ids.length : 0;
+  const pendingPrivate = Number(status.pending_private_entries || 0);
+  return `Hyperweb ${mode} · live peers ${peerCount} · joined topics ${topicCount} · pending private ${pendingPrivate}`;
+}
+
 function renderSettingsHyperwebControls() {
   const statusNode = e('settings-hyperweb-network-status');
   const connectBtn = e('settings-hyperweb-connect-btn');
@@ -9559,10 +9624,18 @@ function renderSettingsHyperwebControls() {
   const degraded = !!hyper.degraded;
   const peerCount = Math.max(0, Number(hyper.peer_count || 0));
   const pendingEntries = Math.max(0, Number(hyper.pending_private_entries || 0));
+  const availability = getHyperwebIdentityAvailability();
 
   if (statusNode) {
     if (!allowed) {
       statusNode.textContent = 'Disabled. Turn on "Allow Hyperweb" before going online.';
+    } else if (availability.degraded) {
+      const reason = availability.identityState === 'identity_mismatch'
+        ? 'Restored Hyperweb data loaded in read-only mode. Current key does not match that identity.'
+        : (availability.identityState === 'invalid_private_key'
+          ? 'Identity key is invalid. Reset Hyperweb identity to reconnect.'
+          : 'Identity key is unavailable. Reset Hyperweb identity to reconnect.');
+      statusNode.textContent = reason;
     } else if (connected && degraded) {
       statusNode.textContent = `Online with issues. ${peerCount} peer${peerCount === 1 ? '' : 's'} connected${pendingEntries > 0 ? ` · ${pendingEntries} pending private entr${pendingEntries === 1 ? 'y' : 'ies'}` : ''}.`;
     } else if (connected) {
@@ -9572,8 +9645,9 @@ function renderSettingsHyperwebControls() {
     }
   }
 
-  if (connectBtn) connectBtn.disabled = !allowed || connected;
+  if (connectBtn) connectBtn.disabled = !allowed || connected || !availability.canConnect;
   if (disconnectBtn) disconnectBtn.disabled = !connected;
+  renderHyperwebActionAvailability();
 }
 
 function formatTrustedPeerFingerprint(peerId = '') {
@@ -10527,11 +10601,8 @@ async function refreshHyperwebStatus() {
     return;
   }
   state.hyperwebStatus = res;
-  const peerCount = Number(res.peer_count || 0);
-  const mode = res.connected ? 'connected' : 'disconnected';
-  const topicCount = Array.isArray(res.topic_ids) ? res.topic_ids.length : 0;
-  const pendingPrivate = Number(res.pending_private_entries || 0);
-  statusNode.textContent = `Hyperweb ${mode} · live peers ${peerCount} · joined topics ${topicCount} · pending private ${pendingPrivate}`;
+  statusNode.textContent = formatHyperwebStatusText(res);
+  renderSettingsHyperwebControls();
   await refreshTopbarBadges();
 }
 
@@ -11611,6 +11682,11 @@ function bindControls() {
 
   e('settings-hyperweb-invite-generate-btn')?.addEventListener('click', async () => {
     if (!api || typeof api.hyperwebCreateInvite !== 'function') return;
+    if (!getHyperwebIdentityAvailability().canSign) {
+      state.settingsSaveState = 'Hyperweb identity is unavailable. Reset Hyperweb identity to continue.';
+      renderSettingsStatusLine();
+      return;
+    }
     const res = await api.hyperwebCreateInvite();
     if (!res || !res.ok) {
       state.settingsSaveState = (res && res.message) ? res.message : 'Unable to generate invite key.';
@@ -11647,6 +11723,11 @@ function bindControls() {
 
   e('settings-hyperweb-invite-accept-btn')?.addEventListener('click', async () => {
     if (!api || typeof api.hyperwebAcceptInvite !== 'function') return;
+    if (!getHyperwebIdentityAvailability().canSign) {
+      state.settingsSaveState = 'Hyperweb identity is unavailable. Reset Hyperweb identity to continue.';
+      renderSettingsStatusLine();
+      return;
+    }
     const input = e('settings-hyperweb-invite-input');
     const token = normalizeHyperwebInviteTokenInput((input && input.value) || '');
     if (!token) {
@@ -11674,6 +11755,11 @@ function bindControls() {
   });
 
   e('settings-hyperweb-connect-btn')?.addEventListener('click', async () => {
+    if (!getHyperwebIdentityAvailability().canConnect) {
+      state.settingsSaveState = 'Hyperweb identity is unavailable. Reset Hyperweb identity to continue.';
+      renderSettingsStatusLine();
+      return;
+    }
     await api.hyperwebConnect();
     await refreshHyperwebStatus();
     await refreshSettingsTrustedPeers();
@@ -12007,6 +12093,10 @@ function bindControls() {
   });
   e('hyperweb-chat-send-btn')?.addEventListener('click', async () => {
     if (!api.hyperwebChatSend) return;
+    if (!getHyperwebIdentityAvailability().canSign) {
+      setStatusText('hyperweb-chat-status', 'Hyperweb identity is unavailable. Reset Hyperweb identity to continue.');
+      return;
+    }
     const input = e('hyperweb-chat-input');
     const text = String((input && input.value) || '').trim();
     const fileInput = e('hyperweb-chat-file-input');
@@ -12183,6 +12273,10 @@ function bindControls() {
 
   e('hyperweb-connect-menu-btn')?.addEventListener('click', async () => {
     closeTopbarMenu();
+    if (!getHyperwebIdentityAvailability().canConnect) {
+      window.alert('Hyperweb identity is unavailable. Reset Hyperweb identity to continue.');
+      return;
+    }
     const res = await api.hyperwebConnect();
     if (!res || !res.ok) {
       window.alert((res && res.message) || 'Unable to connect Hyperweb.');

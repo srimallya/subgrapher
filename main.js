@@ -73,6 +73,7 @@ const HYPERWEB_PRIVATE_SHARES_FILENAME = 'hyperweb_private_shares.json';
 const HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT = 'hyperweb_identity_private_key';
 const HYPERWEB_IDENTITY_SERVICE = 'com.subgrapher.hyperweb.identity';
 const HYPERWEB_IDENTITY_DER_PREFIX = 'ed25519-pkcs8-der:';
+const HYPERWEB_STATE_MIGRATION_VERSION = 2;
 const HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT = 'hyperweb_chat_private_key';
 const HYPERWEB_CHAT_KEY_SERVICE = 'com.subgrapher.hyperweb.chat';
 const HYPERWEB_CHAT_KEY_DER_PREFIX = 'x25519-pkcs8-der:';
@@ -287,6 +288,7 @@ let pendingInviteToken = '';
 let hyperwebSocialState = null;
 let hyperwebPrivateSharesState = null;
 let hyperwebPublicSnapshotsState = null;
+let hyperwebReceiptWriteTimer = null;
 const shownHyperwebNotificationIds = new Set();
 const asyncJsonWriteQueueByPath = new Map();
 const appDataProtectionState = {
@@ -330,6 +332,22 @@ const hyperwebManager = new HyperwebManager({
   enabled: true,
   logger: console,
   publicTopicId: HYPERWEB_PUBLIC_TOPIC_ID,
+});
+function buildHyperwebStatusPayload(status = null) {
+  const current = (status && typeof status === 'object') ? status : hyperwebManager.getStatus();
+  const identity = getHyperwebNetworkIdentity(readSettings());
+  return {
+    ...current,
+    identity,
+    pending_private_entries: countPendingPrivateInboxEntries(),
+    identity_state: String(identity.identity_state || ''),
+    can_sign: !!identity.can_sign,
+    can_connect: !!identity.can_connect,
+    degraded: !identity.can_connect,
+  };
+}
+hyperwebManager.on('status', (status) => {
+  sendBrowserEvent('browser:hyperwebStatusChanged', buildHyperwebStatusPayload(status));
 });
 hyperwebManager.on('peer_seen', () => {
   const state = ensureHyperwebSocialState();
@@ -7588,24 +7606,169 @@ function syncHyperwebIdentityAliasFromSettings(settings = null) {
   return state;
 }
 
+function migrateHyperwebIdentityState(settings = null) {
+  const cfg = settings || readSettings();
+  const state = readHyperwebSocialState();
+  const identity = (state.identity && typeof state.identity === 'object')
+    ? state.identity
+    : createDefaultHyperwebSocialState().identity;
+  const hasStoredIdentity = !isBlankHyperwebIdentity(identity);
+  const privateKeyRaw = getHyperwebIdentityPrivateKeyRaw();
+  const privateKeyObj = decodeHyperwebPrivateKey(privateKeyRaw);
+
+  if (!privateKeyObj) {
+    if (!hasStoredIdentity) {
+      const generated = generateAndPersistHyperwebIdentity(state);
+      const generatedState = readHyperwebSocialState();
+      markHyperwebMigrationState(generatedState, {
+        orphan_cleanup_performed: false,
+        cleanup_reason: '',
+        cleanup_at: 0,
+      });
+      writeHyperwebSocialState(generatedState);
+      hyperwebSocialState = generatedState;
+      return {
+        identity_state: 'ok',
+        can_sign: true,
+        can_connect: true,
+        created_identity: true,
+        identity: generated.identity,
+        private_key_obj: generated.private_key_obj,
+      };
+    }
+    const degradedState = privateKeyRaw ? 'invalid_private_key' : 'missing_private_key';
+    markHyperwebMigrationState(state, {
+      orphan_cleanup_performed: !!state.orphan_cleanup_performed,
+      previous_identity_fingerprint: String(state.previous_identity_fingerprint || ''),
+      cleanup_reason: String(state.cleanup_reason || ''),
+      cleanup_at: Number(state.cleanup_at || 0),
+    });
+    writeHyperwebSocialState(state);
+    hyperwebSocialState = state;
+    return {
+      identity_state: degradedState,
+      can_sign: false,
+      can_connect: false,
+      identity,
+      private_key_obj: null,
+    };
+  }
+
+  const authoritativePubkey = crypto.createPublicKey(privateKeyObj).export({ type: 'spki', format: 'pem' });
+  const repairedIdentity = buildHyperwebIdentityRecord(authoritativePubkey, cfg, identity);
+  const storedFingerprint = String(identity.fingerprint || '').trim().toUpperCase();
+  const authoritativeFingerprint = String(repairedIdentity.fingerprint || '').trim().toUpperCase();
+  let nextState = state;
+  let changed = false;
+
+  if (hasStoredIdentity && storedFingerprint && storedFingerprint !== authoritativeFingerprint) {
+    nextState = preserveHyperwebMismatchedState(state, 'identity_mismatch');
+    markHyperwebMigrationState(nextState, {
+      orphan_cleanup_performed: false,
+      previous_identity_fingerprint: storedFingerprint,
+      cleanup_reason: 'identity_mismatch',
+      cleanup_at: Number(nextState.cleanup_at || 0),
+    });
+    writeHyperwebSocialState(nextState);
+    hyperwebSocialState = nextState;
+    return {
+      identity_state: 'identity_mismatch',
+      can_sign: false,
+      can_connect: false,
+      identity: nextState.identity,
+      private_key_obj: null,
+    };
+  } else {
+    const shouldRepairIdentity = (
+      !hasStoredIdentity
+      || String(identity.pubkey || '').trim() !== String(repairedIdentity.pubkey || '').trim()
+      || storedFingerprint !== authoritativeFingerprint
+      || String(identity.display_alias || '').trim() !== String(repairedIdentity.display_alias || '').trim()
+    );
+    if (shouldRepairIdentity) {
+      nextState.identity = {
+        ...identity,
+        ...repairedIdentity,
+        chat_pubkey: String(identity.chat_pubkey || '').trim(),
+      };
+      changed = true;
+    }
+    markHyperwebMigrationState(nextState, {
+      orphan_cleanup_performed: !!nextState.orphan_cleanup_performed,
+      previous_identity_fingerprint: String(nextState.previous_identity_fingerprint || ''),
+      cleanup_reason: String(nextState.cleanup_reason || ''),
+      cleanup_at: Number(nextState.cleanup_at || 0),
+    });
+  }
+
+  const encoded = encodeHyperwebPrivateKey(privateKeyObj);
+  if (encoded && !privateKeyRaw.startsWith(HYPERWEB_IDENTITY_DER_PREFIX)) {
+    setPlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, encoded, { service: HYPERWEB_IDENTITY_SERVICE });
+  }
+  if (changed || Number(nextState.migration_version || 0) !== HYPERWEB_STATE_MIGRATION_VERSION) {
+    markHyperwebMigrationState(nextState, {
+      orphan_cleanup_performed: !!nextState.orphan_cleanup_performed,
+      previous_identity_fingerprint: String(nextState.previous_identity_fingerprint || ''),
+      cleanup_reason: String(nextState.cleanup_reason || ''),
+      cleanup_at: Number(nextState.cleanup_at || 0),
+    });
+    writeHyperwebSocialState(nextState);
+  }
+  hyperwebSocialState = nextState;
+  return {
+    identity_state: 'ok',
+    can_sign: true,
+    can_connect: true,
+    identity: nextState.identity,
+    private_key_obj: privateKeyObj,
+  };
+}
+
 function getHyperwebNetworkIdentity(settings = null) {
   const cfg = settings || readSettings();
-  const ensured = ensureHyperwebIdentity();
+  const ensured = ensureHyperwebIdentity(cfg);
   const identity = (ensured && ensured.identity) ? ensured.identity : {};
   const fingerprint = String(identity.fingerprint || '').trim().toUpperCase();
   const displayName = getConfiguredHyperwebAlias(cfg, fingerprint);
-  syncHyperwebIdentityAliasFromSettings(cfg);
   return {
     identity_id: fingerprint,
     display_name: displayName,
     token: '',
+    identity_state: String((ensured && ensured.identity_state) || ''),
+    can_sign: !!(ensured && ensured.can_sign),
+    can_connect: !!(ensured && ensured.can_connect),
   };
 }
 
 function requireHyperwebIdentity() {
+  const ensured = ensureHyperwebIdentity(readSettings());
   const identity = getHyperwebNetworkIdentity(readSettings());
-  if (!identity.identity_id) return { ok: false, message: 'Hyperweb identity unavailable.' };
-  return { ok: true, identity };
+  if (!identity.identity_id) {
+    return {
+      ok: false,
+      message: 'Hyperweb identity unavailable.',
+      identity_state: String((ensured && ensured.identity_state) || 'missing_private_key'),
+      can_sign: false,
+      can_connect: false,
+    };
+  }
+  if (!ensured || !ensured.can_sign || !ensured.can_connect) {
+    const identityState = String((ensured && ensured.identity_state) || 'missing_private_key');
+    const reason = identityState === 'identity_mismatch'
+      ? 'Hyperweb identity does not match the restored local store. History is preserved in read-only mode.'
+      : (identityState === 'invalid_private_key'
+        ? 'Hyperweb identity key is invalid. Reset Hyperweb identity to continue.'
+        : 'Hyperweb identity key is unavailable. Reset Hyperweb identity to continue.');
+    return {
+      ok: false,
+      message: reason,
+      identity,
+      identity_state: identityState,
+      can_sign: false,
+      can_connect: false,
+    };
+  }
+  return { ok: true, identity, identity_state: 'ok', can_sign: true, can_connect: true };
 }
 
 function getHyperwebPublicSnapshotsPath() {
@@ -8470,6 +8633,70 @@ function defaultAliasFromFingerprint(fingerprint = '') {
   return code ? `node-${code}` : 'node-ANON';
 }
 
+function isBlankHyperwebIdentity(identity = {}) {
+  return !String((identity && identity.fingerprint) || '').trim()
+    && !String((identity && identity.pubkey) || '').trim();
+}
+
+function buildHyperwebIdentityRecord(pubkeyPem = '', settings = null, existing = {}) {
+  const fingerprint = localFingerprintFromPubKey(pubkeyPem);
+  return {
+    pubkey: String(pubkeyPem || '').trim(),
+    fingerprint,
+    display_alias: getConfiguredHyperwebAlias(settings || readSettings(), fingerprint),
+    chat_pubkey: String((existing && existing.chat_pubkey) || '').trim(),
+    created_at: Number((existing && existing.created_at) || nowTs()),
+  };
+}
+
+function markHyperwebMigrationState(state, patch = {}) {
+  if (!state || typeof state !== 'object') return state;
+  state.migration_version = HYPERWEB_STATE_MIGRATION_VERSION;
+  if (Object.prototype.hasOwnProperty.call(patch, 'orphan_cleanup_performed')) {
+    state.orphan_cleanup_performed = !!patch.orphan_cleanup_performed;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'previous_identity_fingerprint')) {
+    state.previous_identity_fingerprint = String(patch.previous_identity_fingerprint || '').trim().toUpperCase();
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'cleanup_reason')) {
+    state.cleanup_reason = String(patch.cleanup_reason || '').trim();
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'cleanup_at')) {
+    state.cleanup_at = Number(patch.cleanup_at || 0);
+  }
+  return state;
+}
+
+function hardResetHyperwebOrphanedState(state, nextIdentity, reason = 'identity_mismatch') {
+  const fresh = createDefaultHyperwebSocialState();
+  const previousIdentity = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
+  fresh.identity = {
+    ...fresh.identity,
+    ...(nextIdentity && typeof nextIdentity === 'object' ? nextIdentity : {}),
+  };
+  markHyperwebMigrationState(fresh, {
+    orphan_cleanup_performed: true,
+    previous_identity_fingerprint: previousIdentity,
+    cleanup_reason: reason,
+    cleanup_at: nowTs(),
+  });
+  return fresh;
+}
+
+function preserveHyperwebMismatchedState(state, reason = 'identity_mismatch') {
+  const next = {
+    ...createDefaultHyperwebSocialState(),
+    ...(state && typeof state === 'object' ? state : {}),
+  };
+  markHyperwebMigrationState(next, {
+    orphan_cleanup_performed: false,
+    previous_identity_fingerprint: String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase(),
+    cleanup_reason: reason,
+    cleanup_at: Number((state && state.cleanup_at) || 0),
+  });
+  return next;
+}
+
 function createDefaultHyperwebSocialState() {
   return {
     identity: {
@@ -8498,6 +8725,11 @@ function createDefaultHyperwebSocialState() {
     thread_policies: {},
     message_deletes: {},
     thread_deletes: {},
+    migration_version: 0,
+    orphan_cleanup_performed: false,
+    previous_identity_fingerprint: '',
+    cleanup_reason: '',
+    cleanup_at: 0,
     last_compaction_at: 0,
   };
 }
@@ -8506,6 +8738,16 @@ function writeHyperwebSocialState(state) {
   const payload = (state && typeof state === 'object') ? state : createDefaultHyperwebSocialState();
   hyperwebSocialState = payload;
   scheduleAsyncJsonStoreWrite(getHyperwebSocialPath(), payload, { clone: false });
+}
+
+function scheduleDeferredHyperwebSocialStateWrite(state, delayMs = 80) {
+  const payload = (state && typeof state === 'object') ? state : createDefaultHyperwebSocialState();
+  hyperwebSocialState = payload;
+  if (hyperwebReceiptWriteTimer) return;
+  hyperwebReceiptWriteTimer = setTimeout(() => {
+    hyperwebReceiptWriteTimer = null;
+    writeHyperwebSocialState(hyperwebSocialState);
+  }, Math.max(10, Number(delayMs || 80)));
 }
 
 function readHyperwebSocialState() {
@@ -8619,14 +8861,7 @@ function generateAndPersistHyperwebIdentity(state) {
   const pubKeyPem = generated.publicKey.export({ type: 'spki', format: 'pem' });
   const encodedPrivate = encodeHyperwebPrivateKey(privateKeyObj);
   setPlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, encodedPrivate, { service: HYPERWEB_IDENTITY_SERVICE });
-  const fingerprint = localFingerprintFromPubKey(pubKeyPem);
-  const nextIdentity = {
-    pubkey: pubKeyPem,
-    fingerprint,
-    display_alias: defaultAliasFromFingerprint(fingerprint),
-    chat_pubkey: '',
-    created_at: nowTs(),
-  };
+  const nextIdentity = buildHyperwebIdentityRecord(pubKeyPem, readSettings(), {});
   state.identity = nextIdentity;
   writeHyperwebSocialState(state);
   return {
@@ -8635,52 +8870,8 @@ function generateAndPersistHyperwebIdentity(state) {
   };
 }
 
-function ensureHyperwebIdentity() {
-  const settings = readSettings();
-  const state = readHyperwebSocialState();
-  const identity = (state.identity && typeof state.identity === 'object')
-    ? state.identity
-    : createDefaultHyperwebSocialState().identity;
-  const privateKeyRaw = getHyperwebIdentityPrivateKeyRaw();
-  let privateKeyObj = decodeHyperwebPrivateKey(privateKeyRaw);
-  let nextIdentity = { ...identity };
-  let changed = false;
-
-  const hasPubKey = !!String(identity.pubkey || '').trim();
-  const hasFp = !!String(identity.fingerprint || '').trim();
-  const pairValid = hasPubKey && hasFp && validateHyperwebKeyPair(privateKeyObj, identity.pubkey);
-  if (!privateKeyObj || !hasPubKey || !hasFp || !pairValid) {
-    const regenerated = generateAndPersistHyperwebIdentity(state);
-    hyperwebSocialState = state;
-    return regenerated;
-  } else {
-    const expectedFp = localFingerprintFromPubKey(identity.pubkey);
-    const display = getConfiguredHyperwebAlias(settings, expectedFp);
-    if (expectedFp !== String(identity.fingerprint || '').trim().toUpperCase() || display !== String(identity.display_alias || '')) {
-      nextIdentity = {
-        pubkey: String(identity.pubkey || ''),
-        fingerprint: expectedFp,
-        display_alias: display,
-        chat_pubkey: String(identity.chat_pubkey || ''),
-        created_at: Number(identity.created_at || nowTs()),
-      };
-      changed = true;
-    }
-    const encoded = encodeHyperwebPrivateKey(privateKeyObj);
-    if (encoded && !privateKeyRaw.startsWith(HYPERWEB_IDENTITY_DER_PREFIX)) {
-      setPlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, encoded, { service: HYPERWEB_IDENTITY_SERVICE });
-    }
-  }
-
-  if (changed) {
-    state.identity = nextIdentity;
-    writeHyperwebSocialState(state);
-  }
-  hyperwebSocialState = changed ? state : (hyperwebSocialState || state);
-  return {
-    identity: nextIdentity,
-    private_key_obj: privateKeyObj,
-  };
+function ensureHyperwebIdentity(settings = null) {
+  return migrateHyperwebIdentityState(settings || readSettings());
 }
 
 function ensureHyperwebChatKeyPair(stateOverride = null) {
@@ -8751,14 +8942,13 @@ function signHyperwebPayload(payload, privateKeyPem = '') {
     const keyObj = typeof keyInput === 'string'
       ? decodeHyperwebPrivateKey(keyInput)
       : (keyInput || null);
-    if (!keyObj) throw new Error('Hyperweb signing key is unavailable.');
+    if (!keyObj) return '';
     return crypto.sign(null, Buffer.from(raw, 'utf8'), keyObj).toString('base64');
   };
   try {
     return signWith(privateKeyPem || getHyperwebIdentityPrivateKeyRaw());
   } catch (_) {
-    const regenerated = ensureHyperwebIdentity();
-    return signWith(regenerated && regenerated.private_key_obj ? regenerated.private_key_obj : null);
+    return '';
   }
 }
 
@@ -9015,7 +9205,7 @@ function persistHyperwebChatMessage(record = {}) {
   return { ok: true, message: item };
 }
 
-function upsertHyperwebChatReceipt(messageId = '', peerId = '', kind = 'delivered') {
+function upsertHyperwebChatReceipt(messageId = '', peerId = '', kind = 'delivered', options = {}) {
   const id = String(messageId || '').trim();
   const peer = String(peerId || '').trim().toUpperCase();
   if (!id || !peer) return;
@@ -9029,7 +9219,8 @@ function upsertHyperwebChatReceipt(messageId = '', peerId = '', kind = 'delivere
     : {};
   bucket[peer] = nowTs();
   state.chat_receipts[id][bucketName] = bucket;
-  writeHyperwebSocialState(state);
+  if (options && options.defer_write) scheduleDeferredHyperwebSocialStateWrite(state);
+  else writeHyperwebSocialState(state);
   hyperwebSocialState = state;
 }
 
@@ -9189,7 +9380,9 @@ function ensureHyperwebSocialState() {
   }
   const ensuredIdentity = ensureHyperwebIdentity();
   hyperwebSocialState.identity = ensuredIdentity.identity;
-  const chatPair = ensureHyperwebChatKeyPair(hyperwebSocialState);
+  const chatPair = ensuredIdentity && ensuredIdentity.can_sign
+    ? ensureHyperwebChatKeyPair(hyperwebSocialState)
+    : null;
   if (chatPair && chatPair.public_key && hyperwebSocialState.identity) {
     hyperwebSocialState.identity.chat_pubkey = chatPair.public_key;
   }
@@ -9212,6 +9405,11 @@ function ensureHyperwebSocialState() {
   if (!hyperwebSocialState.thread_policies || typeof hyperwebSocialState.thread_policies !== 'object') hyperwebSocialState.thread_policies = {};
   if (!hyperwebSocialState.message_deletes || typeof hyperwebSocialState.message_deletes !== 'object') hyperwebSocialState.message_deletes = {};
   if (!hyperwebSocialState.thread_deletes || typeof hyperwebSocialState.thread_deletes !== 'object') hyperwebSocialState.thread_deletes = {};
+  if (!Number.isFinite(Number(hyperwebSocialState.migration_version || 0))) hyperwebSocialState.migration_version = 0;
+  if (typeof hyperwebSocialState.orphan_cleanup_performed !== 'boolean') hyperwebSocialState.orphan_cleanup_performed = false;
+  if (typeof hyperwebSocialState.previous_identity_fingerprint !== 'string') hyperwebSocialState.previous_identity_fingerprint = '';
+  if (typeof hyperwebSocialState.cleanup_reason !== 'string') hyperwebSocialState.cleanup_reason = '';
+  if (!Number.isFinite(Number(hyperwebSocialState.cleanup_at || 0))) hyperwebSocialState.cleanup_at = 0;
   return hyperwebSocialState;
 }
 
@@ -9518,6 +9716,9 @@ function appendHyperwebSocialEvent(event, options = {}) {
   if (!item) return { ok: false, message: 'event is required.' };
   const eventId = String(item.event_id || '').trim();
   if (!eventId) return { ok: false, message: 'event_id is required.' };
+  const signerPubkey = String(item.signer_pubkey || '').trim();
+  const signature = String(item.signature || '').trim();
+  if (!signerPubkey || !signature) return { ok: false, message: 'event signature is required.' };
   const dedupe = new Set(state.hyperweb_social_log.map((x) => String((x && x.event_id) || '').trim()));
   if (dedupe.has(eventId)) return { ok: true, deduped: true, event: item };
   state.hyperweb_social_log.push(item);
@@ -10607,7 +10808,7 @@ function countPendingPrivateInboxEntries() {
   }).length;
 }
 
-function upsertPrivateInboxReceipt(entryId = '', peerId = '', kind = 'delivered') {
+function upsertPrivateInboxReceipt(entryId = '', peerId = '', kind = 'delivered', options = {}) {
   const id = String(entryId || '').trim();
   const peer = String(peerId || '').trim().toUpperCase();
   if (!id || !peer) return;
@@ -10622,7 +10823,8 @@ function upsertPrivateInboxReceipt(entryId = '', peerId = '', kind = 'delivered'
     : {};
   bucket[peer] = nowTs();
   state.private_inbox_receipts[id][bucketName] = bucket;
-  writeHyperwebSocialState(state);
+  if (options && options.defer_write) scheduleDeferredHyperwebSocialStateWrite(state);
+  else writeHyperwebSocialState(state);
   hyperwebSocialState = state;
 }
 
@@ -10959,10 +11161,10 @@ function materializePrivateInboxEntry(entry = {}) {
     const messageId = String(item.message_id || payload.message_id || '').trim();
     const targetEntryId = String((payload && payload.entry_id) || '').trim();
     if (targetEntryId) {
-      upsertPrivateInboxReceipt(targetEntryId, String(item.from_fingerprint || '').trim().toUpperCase(), kind === 'read_ack' ? 'read' : 'delivered');
+      upsertPrivateInboxReceipt(targetEntryId, String(item.from_fingerprint || '').trim().toUpperCase(), kind === 'read_ack' ? 'read' : 'delivered', { defer_write: true });
     }
     if (messageId) {
-      upsertHyperwebChatReceipt(messageId, String(item.from_fingerprint || '').trim().toUpperCase(), kind === 'read_ack' ? 'read' : 'delivered');
+      upsertHyperwebChatReceipt(messageId, String(item.from_fingerprint || '').trim().toUpperCase(), kind === 'read_ack' ? 'read' : 'delivered', { defer_write: true });
     }
     res = { ok: true };
   }
@@ -10987,15 +11189,7 @@ function sendHyperwebChatAck(toPeerId = '', messageId = '', logicalId = '', room
   const localId = String((((state || {}).identity || {}).fingerprint) || '').trim().toUpperCase();
   const peer = String(toPeerId || '').trim().toUpperCase();
   if (!localId || !peer || !messageId) return { ok: false, message: 'ack target is invalid.' };
-  const event = makeSignedSocialEvent('social_chat_receipt', {
-    message_id: String(messageId || '').trim(),
-    logical_id: String(logicalId || messageId).trim(),
-    room_id: String(roomId || '').trim(),
-    actor_fingerprint: localId,
-    receipt_kind: String(ackType || 'read').trim().toLowerCase() === 'delivered' ? 'delivered' : 'read',
-    created_at: nowTs(),
-  });
-  appendHyperwebSocialEvent(event);
+  upsertHyperwebChatReceipt(String(messageId || '').trim(), localId, String(ackType || 'read').trim().toLowerCase() === 'delivered' ? 'delivered' : 'read', { defer_write: true });
   const payload = {
     type: 'hyperweb:chat_ack',
     to_peer_id: peer,
@@ -12241,6 +12435,7 @@ function sanitizeReferenceColorTag(value) {
   return '';
 }
 function getHyperwebIdentityDiagnostics() {
+  const ensured = ensureHyperwebIdentity();
   const state = ensureHyperwebSocialState();
   const identity = (state && state.identity && typeof state.identity === 'object') ? state.identity : {};
   const privateRaw = getHyperwebIdentityPrivateKeyRaw();
@@ -12251,6 +12446,14 @@ function getHyperwebIdentityDiagnostics() {
     alias: String(identity.display_alias || ''),
     created_at: Number(identity.created_at || 0),
     key_status: keyValid ? 'valid' : 'invalid_or_missing',
+    identity_state: String((ensured && ensured.identity_state) || 'missing_private_key'),
+    can_sign: !!(ensured && ensured.can_sign),
+    can_connect: !!(ensured && ensured.can_connect),
+    migration_version: Number(state.migration_version || 0),
+    orphan_cleanup_performed: !!state.orphan_cleanup_performed,
+    previous_identity_fingerprint: String(state.previous_identity_fingerprint || ''),
+    cleanup_reason: String(state.cleanup_reason || ''),
+    cleanup_at: Number(state.cleanup_at || 0),
   };
 }
 
@@ -12381,6 +12584,15 @@ function confirmTypedResetPhrase(phrase = 'RESET') {
 }
 
 async function connectHyperweb(options = {}) {
+  const auth = requireHyperwebIdentity();
+  if (!auth.ok) {
+    return {
+      ok: false,
+      degraded: true,
+      message: String(auth.message || 'Hyperweb identity unavailable.'),
+      hyperweb: buildHyperwebStatusPayload(hyperwebManager.getStatus()),
+    };
+  }
   const settings = readSettings();
   const identity = getHyperwebNetworkIdentity(settings);
   hyperwebManager.setEnabled(!!settings.hyperweb_enabled);
@@ -20725,7 +20937,7 @@ ipcMain.handle('browser:ragReindex', async (_event, payload) => {
 
 ipcMain.handle('browser:settingsDiagnostics', async () => {
   const settings = readSettings();
-  const hyperweb = hyperwebManager.getStatus();
+  const hyperweb = buildHyperwebStatusPayload(hyperwebManager.getStatus());
   const identity = getHyperwebIdentityDiagnostics();
   const python = await getPythonRuntimeResolver().diagnostics({ bypassCache: true });
   return {
@@ -20796,13 +21008,9 @@ ipcMain.handle('browser:setDefaultSearchEngine', (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebStatus', async () => {
-  await hyperwebManager.refreshLocalPublicIndex();
-  const identity = getHyperwebNetworkIdentity(readSettings());
   return {
     ok: true,
-    identity,
-    pending_private_entries: countPendingPrivateInboxEntries(),
-    ...hyperwebManager.getStatus(),
+    ...buildHyperwebStatusPayload(hyperwebManager.getStatus()),
   };
 });
 
@@ -20810,7 +21018,7 @@ ipcMain.handle('browser:hyperwebConnect', async () => {
   const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const trust = await connectHyperweb({});
-  const status = hyperwebManager.getStatus();
+  const status = buildHyperwebStatusPayload(hyperwebManager.getStatus());
   return {
     ok: !!(trust && trust.ok),
     degraded: !!(trust && trust.degraded),
@@ -20823,7 +21031,7 @@ ipcMain.handle('browser:hyperwebDisconnect', () => {
   const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const res = hyperwebManager.disconnect();
-  return { ok: true, ...res.status };
+  return { ok: true, ...buildHyperwebStatusPayload(res.status) };
 });
 
 ipcMain.handle('browser:hyperwebQuery', async (_event, payload) => {
@@ -20863,10 +21071,9 @@ ipcMain.handle('browser:hyperwebImportSuggestion', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebSocialStatus', async () => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const state = ensureHyperwebSocialState();
   const status = hyperwebManager.getStatus();
+  const identityDiag = getHyperwebIdentityDiagnostics();
   return {
     ok: true,
     identity: state.identity,
@@ -20876,12 +21083,12 @@ ipcMain.handle('browser:hyperwebSocialStatus', async () => {
     connected: !!(status && status.connected),
     peer_count: Number((status && status.peer_count) || 0),
     pending_private_entries: countPendingPrivateInboxEntries(),
+    identity_state: String(identityDiag.identity_state || ''),
+    can_connect: !!identityDiag.can_connect,
   };
 });
 
 ipcMain.handle('browser:hyperwebListPeers', async () => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const state = ensureHyperwebSocialState();
   return {
     ok: true,
@@ -20891,8 +21098,6 @@ ipcMain.handle('browser:hyperwebListPeers', async () => {
 });
 
 ipcMain.handle('browser:hyperwebTrustedPeersList', async () => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   return {
     ok: true,
     peers: listHyperwebTrustedPeers(),
@@ -21011,15 +21216,11 @@ ipcMain.handle('browser:hyperwebDeleteSnapshot', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebFeedQuery', async (_event, payload) => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const authorFingerprint = String((payload && payload.author_fingerprint) || '').trim();
   return buildHyperwebFeed({ author_fingerprint: authorFingerprint });
 });
 
 ipcMain.handle('browser:hyperwebProfileQuery', async (_event, payload) => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const authorFingerprint = String((payload && payload.author_fingerprint) || '').trim();
   return queryHyperwebProfile(authorFingerprint);
 });
@@ -21058,9 +21259,6 @@ ipcMain.handle('browser:hyperwebChatSend', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
-  emitPendingDeliveredReceipts();
   const peerId = String((payload && payload.peer_id) || '').trim().toUpperCase();
   const roomId = String((payload && payload.room_id) || '').trim();
   const limit = Number((payload && payload.limit) || 200);
@@ -21093,15 +21291,11 @@ ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebChatAttachment', async (_event, payload) => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const messageId = String((payload && payload.message_id) || '').trim();
   return resolveHyperwebChatAttachment(messageId);
 });
 
 ipcMain.handle('browser:hyperwebChatConversations', async () => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   return {
     ok: true,
     conversations: resolveHyperwebDmConversationSummaries(),
@@ -21131,7 +21325,7 @@ ipcMain.handle('browser:hyperwebChatMarkRead', async (_event, payload) => {
   fromHistory.forEach((item) => {
     const sender = String((item && item.from_peer_id) || '').trim().toUpperCase();
     if (!sender || sender === localId) return;
-    upsertHyperwebChatReceipt(String(item.message_id || ''), localId, 'read');
+    upsertHyperwebChatReceipt(String(item.message_id || ''), localId, 'read', { defer_write: true });
     sendHyperwebChatAck(sender, String(item.message_id || ''), String(item.logical_id || ''), String(item.room_id || ''), 'read');
     acked.push(String(item.message_id || '').trim());
   });
@@ -21171,8 +21365,6 @@ ipcMain.handle('browser:hyperwebChatThreadPolicySet', async (_event, payload) =>
 });
 
 ipcMain.handle('browser:hyperwebChatRoomsList', async () => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   return listHyperwebChatRooms();
 });
 
@@ -21185,8 +21377,6 @@ ipcMain.handle('browser:hyperwebShareReference', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebListShares', async () => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   return listPrivateSharesForCurrentUser();
 });
 
@@ -21219,14 +21409,10 @@ ipcMain.handle('browser:hyperwebDeleteShare', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebListSharedRooms', async () => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   return listSharedRoomsForCurrentUser();
 });
 
 ipcMain.handle('browser:hyperwebOpenSharedRoom', async (_event, payload) => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const roomId = String((payload && payload.room_id) || '').trim();
   return openSharedRoomForCurrentUser(roomId);
 });
@@ -21240,8 +21426,6 @@ ipcMain.handle('browser:hyperwebCollabApplyUpdate', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebReferenceSearch', async (_event, payload) => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const query = String((payload && payload.query) || '').trim();
   const limit = Number((payload && payload.limit) || 40);
   const authorFingerprint = String((payload && payload.author_fingerprint) || '').trim();
@@ -21274,8 +21458,6 @@ ipcMain.handle('browser:hyperwebImportReference', async (_event, payload) => {
 });
 
 ipcMain.handle('browser:hyperwebPostSearch', async (_event, payload) => {
-  const auth = requireHyperwebIdentity();
-  if (!auth.ok) return auth;
   const query = String((payload && payload.query) || '').trim();
   const limit = Number((payload && payload.limit) || 40);
   const authorFingerprint = String((payload && payload.author_fingerprint) || '').trim();
@@ -21390,6 +21572,11 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  if (hyperwebReceiptWriteTimer) {
+    clearTimeout(hyperwebReceiptWriteTimer);
+    hyperwebReceiptWriteTimer = null;
+    writeHyperwebSocialState(hyperwebSocialState);
+  }
   flushAsyncJsonStoreWritesSync();
   if (memorySemanticTimer) {
     clearInterval(memorySemanticTimer);

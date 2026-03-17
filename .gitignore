@@ -6,3 +6,6 @@ dist/
 sandbox/
 .claude/
 .codex/
+releaseed/
+*.dmg
+*.exe

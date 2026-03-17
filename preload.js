@@ -319,6 +319,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeAllListeners('browser:hyperwebChat');
       ipcRenderer.on('browser:hyperwebChat', (_event, data) => callback(data));
     },
+    onHyperwebStatus: (callback) => {
+      ipcRenderer.removeAllListeners('browser:hyperwebStatusChanged');
+      ipcRenderer.on('browser:hyperwebStatusChanged', (_event, data) => callback(data));
+    },
     onHyperwebOpenThread: (callback) => {
       ipcRenderer.removeAllListeners('browser:hyperwebOpenThread');
       ipcRenderer.on('browser:hyperwebOpenThread', (_event, data) => callback(data));
