@@ -11781,6 +11781,44 @@ function bindControls() {
     }
   });
 
+  e('settings-danger-save-hyperweb-recovery-btn')?.addEventListener('click', async () => {
+    const res = await api.settingsDangerExportHyperwebRecovery();
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to save Hyperweb recovery key.';
+      renderSettingsStatusLine();
+      return;
+    }
+    state.settingsSaveState = (res && res.message) ? res.message : 'Hyperweb recovery key saved.';
+    renderSettingsStatusLine();
+  });
+
+  e('settings-danger-restore-hyperweb-recovery-btn')?.addEventListener('click', async () => {
+    const phrase = readDangerConfirmPhrase();
+    if (!phrase) {
+      state.settingsSaveState = 'Type RESET in the confirmation field first.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const res = await api.settingsDangerRestoreHyperwebRecovery({ phrase });
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to restore Hyperweb recovery key.';
+      renderSettingsStatusLine();
+      return;
+    }
+    clearDangerConfirmPhrase();
+    state.settingsSaveState = (res && res.message) ? res.message : 'Hyperweb recovery key restored.';
+    renderSettingsStatusLine();
+    const diagnostics = await api.settingsDiagnostics();
+    if (diagnostics && diagnostics.ok) {
+      state.settingsDiagnostics = diagnostics;
+      renderSettingsDiagnostics();
+    }
+    await refreshHyperwebStatus();
+    await refreshHyperwebChatData();
+    await refreshHyperwebFeedAndReferences();
+    await refreshSettingsTrustedPeers();
+  });
+
   e('settings-danger-reset-hyperweb-identity-btn')?.addEventListener('click', async () => {
     const phrase = readDangerConfirmPhrase();
     if (!phrase) {

@@ -880,7 +880,12 @@
       <details class="settings-section settings-danger settings-accordion" id="settings-danger-zone" data-settings-section="danger">
         <summary>Danger Zone</summary>
         <div class="settings-section-content">
-        <p class="muted small">These actions are destructive and require typing RESET.</p>
+        <p class="muted small">Save a Hyperweb recovery bundle somewhere secure before using the destructive actions below.</p>
+        <div class="settings-inline-actions">
+          <button id="settings-danger-save-hyperweb-recovery-btn" type="button">Save Recovery Key</button>
+          <button id="settings-danger-restore-hyperweb-recovery-btn" type="button">Restore Recovery Key</button>
+        </div>
+        <p class="muted small">Restore overwrites the locally stored Hyperweb signing keys. Reset and cache-clear still require typing RESET.</p>
         <label class="settings-field">Confirmation
           <input id="settings-danger-confirm-input" type="text" placeholder="Type RESET" />
         </label>

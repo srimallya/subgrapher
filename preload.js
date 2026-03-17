@@ -222,6 +222,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     appDataProtectionStatus: () => ipcRenderer.invoke('browser:appDataProtectionStatus'),
     appDataProtectionLock: () => ipcRenderer.invoke('browser:appDataProtectionLock'),
     appDataProtectionUnlock: (payload = {}) => ipcRenderer.invoke('browser:appDataProtectionUnlock', payload || {}),
+    settingsDangerExportHyperwebRecovery: () => ipcRenderer.invoke('browser:settingsDangerExportHyperwebRecovery'),
+    settingsDangerRestoreHyperwebRecovery: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerRestoreHyperwebRecovery', payload || {}),
     settingsDangerResetHyperwebIdentity: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerResetHyperwebIdentity', payload),
     settingsDangerClearHyperwebSocialCache: (payload = {}) => ipcRenderer.invoke('browser:settingsDangerClearHyperwebSocialCache', payload),
     setLuminoSelection: (provider, model) => ipcRenderer.invoke('browser:setLuminoSelection', { provider, model }),

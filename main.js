@@ -96,6 +96,7 @@ const HYPERWEB_SNAPSHOT_DAILY_LIMIT = 5;
 const HYPERWEB_SNAPSHOT_MONTHLY_LIMIT = 30;
 const HYPERWEB_SNAPSHOT_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 const HYPERWEB_SEARCH_MAX_RESULTS = 80;
+const HYPERWEB_RECOVERY_BUNDLE_VERSION = 1;
 const HISTORY_DEFAULT_MAX_ENTRIES = 5000;
 const HISTORY_RECENT_DUP_WINDOW_MS = 2 * 60 * 1000;
 const REFERENCE_RERANK_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -8855,6 +8856,226 @@ function validateHyperwebKeyPair(privateKeyObj, publicKeyPem) {
   } catch (_) {
     return false;
   }
+}
+
+function validateHyperwebChatKeyPair(privateKeyObj, publicKeyPem) {
+  if (!privateKeyObj || !publicKeyPem) return false;
+  try {
+    const peer = crypto.generateKeyPairSync('x25519');
+    const secretA = crypto.diffieHellman({ privateKey: privateKeyObj, publicKey: peer.publicKey });
+    const pubObj = crypto.createPublicKey(publicKeyPem);
+    const secretB = crypto.diffieHellman({ privateKey: peer.privateKey, publicKey: pubObj });
+    return Buffer.compare(secretA, secretB) === 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildCurrentHyperwebRecoveryIdentity(settings = null) {
+  const cfg = settings || readSettings();
+  const state = readHyperwebSocialState();
+  const storedIdentity = (state && state.identity && typeof state.identity === 'object')
+    ? state.identity
+    : createDefaultHyperwebSocialState().identity;
+  const identityKeyObj = decodeHyperwebPrivateKey(getHyperwebIdentityPrivateKeyRaw());
+  if (!identityKeyObj) {
+    return { ok: false, message: 'Current Hyperweb signing key is unavailable.' };
+  }
+  const identityPubkey = crypto.createPublicKey(identityKeyObj).export({ type: 'spki', format: 'pem' });
+  const repairedIdentity = buildHyperwebIdentityRecord(identityPubkey, cfg, storedIdentity);
+  const chatKeyObj = decodeHyperwebChatPrivateKey(getHyperwebChatPrivateKeyRaw());
+  let chatPubkey = String((storedIdentity && storedIdentity.chat_pubkey) || '').trim();
+  if (chatKeyObj) {
+    chatPubkey = crypto.createPublicKey(chatKeyObj).export({ type: 'spki', format: 'pem' });
+  }
+  return {
+    ok: true,
+    identity: {
+      ...repairedIdentity,
+      chat_pubkey: chatPubkey,
+    },
+    identity_private_key: encodeHyperwebPrivateKey(identityKeyObj),
+    chat_private_key: chatKeyObj ? encodeHyperwebChatPrivateKey(chatKeyObj) : '',
+  };
+}
+
+function buildHyperwebRecoveryBundle(settings = null) {
+  const current = buildCurrentHyperwebRecoveryIdentity(settings || readSettings());
+  if (!current.ok) return current;
+  return {
+    ok: true,
+    bundle: {
+      format: 'subgrapher-hyperweb-recovery',
+      version: HYPERWEB_RECOVERY_BUNDLE_VERSION,
+      created_at: nowTs(),
+      machine_name: os.hostname(),
+      app_name: APP_NAME,
+      identity: current.identity,
+      secrets: {
+        identity_private_key: String(current.identity_private_key || ''),
+        chat_private_key: String(current.chat_private_key || ''),
+      },
+    },
+    identity: current.identity,
+  };
+}
+
+function parseHyperwebRecoveryBundle(rawText = '') {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(String(rawText || ''));
+  } catch (_) {
+    return { ok: false, message: 'Recovery bundle is not valid JSON.' };
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    return { ok: false, message: 'Recovery bundle is invalid.' };
+  }
+  if (String(parsed.format || '').trim() !== 'subgrapher-hyperweb-recovery') {
+    return { ok: false, message: 'Unsupported recovery bundle format.' };
+  }
+  if (Number(parsed.version || 0) !== HYPERWEB_RECOVERY_BUNDLE_VERSION) {
+    return { ok: false, message: 'Unsupported recovery bundle version.' };
+  }
+
+  const identity = (parsed.identity && typeof parsed.identity === 'object') ? parsed.identity : {};
+  const secrets = (parsed.secrets && typeof parsed.secrets === 'object') ? parsed.secrets : {};
+  const encodedIdentityKey = String(secrets.identity_private_key || '').trim();
+  const encodedChatKey = String(secrets.chat_private_key || '').trim();
+  const identityKeyObj = decodeHyperwebPrivateKey(encodedIdentityKey);
+  if (!identityKeyObj) {
+    return { ok: false, message: 'Recovery bundle signing key is invalid.' };
+  }
+
+  const identityPubkey = crypto.createPublicKey(identityKeyObj).export({ type: 'spki', format: 'pem' });
+  const derivedFingerprint = localFingerprintFromPubKey(identityPubkey);
+  const expectedPubkey = String(identity.pubkey || '').trim();
+  const expectedFingerprint = String(identity.fingerprint || '').trim().toUpperCase();
+  if (expectedPubkey && expectedPubkey !== identityPubkey) {
+    return { ok: false, message: 'Recovery bundle public signing key does not match the private key.' };
+  }
+  if (expectedFingerprint && expectedFingerprint !== derivedFingerprint) {
+    return { ok: false, message: 'Recovery bundle fingerprint does not match the private key.' };
+  }
+
+  let chatPubkey = String(identity.chat_pubkey || '').trim();
+  if (encodedChatKey) {
+    const chatKeyObj = decodeHyperwebChatPrivateKey(encodedChatKey);
+    if (!chatKeyObj) {
+      return { ok: false, message: 'Recovery bundle chat key is invalid.' };
+    }
+    const derivedChatPubkey = crypto.createPublicKey(chatKeyObj).export({ type: 'spki', format: 'pem' });
+    if (chatPubkey && chatPubkey !== derivedChatPubkey) {
+      return { ok: false, message: 'Recovery bundle chat key does not match the recorded chat public key.' };
+    }
+    if (!validateHyperwebChatKeyPair(chatKeyObj, derivedChatPubkey)) {
+      return { ok: false, message: 'Recovery bundle chat key could not be verified.' };
+    }
+    chatPubkey = derivedChatPubkey;
+  }
+
+  return {
+    ok: true,
+    bundle: {
+      format: 'subgrapher-hyperweb-recovery',
+      version: HYPERWEB_RECOVERY_BUNDLE_VERSION,
+      created_at: Number(parsed.created_at || nowTs()),
+      machine_name: String(parsed.machine_name || ''),
+      app_name: String(parsed.app_name || APP_NAME),
+      identity: {
+        pubkey: identityPubkey,
+        fingerprint: derivedFingerprint,
+        display_alias: String(identity.display_alias || '').trim(),
+        chat_pubkey: chatPubkey,
+        created_at: Number(identity.created_at || nowTs()),
+      },
+      secrets: {
+        identity_private_key: encodedIdentityKey,
+        chat_private_key: encodedChatKey,
+      },
+    },
+  };
+}
+
+async function saveHyperwebRecoveryBundle() {
+  const built = buildHyperwebRecoveryBundle(readSettings());
+  if (!built.ok) return built;
+  const identity = built.identity || {};
+  const fingerprint = String(identity.fingerprint || '').trim().toUpperCase();
+  const pick = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Hyperweb Recovery Key',
+    defaultPath: path.join(os.homedir(), 'Documents', `subgrapher-hyperweb-recovery-${fingerprint || 'key'}.json`),
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (!pick || pick.canceled || !pick.filePath) {
+    return { ok: false, canceled: true, message: 'Save canceled.' };
+  }
+  fs.writeFileSync(String(pick.filePath || '').trim(), JSON.stringify(built.bundle, null, 2), 'utf8');
+  return {
+    ok: true,
+    saved_path: String(pick.filePath || '').trim(),
+    fingerprint,
+    message: `Saved Hyperweb recovery key for ${fingerprint || 'current identity'}.`,
+  };
+}
+
+async function restoreHyperwebRecoveryBundle() {
+  const pick = await dialog.showOpenDialog(mainWindow, {
+    title: 'Restore Hyperweb Recovery Key',
+    properties: ['openFile'],
+    filters: [
+      { name: 'JSON Files', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (!pick || pick.canceled || !Array.isArray(pick.filePaths) || !pick.filePaths[0]) {
+    return { ok: false, canceled: true, message: 'Restore canceled.' };
+  }
+
+  const targetPath = String(pick.filePaths[0] || '').trim();
+  const parsed = parseHyperwebRecoveryBundle(fs.readFileSync(targetPath, 'utf8'));
+  if (!parsed.ok) return parsed;
+
+  const bundle = parsed.bundle || {};
+  const identity = (bundle.identity && typeof bundle.identity === 'object') ? bundle.identity : {};
+  const secrets = (bundle.secrets && typeof bundle.secrets === 'object') ? bundle.secrets : {};
+
+  hyperwebManager.disconnect();
+  setPlatformServiceSecret(HYPERWEB_IDENTITY_PRIVATE_KEY_ACCOUNT, String(secrets.identity_private_key || ''), { service: HYPERWEB_IDENTITY_SERVICE });
+  if (String(secrets.chat_private_key || '').trim()) {
+    setPlatformServiceSecret(HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT, String(secrets.chat_private_key || ''), { service: HYPERWEB_CHAT_KEY_SERVICE });
+  } else {
+    deletePlatformServiceSecret(HYPERWEB_CHAT_PRIVATE_KEY_ACCOUNT, { service: HYPERWEB_CHAT_KEY_SERVICE });
+  }
+
+  const state = ensureHyperwebSocialState();
+  const existingIdentity = (state && state.identity && typeof state.identity === 'object') ? state.identity : {};
+  state.identity = {
+    ...existingIdentity,
+    ...identity,
+    pubkey: String(identity.pubkey || ''),
+    fingerprint: String(identity.fingerprint || '').trim().toUpperCase(),
+    chat_pubkey: String(identity.chat_pubkey || ''),
+    created_at: Number(identity.created_at || existingIdentity.created_at || nowTs()),
+  };
+  writeHyperwebSocialState(state);
+  hyperwebSocialState = state;
+
+  const ensured = ensureHyperwebIdentity(readSettings());
+  ensureHyperwebChatKeyPair(hyperwebSocialState);
+  const status = buildHyperwebStatusPayload(hyperwebManager.getStatus());
+  return {
+    ok: true,
+    restored_path: targetPath,
+    fingerprint: String((((ensured && ensured.identity) || {}).fingerprint) || String(identity.fingerprint || '')).trim().toUpperCase(),
+    identity_state: String((ensured && ensured.identity_state) || ''),
+    can_connect: !!(ensured && ensured.can_connect),
+    can_sign: !!(ensured && ensured.can_sign),
+    hyperweb: status,
+    message: 'Hyperweb recovery key restored.',
+  };
 }
 
 function generateAndPersistHyperwebIdentity(state) {
@@ -20970,6 +21191,18 @@ ipcMain.handle('browser:settingsDangerResetHyperwebIdentity', async (_event, pay
     ok: true,
     new_identity: nextIdentity && nextIdentity.identity ? nextIdentity.identity : {},
   };
+});
+
+ipcMain.handle('browser:settingsDangerExportHyperwebRecovery', async () => {
+  return saveHyperwebRecoveryBundle();
+});
+
+ipcMain.handle('browser:settingsDangerRestoreHyperwebRecovery', async (_event, payload) => {
+  const phrase = String((payload && payload.phrase) || '').trim().toUpperCase();
+  if (phrase !== confirmTypedResetPhrase('RESET')) {
+    return { ok: false, message: 'Type RESET to confirm.' };
+  }
+  return restoreHyperwebRecoveryBundle();
 });
 
 ipcMain.handle('browser:settingsDangerClearHyperwebSocialCache', async (_event, payload) => {
