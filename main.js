@@ -336,8 +336,10 @@ const hyperwebManager = new HyperwebManager({
 function buildHyperwebStatusPayload(status = null) {
   const current = (status && typeof status === 'object') ? status : hyperwebManager.getStatus();
   const identity = getHyperwebNetworkIdentity(readSettings());
+  const displayedPeerCount = getHyperwebDisplayedLivePeerCount();
   return {
     ...current,
+    peer_count: displayedPeerCount,
     identity,
     pending_private_entries: countPendingPrivateInboxEntries(),
     identity_state: String(identity.identity_state || ''),
@@ -9735,9 +9737,6 @@ function appendHyperwebSocialEvent(event, options = {}) {
     const materialized = (Array.isArray(state.chat_messages) ? state.chat_messages : []).find((row) => String((row && row.message_id) || '').trim() === messageId);
     if (materialized) maybeNotifyIncomingHyperwebMessage(materialized);
   }
-  if (type !== 'social_chat_receipt') {
-    emitPendingDeliveredReceipts();
-  }
   if (!options.skipBroadcast) {
     hyperwebManager.broadcastProtocol({
       type: `hyperweb:${String(item.type || '').trim().toLowerCase()}`,
@@ -9887,7 +9886,7 @@ function buildHyperwebFeed(options = {}) {
     identity: state.identity,
     author_filter: authorFilter,
     posts,
-    peer_count: Number((hyperwebManager.getStatus() && hyperwebManager.getStatus().peer_count) || 0),
+    peer_count: getHyperwebDisplayedLivePeerCount(),
   };
 }
 
@@ -10749,6 +10748,12 @@ function getHyperwebOnlinePeerIds() {
     }
   });
   return online;
+}
+
+function getHyperwebDisplayedLivePeerCount() {
+  const transportPeerCount = Number(((hyperwebManager.getStatus() || {}).peer_count) || 0);
+  const onlinePeerCount = getHyperwebOnlinePeerIds().size;
+  return Math.max(0, Math.max(transportPeerCount, onlinePeerCount));
 }
 
 function buildHyperwebInboxTopicId(peerA = '', peerB = '') {
@@ -21081,7 +21086,7 @@ ipcMain.handle('browser:hyperwebSocialStatus', async () => {
     known_peers: state.known_peers || {},
     peers: hyperwebManager.listPeers(),
     connected: !!(status && status.connected),
-    peer_count: Number((status && status.peer_count) || 0),
+    peer_count: getHyperwebDisplayedLivePeerCount(),
     pending_private_entries: countPendingPrivateInboxEntries(),
     identity_state: String(identityDiag.identity_state || ''),
     can_connect: !!identityDiag.can_connect,
@@ -21286,7 +21291,7 @@ ipcMain.handle('browser:hyperwebChatHistory', async (_event, payload) => {
     thread_policy: (state.thread_policies && state.thread_policies[threadId]) ? state.thread_policies[threadId] : { thread_id: threadId, retention: 'off' },
     thread_deleted: !!(state.thread_deletes && state.thread_deletes[threadId]),
     active_presence: activePresence,
-    live_peer_count: Number((hyperwebManager.getStatus() && hyperwebManager.getStatus().peer_count) || 0),
+    live_peer_count: getHyperwebDisplayedLivePeerCount(),
   };
 });
 
