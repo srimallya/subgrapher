@@ -3423,6 +3423,134 @@ function guessImageMimeTypeFromPath(filePath = '') {
   return 'application/octet-stream';
 }
 
+function guessPortableAssetMimeTypeFromPath(filePath = '') {
+  const ext = String(path.extname(String(filePath || '')).toLowerCase() || '');
+  if (!ext) return 'application/octet-stream';
+  if (ext === '.css') return 'text/css';
+  if (ext === '.js' || ext === '.mjs') return 'application/javascript';
+  if (ext === '.json') return 'application/json';
+  if (ext === '.html' || ext === '.htm') return 'text/html';
+  if (ext === '.svg') return 'image/svg+xml';
+  if (ext === '.woff') return 'font/woff';
+  if (ext === '.woff2') return 'font/woff2';
+  if (ext === '.ttf') return 'font/ttf';
+  if (ext === '.otf') return 'font/otf';
+  if (ext === '.txt') return 'text/plain';
+  const guessedImage = guessImageMimeTypeFromPath(filePath);
+  if (guessedImage !== 'application/octet-stream') return guessedImage;
+  return 'application/octet-stream';
+}
+
+function buildPortableDataUrlForResolvedFile(filePath = '') {
+  const resolvedPath = path.resolve(String(filePath || '').trim());
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) return '';
+  let stat = null;
+  try {
+    stat = fs.statSync(resolvedPath);
+  } catch (_) {
+    stat = null;
+  }
+  if (!stat || !stat.isFile()) return '';
+  try {
+    const mime = guessPortableAssetMimeTypeFromPath(resolvedPath);
+    const data = fs.readFileSync(resolvedPath);
+    return `data:${mime};base64,${data.toString('base64')}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function buildPortableDataUrlForArtifactAsset(srId = '', uri = '') {
+  const rawUri = String(uri || '').trim();
+  if (!rawUri) return '';
+  if (/^data:/i.test(rawUri) || /^https?:\/\//i.test(rawUri)) return rawUri;
+  const resolved = resolveArtifactAssetUri(srId, rawUri);
+  if (!resolved || !resolved.ok || !resolved.resolved_url) return '';
+  if (/^data:/i.test(resolved.resolved_url)) return String(resolved.resolved_url || '');
+  if (!/^file:\/\//i.test(resolved.resolved_url)) return '';
+  const localPath = filePathFromFileUrl(resolved.resolved_url);
+  if (!localPath) return '';
+  return buildPortableDataUrlForResolvedFile(localPath);
+}
+
+function replacePortableCssAssetUrls(srId = '', content = '') {
+  const cache = new Map();
+  return String(content || '').replace(/url\((['"]?)([^)"']+)\1\)/gi, (match, quote, rawUri) => {
+    const uri = String(rawUri || '').trim();
+    if (!uri || /^data:/i.test(uri) || /^https?:\/\//i.test(uri) || uri.startsWith('#')) return match;
+    if (!cache.has(uri)) cache.set(uri, buildPortableDataUrlForArtifactAsset(srId, uri));
+    const portable = cache.get(uri);
+    if (!portable) return match;
+    const wrapper = quote || '"';
+    return `url(${wrapper}${portable}${wrapper})`;
+  });
+}
+
+function replacePortableArtifactAssetUris(srId = '', artifact = {}) {
+  const safeArtifact = (artifact && typeof artifact === 'object') ? artifact : {};
+  const artifactType = normalizeArtifactType((safeArtifact && safeArtifact.type) || 'markdown');
+  const originalContent = String((safeArtifact && safeArtifact.content) || '');
+  if (!originalContent) return { ...safeArtifact, content: originalContent };
+  const cache = new Map();
+  const replaceUri = (uri = '') => {
+    const rawUri = String(uri || '').trim();
+    if (!rawUri || /^data:/i.test(rawUri) || /^https?:\/\//i.test(rawUri) || rawUri.startsWith('#')) return rawUri;
+    if (!cache.has(rawUri)) cache.set(rawUri, buildPortableDataUrlForArtifactAsset(srId, rawUri));
+    return cache.get(rawUri) || rawUri;
+  };
+  let content = originalContent;
+  if (artifactType === 'html') {
+    content = content.replace(/\b(?:src|href|poster)=["']([^"'#]+)["']/gi, (match, rawUri) => {
+      const nextUri = replaceUri(rawUri);
+      if (!nextUri || nextUri === rawUri) return match;
+      return match.replace(rawUri, nextUri);
+    });
+    content = replacePortableCssAssetUrls(srId, content);
+  } else {
+    content = content.replace(/!\[([^\]]*)\]\(([^)\s]+)([^)]*)\)/g, (match, alt, rawUri, rest = '') => {
+      const nextUri = replaceUri(rawUri);
+      if (!nextUri || nextUri === rawUri) return match;
+      return `![${alt}](${nextUri}${rest})`;
+    });
+  }
+  return {
+    ...safeArtifact,
+    content,
+  };
+}
+
+function buildPortableSharedTabs(ref = {}) {
+  const tabs = Array.isArray(ref && ref.tabs) ? ref.tabs : [];
+  return tabs.map((tab) => {
+    const safeTab = (tab && typeof tab === 'object') ? tab : {};
+    const pngBase64 = String((safeTab && safeTab.viz_png_base64) || '').trim();
+    const pngPath = String((safeTab && safeTab.viz_png_path) || '').trim();
+    if (pngBase64) {
+      return {
+        ...safeTab,
+        viz_png_path: '',
+      };
+    }
+    if (!pngPath) return { ...safeTab };
+    const portableDataUrl = buildPortableDataUrlForResolvedFile(pngPath);
+    if (!portableDataUrl) {
+      return { ...safeTab };
+    }
+    const portableBase64 = extractBase64PayloadFromDataUrl(portableDataUrl);
+    return {
+      ...safeTab,
+      viz_png_path: '',
+      viz_png_base64: portableBase64,
+    };
+  });
+}
+
+function buildPortableSharedArtifacts(ref = {}) {
+  const refId = String((ref && ref.id) || '').trim();
+  const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
+  return artifacts.map((artifact) => replacePortableArtifactAssetUris(refId, artifact));
+}
+
 function extractOpenAiLikeTextFromChatJson(json = {}) {
   const choices = Array.isArray(json && json.choices) ? json.choices : [];
   const message = choices[0] && choices[0].message ? choices[0].message : {};
@@ -8571,9 +8699,16 @@ function seedHistoryFromExistingReferencesIfEmpty() {
 
 function sanitizePublicReference(ref) {
   const author = getLocalHyperwebAuthor();
-  const tabs = Array.isArray(ref && ref.tabs) ? ref.tabs : [];
-  const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
   const protocol = buildReferenceProtocolFields(ref);
+  const portableTabs = buildPortableSharedTabs(ref);
+  const portableArtifacts = buildPortableSharedArtifacts(ref);
+  const portableRef = {
+    ...(ref && typeof ref === 'object' ? ref : {}),
+    tabs: portableTabs,
+    artifacts: portableArtifacts,
+  };
+  const tabs = portableTabs;
+  const artifacts = portableArtifacts;
   const cachedSummary = getPublicReferenceSummaryCache(ref);
   const summaryText = cachedSummary
     ? cachedSummary.summary
@@ -8581,7 +8716,7 @@ function sanitizePublicReference(ref) {
   const stateHash = cachedSummary && cachedSummary.state_hash
     ? cachedSummary.state_hash
     : buildPublicReferenceStateHash(ref);
-  const manifest = buildReferenceReplicationManifest(ref);
+  const manifest = buildReferenceReplicationManifest(portableRef);
   const manifestSummary = buildReplicationManifestSummary(manifest);
   return {
     id: String((ref && ref.id) || ''),
@@ -8633,8 +8768,8 @@ function sanitizePublicReference(ref) {
       last_synced_snapshot_id: protocol.last_synced_snapshot_id,
       tabs,
       artifacts,
-      context_files: Array.isArray(ref && ref.context_files) ? ref.context_files : [],
-      program: String((ref && ref.program) || ''),
+      context_files: Array.isArray(portableRef && portableRef.context_files) ? portableRef.context_files : [],
+      program: String((portableRef && portableRef.program) || ''),
     }, manifest),
     summary_text: summaryText,
     public_summary_state_hash: stateHash,
@@ -21952,11 +22087,22 @@ function referenceHasMeaningfulLocalState(ref) {
   return false;
 }
 
+function refreshHyperwebPublicSnapshotCaches() {
+  syncPublicFeedWithSnapshots();
+  hyperwebManager.refreshLocalPublicIndex().then(() => {
+    const status = hyperwebManager.getStatus();
+    if (status && status.connected) {
+      hyperwebManager.announcePublicIndex().catch(() => {});
+    }
+  }).catch(() => {});
+}
+
 function buildOrphanReferenceScan() {
   const refs = getReferences();
   const snapshotsState = pruneHyperwebPublicSnapshotsState(readHyperwebPublicSnapshotsState());
   const privateSharesState = readHyperwebPrivateSharesState();
   const now = nowTs();
+  const currentIdentityFingerprint = String(currentHyperwebMemberId() || '').trim().toUpperCase();
   const publishedReferenceUids = new Set(
     (Array.isArray(snapshotsState.snapshots) ? snapshotsState.snapshots : [])
       .flatMap((snapshot) => {
@@ -22011,6 +22157,8 @@ function buildOrphanReferenceScan() {
     if (ref.is_public_candidate) {
       if (!recent && !meaningful) {
         orphanItems.push({
+          item_kind: 'reference',
+          item_id: String(ref.id || ''),
           sr_id: String(ref.id || ''),
           title: String(ref.title || 'Untitled'),
           reason: 'stale_public_candidate',
@@ -22022,6 +22170,8 @@ function buildOrphanReferenceScan() {
 
     if (meta.private_share && !linkedPrivateShare && !meaningful && (now - lastTouchedAt) >= ORPHAN_BROKEN_SHARE_AGE_MS) {
       orphanItems.push({
+        item_kind: 'reference',
+        item_id: String(ref.id || ''),
         sr_id: String(ref.id || ''),
         title: String(ref.title || 'Untitled'),
         reason: 'broken_private_share_placeholder',
@@ -22041,6 +22191,8 @@ function buildOrphanReferenceScan() {
     if (newest && String((newest && newest.id) || '') === String(ref.id || '')) return;
     if ((now - lastTouchedAt) < ORPHAN_DUPLICATE_AGE_MS) return;
     orphanItems.push({
+      item_kind: 'reference',
+      item_id: String(ref.id || ''),
       sr_id: String(ref.id || ''),
       title: String(ref.title || 'Untitled'),
       reason: 'duplicate_imported_snapshot',
@@ -22048,12 +22200,31 @@ function buildOrphanReferenceScan() {
     });
   });
 
+  (Array.isArray(snapshotsState.snapshots) ? snapshotsState.snapshots : []).forEach((snapshot) => {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    const snapshotId = String((snapshot && snapshot.snapshot_id) || '').trim();
+    const authorFingerprint = String((snapshot && snapshot.author_fingerprint) || '').trim().toUpperCase();
+    if (!snapshotId || !authorFingerprint || !currentIdentityFingerprint || authorFingerprint === currentIdentityFingerprint) return;
+    orphanItems.push({
+      item_kind: 'public_snapshot',
+      item_id: snapshotId,
+      snapshot_id: snapshotId,
+      sr_id: '',
+      title: String((snapshot && snapshot.reference_title) || 'Untitled'),
+      reason: 'previous_identity_snapshot',
+      updated_at: Number((snapshot && snapshot.updated_at) || (snapshot && snapshot.published_at) || 0),
+      author_fingerprint: authorFingerprint,
+    });
+  });
+
   orphanItems.sort((a, b) => Number((a && a.updated_at) || 0) - Number((b && b.updated_at) || 0));
   return {
     ok: true,
     total_references: refs.length,
+    total_public_snapshots: Array.isArray(snapshotsState.snapshots) ? snapshotsState.snapshots.length : 0,
     orphan_count: orphanItems.length,
     orphaned_reference_ids: orphanItems.map((item) => String(item.sr_id || '')).filter(Boolean),
+    orphaned_item_ids: orphanItems.map((item) => `${String((item && item.item_kind) || 'reference')}:${String((item && item.item_id) || '')}`).filter(Boolean),
     items: orphanItems,
   };
 }
@@ -22061,17 +22232,97 @@ function buildOrphanReferenceScan() {
 function deleteOrphanedReferences() {
   const scan = buildOrphanReferenceScan();
   if (!scan.ok) return scan;
-  const targetIds = new Set(Array.isArray(scan.orphaned_reference_ids) ? scan.orphaned_reference_ids : []);
-  if (targetIds.size === 0) {
-    return { ok: true, deleted_count: 0, deleted_ids: [], scan };
+  const targetReferenceIds = new Set(
+    (Array.isArray(scan.items) ? scan.items : [])
+      .filter((item) => String((item && item.item_kind) || 'reference') === 'reference')
+      .map((item) => String((item && item.sr_id) || '').trim())
+      .filter(Boolean)
+  );
+  const targetSnapshotIds = new Set(
+    (Array.isArray(scan.items) ? scan.items : [])
+      .filter((item) => String((item && item.item_kind) || '') === 'public_snapshot')
+      .map((item) => String((item && item.snapshot_id) || '').trim())
+      .filter(Boolean)
+  );
+  if (targetReferenceIds.size === 0 && targetSnapshotIds.size === 0) {
+    return { ok: true, deleted_count: 0, deleted_ids: [], deleted_snapshot_ids: [], scan };
   }
   const refs = getReferences();
-  const filtered = refs.filter((ref) => !targetIds.has(String((ref && ref.id) || '').trim()));
+  const filtered = refs.filter((ref) => !targetReferenceIds.has(String((ref && ref.id) || '').trim()));
+  let deletedSnapshotCount = 0;
+  if (targetSnapshotIds.size > 0) {
+    const snapshotsState = pruneHyperwebPublicSnapshotsState(readHyperwebPublicSnapshotsState());
+    const snapshots = Array.isArray(snapshotsState.snapshots) ? snapshotsState.snapshots : [];
+    const nextSnapshots = snapshots.filter((snapshot) => !targetSnapshotIds.has(String((snapshot && snapshot.snapshot_id) || '').trim()));
+    deletedSnapshotCount = snapshots.length - nextSnapshots.length;
+    if (deletedSnapshotCount > 0) {
+      snapshotsState.snapshots = nextSnapshots;
+      writeHyperwebPublicSnapshotsState(snapshotsState);
+      refreshHyperwebPublicSnapshotCaches();
+    }
+  }
   setReferences(filtered);
   return {
     ok: true,
-    deleted_count: refs.length - filtered.length,
-    deleted_ids: Array.from(targetIds),
+    deleted_count: (refs.length - filtered.length) + deletedSnapshotCount,
+    deleted_ids: Array.from(targetReferenceIds),
+    deleted_snapshot_ids: Array.from(targetSnapshotIds),
+    scan,
+  };
+}
+
+function deleteSingleOrphanedReference(srId = '') {
+  const targetId = String(srId || '').trim();
+  if (!targetId) return { ok: false, message: 'item_id is required.' };
+  const scan = buildOrphanReferenceScan();
+  if (!scan.ok) return scan;
+  const target = (Array.isArray(scan.items) ? scan.items : []).find((item) => String((item && item.item_id) || (item && item.sr_id) || '').trim() === targetId);
+  if (!target) {
+    return {
+      ok: false,
+      message: 'Item is not currently marked as orphaned.',
+      scan,
+    };
+  }
+  if (String((target && target.item_kind) || 'reference') === 'public_snapshot') {
+    const snapshotsState = pruneHyperwebPublicSnapshotsState(readHyperwebPublicSnapshotsState());
+    const snapshots = Array.isArray(snapshotsState.snapshots) ? snapshotsState.snapshots : [];
+    const nextSnapshots = snapshots.filter((snapshot) => String((snapshot && snapshot.snapshot_id) || '').trim() !== targetId);
+    if (nextSnapshots.length === snapshots.length) {
+      return {
+        ok: false,
+        message: 'Snapshot not found.',
+        scan,
+      };
+    }
+    snapshotsState.snapshots = nextSnapshots;
+    writeHyperwebPublicSnapshotsState(snapshotsState);
+    refreshHyperwebPublicSnapshotCaches();
+    return {
+      ok: true,
+      deleted_count: 1,
+      deleted_ids: [],
+      deleted_snapshot_ids: [targetId],
+      deleted_reference: target,
+      scan,
+    };
+  }
+  const refs = getReferences();
+  const filtered = refs.filter((ref) => String((ref && ref.id) || '').trim() !== targetId);
+  if (filtered.length === refs.length) {
+    return {
+      ok: false,
+      message: 'Reference not found.',
+      scan,
+    };
+  }
+  setReferences(filtered);
+  return {
+    ok: true,
+    deleted_count: 1,
+    deleted_ids: [targetId],
+    deleted_snapshot_ids: [],
+    deleted_reference: target,
     scan,
   };
 }
@@ -22098,6 +22349,10 @@ ipcMain.handle('browser:settingsReferenceOrphanScan', async () => {
 
 ipcMain.handle('browser:settingsReferenceOrphanDelete', async () => {
   return deleteOrphanedReferences();
+});
+
+ipcMain.handle('browser:settingsReferenceOrphanDeleteOne', async (_event, payload) => {
+  return deleteSingleOrphanedReference(String((payload && payload.sr_id) || '').trim());
 });
 
 ipcMain.handle('browser:settingsDangerResetHyperwebIdentity', async (_event, payload) => {

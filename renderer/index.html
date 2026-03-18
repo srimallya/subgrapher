@@ -873,10 +873,6 @@
           <div class="settings-readout">
             <h4>Reference Store</h4>
             <pre id="settings-diagnostics-reference-store"></pre>
-            <div class="settings-inline-actions">
-              <button id="settings-reference-orphan-scan-btn" type="button">Scan Orphaned References</button>
-              <button id="settings-reference-orphan-delete-btn" type="button">Delete Orphaned References</button>
-            </div>
           </div>
         </div>
         <div class="settings-inline-actions">
@@ -900,6 +896,19 @@
         <div class="settings-inline-actions">
           <button id="settings-danger-reset-hyperweb-identity-btn">Reset Hyperweb Identity</button>
           <button id="settings-danger-clear-social-cache-btn">Clear Hyperweb Social Cache</button>
+        </div>
+        <div class="settings-danger-panel">
+          <div class="settings-danger-panel-header">
+            <div>
+              <h4>Orphaned References</h4>
+              <div id="settings-danger-orphan-summary" class="muted small">Scan for stale local references and old public snapshots from previous identities.</div>
+            </div>
+            <div class="settings-inline-actions">
+              <button id="settings-danger-orphan-scan-btn" type="button">Scan</button>
+              <button id="settings-danger-orphan-delete-all-btn" type="button">Delete All</button>
+            </div>
+          </div>
+          <div id="settings-danger-orphan-list" class="settings-danger-list"></div>
         </div>
         </div>
       </details>

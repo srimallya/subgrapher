@@ -2212,6 +2212,63 @@ summary:focus-visible {
   border-bottom-color: rgba(184, 92, 92, 0.5);
 }
 
+.settings-danger-panel {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid rgba(184, 92, 92, 0.28);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-danger-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.settings-danger-panel-header h4 {
+  margin: 0 0 4px;
+}
+
+.settings-danger-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.settings-danger-item,
+.settings-danger-empty {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-sm);
+  background: #1f1f1f;
+}
+
+.settings-danger-empty {
+  color: var(--muted);
+}
+
+.settings-danger-item-meta {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.settings-danger-item-title {
+  font-weight: 500;
+}
+
+.settings-danger-item-detail {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .history-grid {
   flex: 1;
   min-height: 0;

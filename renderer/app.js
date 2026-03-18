@@ -9653,7 +9653,7 @@ function renderSettingsDiagnostics() {
   const identity = e('settings-diagnostics-identity');
   const python = e('settings-diagnostics-python');
   const referenceStore = e('settings-diagnostics-reference-store');
-  const orphanDeleteBtn = e('settings-reference-orphan-delete-btn');
+  const orphanDeleteBtn = e('settings-danger-orphan-delete-all-btn');
   const pythonDownloadBtn = e('settings-python-download-btn');
   if (hyper) hyper.textContent = JSON.stringify((diag && diag.hyperweb) || {}, null, 2);
   if (identity) identity.textContent = JSON.stringify((diag && diag.hyperweb_identity) || {}, null, 2);
@@ -9663,17 +9663,8 @@ function renderSettingsDiagnostics() {
       : {};
     const lines = [];
     lines.push(`total references: ${Number(store.total_references || 0)}`);
-    lines.push(`orphaned references: ${Number(store.orphan_count || 0)}`);
-    if (Array.isArray(store.items) && store.items.length > 0) {
-      store.items.slice(0, 12).forEach((item) => {
-        lines.push(`- ${String((item && item.title) || 'Untitled')}: ${String((item && item.reason) || 'unknown')}`);
-      });
-      if (store.items.length > 12) {
-        lines.push(`...and ${store.items.length - 12} more`);
-      }
-    } else {
-      lines.push('no orphaned references detected');
-    }
+    lines.push(`total public snapshots: ${Number(store.total_public_snapshots || 0)}`);
+    lines.push(`orphaned items: ${Number(store.orphan_count || 0)}`);
     referenceStore.textContent = lines.join('\n');
   }
   if (python) {
@@ -9697,7 +9688,91 @@ function renderSettingsDiagnostics() {
   if (orphanDeleteBtn) {
     orphanDeleteBtn.disabled = !(diag && diag.reference_store && Number(diag.reference_store.orphan_count || 0) > 0);
   }
+  renderSettingsOrphanList();
   renderSettingsHyperwebControls();
+}
+
+function formatSettingsOrphanReason(reason = '') {
+  const normalized = String(reason || '').trim().toLowerCase();
+  if (normalized === 'stale_public_candidate') return 'Stale public candidate';
+  if (normalized === 'broken_private_share_placeholder') return 'Broken private-share placeholder';
+  if (normalized === 'duplicate_imported_snapshot') return 'Duplicate imported snapshot';
+  if (normalized === 'previous_identity_snapshot') return 'Local public snapshot from a previous identity';
+  return 'Unknown orphan reason';
+}
+
+function renderSettingsOrphanList() {
+  const diag = state.settingsDiagnostics || {};
+  const store = (diag && diag.reference_store && typeof diag.reference_store === 'object')
+    ? diag.reference_store
+    : {};
+  const summary = e('settings-danger-orphan-summary');
+  const list = e('settings-danger-orphan-list');
+  const deleteAllBtn = e('settings-danger-orphan-delete-all-btn');
+  if (summary) {
+    const orphanCount = Number(store.orphan_count || 0);
+    summary.textContent = orphanCount > 0
+      ? `${orphanCount} orphaned item(s) detected across ${Number(store.total_references || 0)} references and ${Number(store.total_public_snapshots || 0)} local public snapshots.`
+      : 'No orphaned references or previous-identity local snapshots detected.';
+  }
+  if (deleteAllBtn) {
+    deleteAllBtn.disabled = Number(store.orphan_count || 0) <= 0;
+  }
+  if (!list) return;
+  const items = Array.isArray(store.items) ? store.items : [];
+  if (items.length === 0) {
+    list.innerHTML = '<div class="settings-danger-empty">No orphaned items detected.</div>';
+    return;
+  }
+  list.innerHTML = items.map((item) => {
+    const itemId = escapeHtml(String((item && item.item_id) || (item && item.sr_id) || '').trim());
+    const itemKind = escapeHtml(String((item && item.item_kind) || 'reference').trim());
+    const title = escapeHtml(normalizeInlineText((item && item.title) || 'Untitled'));
+    const detailBits = [
+      formatSettingsOrphanReason(item && item.reason),
+      item && item.author_fingerprint ? `author ${String(item.author_fingerprint || '').trim().toUpperCase()}` : '',
+      (item && item.updated_at) ? formatAgo(item.updated_at) : '',
+    ].filter(Boolean);
+    return `
+      <div class="settings-danger-item">
+        <div class="settings-danger-item-meta">
+          <div class="settings-danger-item-title">${title}</div>
+          <div class="settings-danger-item-detail">${escapeHtml(detailBits.join(' · '))}</div>
+          <div class="settings-danger-item-detail">${itemKind === 'public_snapshot' ? 'Local public snapshot' : 'Workspace reference'}</div>
+        </div>
+        <div class="settings-inline-actions">
+          <button class="danger" data-settings-orphan-delete="${itemId}">Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  list.querySelectorAll('button[data-settings-orphan-delete]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!api || typeof api.settingsReferenceOrphanDeleteOne !== 'function') return;
+      const itemId = String(button.getAttribute('data-settings-orphan-delete') || '').trim();
+      if (!itemId) return;
+      const confirmed = window.confirm('Delete this orphaned item?');
+      if (!confirmed) return;
+      state.settingsSaveState = 'Deleting orphaned item...';
+      renderSettingsStatusLine();
+      const res = await api.settingsReferenceOrphanDeleteOne({ sr_id: itemId });
+      if (!res || !res.ok) {
+        state.settingsSaveState = (res && res.message) ? res.message : 'Unable to delete orphaned item.';
+        renderSettingsStatusLine();
+        return;
+      }
+      const diagnostics = await api.settingsDiagnostics();
+      if (diagnostics && diagnostics.ok) {
+        state.settingsDiagnostics = diagnostics;
+        renderSettingsDiagnostics();
+      }
+      state.settingsSaveState = 'Orphaned item deleted.';
+      renderSettingsStatusLine();
+      await loadReferenceList({ preserveSelection: true });
+      await refreshHyperwebReferences();
+    });
+  });
 }
 
 function getHyperwebIdentityAvailability() {
@@ -11810,7 +11885,7 @@ function bindControls() {
     }
   });
 
-  e('settings-reference-orphan-scan-btn')?.addEventListener('click', async () => {
+  e('settings-danger-orphan-scan-btn')?.addEventListener('click', async () => {
     if (!api || typeof api.settingsReferenceOrphanScan !== 'function') return;
     state.settingsSaveState = 'Scanning orphaned references...';
     renderSettingsStatusLine();
@@ -11829,7 +11904,7 @@ function bindControls() {
     renderSettingsStatusLine();
   });
 
-  e('settings-reference-orphan-delete-btn')?.addEventListener('click', async () => {
+  e('settings-danger-orphan-delete-all-btn')?.addEventListener('click', async () => {
     if (!api || typeof api.settingsReferenceOrphanDelete !== 'function') return;
     const orphanCount = Number((((state.settingsDiagnostics || {}).reference_store || {}).orphan_count) || 0);
     if (orphanCount <= 0) {
@@ -11855,6 +11930,7 @@ function bindControls() {
     state.settingsSaveState = `Deleted ${Number(res.deleted_count || 0)} orphaned reference(s).`;
     renderSettingsStatusLine();
     await loadReferenceList({ preserveSelection: true });
+    await refreshHyperwebReferences();
   });
 
   e('settings-python-download-btn')?.addEventListener('click', async () => {

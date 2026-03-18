@@ -1,6 +1,6 @@
 {
   "name": "subgrapher",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Subgrapher standalone browser workspace",
   "main": "main.js",
   "author": "Srimallya Maitra",
@@ -76,7 +76,25 @@
       "identity": null
     },
     "dmg": {
-      "sign": false
+      "sign": false,
+      "contents": [
+        {
+          "x": 140,
+          "y": 220
+        },
+        {
+          "x": 420,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 280,
+          "y": 360,
+          "type": "file",
+          "path": "release/instruction.txt"
+        }
+      ]
     },
     "win": {
       "icon": "assets/icons/app-icon.ico",

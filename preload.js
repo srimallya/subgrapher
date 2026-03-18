@@ -221,6 +221,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     settingsDiagnostics: () => ipcRenderer.invoke('browser:settingsDiagnostics'),
     settingsReferenceOrphanScan: () => ipcRenderer.invoke('browser:settingsReferenceOrphanScan'),
     settingsReferenceOrphanDelete: () => ipcRenderer.invoke('browser:settingsReferenceOrphanDelete'),
+    settingsReferenceOrphanDeleteOne: (payload = {}) => ipcRenderer.invoke('browser:settingsReferenceOrphanDeleteOne', payload || {}),
     appDataProtectionStatus: () => ipcRenderer.invoke('browser:appDataProtectionStatus'),
     appDataProtectionLock: () => ipcRenderer.invoke('browser:appDataProtectionLock'),
     appDataProtectionUnlock: (payload = {}) => ipcRenderer.invoke('browser:appDataProtectionUnlock', payload || {}),
