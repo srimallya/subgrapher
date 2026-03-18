@@ -1105,6 +1105,24 @@ summary:focus-visible {
   color: #dfbbbb;
 }
 
+.hyperweb-status-badge.discovered,
+.hyperweb-status-badge.metadata_loaded,
+.hyperweb-status-badge.fetching_content,
+.hyperweb-status-badge.fetching_assets {
+  color: #d8c59d;
+  border-color: rgba(177, 140, 73, 0.45);
+}
+
+.hyperweb-status-badge.ready {
+  color: #c8d8cb;
+  border-color: rgba(95, 143, 107, 0.5);
+}
+
+.hyperweb-status-badge.failed {
+  color: #dfbbbb;
+  border-color: rgba(163, 94, 94, 0.45);
+}
+
 #artifact-input,
 .artifact-highlight-layer,
 .context-preview-body,

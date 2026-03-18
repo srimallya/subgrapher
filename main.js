@@ -157,6 +157,10 @@ const YOUTUBE_TRANSCRIPTS_MAX_ITEMS = 40;
 const YOUTUBE_TRANSCRIPT_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const PUBLIC_REFERENCE_SUMMARY_MAX_CHARS = 520;
 const PUBLIC_REFERENCE_SUMMARY_TIMEOUT_MS = 18_000;
+const PUBLIC_REFERENCE_MANIFEST_VERSION = 1;
+const ORPHAN_CANDIDATE_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const ORPHAN_DUPLICATE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const ORPHAN_BROKEN_SHARE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const BROWSER_VIEW_MIN_ZOOM = 0.25;
 const BROWSER_VIEW_MAX_ZOOM = 5;
 const BROWSER_VIEW_DEFAULT_ZOOM = 1;
@@ -7814,13 +7818,60 @@ function writeHyperwebPublicSnapshotsState(state) {
   scheduleAsyncJsonStoreWrite(getHyperwebPublicSnapshotsPath(), next, { clone: false });
 }
 
+function normalizeHyperwebSnapshotRecord(snapshot = {}) {
+  const item = (snapshot && typeof snapshot === 'object') ? cloneValue(snapshot) : {};
+  const payload = (item.reference_payload && typeof item.reference_payload === 'object')
+    ? item.reference_payload
+    : {};
+  const normalizedPayload = {
+    ...payload,
+    reference_uid: String(payload.reference_uid || payload.reference_id || item.reference_uid || item.reference_id || ''),
+    lineage_id: String(payload.lineage_id || payload.reference_uid || payload.reference_id || item.lineage_id || item.reference_id || ''),
+    parent_reference_uid: String(payload.parent_reference_uid || ''),
+    origin_snapshot_id: String(payload.origin_snapshot_id || item.parent_snapshot_id || ''),
+    last_synced_snapshot_id: String(payload.last_synced_snapshot_id || item.snapshot_id || ''),
+    fork_kind: normalizeReferenceForkKind(payload.fork_kind, 'root'),
+    manifest_version: Number(payload.manifest_version || PUBLIC_REFERENCE_MANIFEST_VERSION),
+    payload_mode: String(payload.payload_mode || 'inline'),
+  };
+  const manifest = (normalizedPayload.manifest && typeof normalizedPayload.manifest === 'object')
+    ? normalizedPayload.manifest
+    : buildReferenceReplicationManifest(normalizedPayload);
+  const manifestSummary = buildReplicationManifestSummary(manifest);
+  normalizedPayload.manifest = manifest;
+  normalizedPayload.manifest_summary = (normalizedPayload.manifest_summary && typeof normalizedPayload.manifest_summary === 'object')
+    ? normalizedPayload.manifest_summary
+    : manifestSummary;
+  normalizedPayload.content_hash = String(
+    normalizedPayload.content_hash
+    || item.content_hash
+    || buildPublicSnapshotContentHash(normalizedPayload, manifest)
+  );
+  return {
+    ...item,
+    reference_id: String(item.reference_id || normalizedPayload.reference_uid || normalizedPayload.id || ''),
+    reference_uid: String(item.reference_uid || normalizedPayload.reference_uid || ''),
+    lineage_id: String(item.lineage_id || normalizedPayload.lineage_id || normalizedPayload.reference_uid || ''),
+    parent_snapshot_id: String(item.parent_snapshot_id || normalizedPayload.origin_snapshot_id || ''),
+    root_snapshot_id: String(item.root_snapshot_id || item.snapshot_id || ''),
+    manifest_version: Number(item.manifest_version || normalizedPayload.manifest_version || PUBLIC_REFERENCE_MANIFEST_VERSION),
+    manifest,
+    manifest_summary: manifestSummary,
+    payload_mode: String(item.payload_mode || normalizedPayload.payload_mode || 'inline'),
+    content_hash: String(item.content_hash || normalizedPayload.content_hash || ''),
+    reference_payload: normalizedPayload,
+  };
+}
+
 function pruneHyperwebPublicSnapshotsState(state) {
   const next = (state && typeof state === 'object') ? state : createDefaultHyperwebPublicSnapshotsState();
   const cutoff = nowTs() - HYPERWEB_SNAPSHOT_RETENTION_MS;
-  next.snapshots = (Array.isArray(next.snapshots) ? next.snapshots : []).filter((item) => {
-    const ts = Number((item && item.published_at) || 0);
-    return ts > 0 && ts >= cutoff;
-  });
+  next.snapshots = (Array.isArray(next.snapshots) ? next.snapshots : [])
+    .map((item) => normalizeHyperwebSnapshotRecord(item))
+    .filter((item) => {
+      const ts = Number((item && item.published_at) || 0);
+      return ts > 0 && ts >= cutoff;
+    });
   next.publish_log = (Array.isArray(next.publish_log) ? next.publish_log : []).filter((item) => {
     const ts = Number((item && item.ts) || 0);
     return ts > 0 && ts >= cutoff;
@@ -7840,11 +7891,19 @@ function syncPublicFeedWithSnapshots() {
       return {
         ...payload,
         snapshot_id: String((item && item.snapshot_id) || ''),
+        reference_uid: String((item && item.reference_uid) || (payload && payload.reference_uid) || ''),
+        lineage_id: String((item && item.lineage_id) || (payload && payload.lineage_id) || ''),
+        parent_snapshot_id: String((item && item.parent_snapshot_id) || ''),
+        root_snapshot_id: String((item && item.root_snapshot_id) || ''),
         status: String((item && item.status) || 'visible'),
         author_fingerprint: String((item && item.author_fingerprint) || ''),
         author_alias: String((item && item.author_alias) || ''),
         published_at: Number((item && item.published_at) || 0),
         updated_at: Number((item && item.updated_at) || 0),
+        manifest_summary: (item && item.manifest_summary && typeof item.manifest_summary === 'object')
+          ? item.manifest_summary
+          : ((payload && payload.manifest_summary && typeof payload.manifest_summary === 'object') ? payload.manifest_summary : null),
+        content_hash: String((item && item.content_hash) || (payload && payload.content_hash) || ''),
       };
     });
   writePublicFeed(publicRefs);
@@ -8514,6 +8573,7 @@ function sanitizePublicReference(ref) {
   const author = getLocalHyperwebAuthor();
   const tabs = Array.isArray(ref && ref.tabs) ? ref.tabs : [];
   const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
+  const protocol = buildReferenceProtocolFields(ref);
   const cachedSummary = getPublicReferenceSummaryCache(ref);
   const summaryText = cachedSummary
     ? cachedSummary.summary
@@ -8521,8 +8581,16 @@ function sanitizePublicReference(ref) {
   const stateHash = cachedSummary && cachedSummary.state_hash
     ? cachedSummary.state_hash
     : buildPublicReferenceStateHash(ref);
+  const manifest = buildReferenceReplicationManifest(ref);
+  const manifestSummary = buildReplicationManifestSummary(manifest);
   return {
     id: String((ref && ref.id) || ''),
+    reference_uid: String(protocol.reference_uid || ''),
+    lineage_id: String(protocol.lineage_id || ''),
+    parent_reference_uid: String(protocol.parent_reference_uid || ''),
+    origin_snapshot_id: String(protocol.origin_snapshot_id || ''),
+    last_synced_snapshot_id: String(protocol.last_synced_snapshot_id || ''),
+    fork_kind: String(protocol.fork_kind || 'root'),
     title: String((ref && ref.title) || 'Untitled'),
     intent: String((ref && ref.intent) || ''),
     tags: Array.isArray(ref && ref.tags) ? ref.tags.slice(0, 30) : [],
@@ -8553,6 +8621,21 @@ function sanitizePublicReference(ref) {
     skills: Array.isArray(ref && ref.skills)
       ? ref.skills.map((item) => sanitizeSkillDescriptor(item)).filter(Boolean)
       : [],
+    manifest_version: PUBLIC_REFERENCE_MANIFEST_VERSION,
+    payload_mode: 'inline',
+    manifest,
+    manifest_summary: manifestSummary,
+    content_hash: buildPublicSnapshotContentHash({
+      reference_uid: protocol.reference_uid,
+      lineage_id: protocol.lineage_id,
+      parent_reference_uid: protocol.parent_reference_uid,
+      origin_snapshot_id: protocol.origin_snapshot_id,
+      last_synced_snapshot_id: protocol.last_synced_snapshot_id,
+      tabs,
+      artifacts,
+      context_files: Array.isArray(ref && ref.context_files) ? ref.context_files : [],
+      program: String((ref && ref.program) || ''),
+    }, manifest),
     summary_text: summaryText,
     public_summary_state_hash: stateHash,
     source_type: 'local_public',
@@ -8603,10 +8686,18 @@ function getPublicReferencesForHyperweb() {
       const payload = (snapshot && snapshot.reference_payload && typeof snapshot.reference_payload === 'object')
         ? snapshot.reference_payload
         : {};
+      const manifestSummary = (snapshot && snapshot.manifest_summary && typeof snapshot.manifest_summary === 'object')
+        ? snapshot.manifest_summary
+        : ((payload && payload.manifest_summary && typeof payload.manifest_summary === 'object') ? payload.manifest_summary : buildReplicationManifestSummary(payload.manifest));
+      const assetReady = !!(manifestSummary && manifestSummary.asset_ready !== false);
       return {
         ...payload,
         id: String((payload && payload.id) || (snapshot && snapshot.reference_id) || ''),
         reference_id: String((snapshot && snapshot.reference_id) || ''),
+        reference_uid: String((snapshot && snapshot.reference_uid) || (payload && payload.reference_uid) || ''),
+        lineage_id: String((snapshot && snapshot.lineage_id) || (payload && payload.lineage_id) || ''),
+        parent_snapshot_id: String((snapshot && snapshot.parent_snapshot_id) || ''),
+        root_snapshot_id: String((snapshot && snapshot.root_snapshot_id) || ''),
         snapshot_id: String((snapshot && snapshot.snapshot_id) || ''),
         status: String((snapshot && snapshot.status) || 'visible'),
         source_type: 'public_snapshot',
@@ -8616,6 +8707,11 @@ function getPublicReferencesForHyperweb() {
         peer_name: String((snapshot && snapshot.author_alias) || ''),
         published_at: Number((snapshot && snapshot.published_at) || 0),
         updated_at: Number((snapshot && snapshot.updated_at) || 0),
+        manifest_summary: manifestSummary,
+        content_hash: String((snapshot && snapshot.content_hash) || (payload && payload.content_hash) || ''),
+        content_ready: true,
+        asset_ready: assetReady,
+        replication_state: determineReplicationState({ contentReady: true, assetReady }),
         hyperweb_payload_version: Number((payload && payload.hyperweb_payload_version) || 1),
       };
     });
@@ -10202,6 +10298,202 @@ function buildPublicReferenceStateHash(reference) {
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
+function sha256Text(value = '') {
+  return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+function extractArtifactAssetUris(content = '', artifactType = 'markdown') {
+  const text = String(content || '');
+  const kind = String(artifactType || 'markdown').trim().toLowerCase();
+  const out = [];
+  if (!text) return out;
+  if (kind === 'html') {
+    const htmlAttrRe = /\b(?:src|href)=["']([^"'#]+)["']/gi;
+    let match = htmlAttrRe.exec(text);
+    while (match) {
+      const uri = String(match[1] || '').trim();
+      if (uri && !/^javascript:/i.test(uri) && !/^mailto:/i.test(uri)) out.push(uri);
+      match = htmlAttrRe.exec(text);
+    }
+  } else {
+    const markdownImageRe = /!\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+    let match = markdownImageRe.exec(text);
+    while (match) {
+      const uri = String(match[1] || '').trim();
+      if (uri) out.push(uri);
+      match = markdownImageRe.exec(text);
+    }
+  }
+  return out;
+}
+
+function classifyReplicationAsset(uri = '', source = 'artifact') {
+  const rawUri = String(uri || '').trim();
+  if (!rawUri) return null;
+  let transport = 'unknown';
+  let portable = false;
+  let required = true;
+  if (/^data:/i.test(rawUri)) {
+    transport = 'inline_data';
+    portable = true;
+    required = false;
+  } else if (/^https?:\/\//i.test(rawUri)) {
+    transport = 'remote_url';
+    portable = true;
+    required = false;
+  } else if (/^sandbox:\/\//i.test(rawUri)) {
+    transport = 'sandbox_output';
+  } else if (/^file:\/\//i.test(rawUri)) {
+    transport = 'file_url';
+  } else if (/^(?:\.{1,2}\/|\/)/.test(rawUri)) {
+    transport = 'path';
+  } else if (/^[a-z][a-z0-9+.-]*:/i.test(rawUri)) {
+    transport = 'custom_scheme';
+  } else {
+    transport = 'relative_path';
+  }
+  return {
+    asset_id: sha256Text(`${source}:${rawUri}`).slice(0, 24),
+    source,
+    uri: rawUri,
+    transport,
+    portable,
+    required,
+    inline_content: false,
+  };
+}
+
+function buildReferenceReplicationManifest(reference = {}) {
+  const ref = reference || {};
+  const tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
+  const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
+  const contextFiles = Array.isArray(ref.context_files) ? ref.context_files : [];
+  const assets = [];
+
+  artifacts.forEach((artifact) => {
+    const artifactId = String((artifact && artifact.id) || '').trim();
+    const artifactType = normalizeArtifactType((artifact && artifact.type) || 'markdown');
+    extractArtifactAssetUris(String((artifact && artifact.content) || ''), artifactType).forEach((uri) => {
+      const item = classifyReplicationAsset(uri, artifactId ? `artifact:${artifactId}` : 'artifact');
+      if (item) assets.push(item);
+    });
+  });
+
+  tabs.forEach((tab) => {
+    const tabId = String((tab && tab.id) || '').trim();
+    const usesSandboxPng = String((tab && tab.viz_source) || '').trim().toLowerCase() === 'python_sandbox'
+      && (
+        String((tab && tab.viz_png_path) || '').trim()
+        || String((tab && tab.viz_png_base64) || '').trim()
+      );
+    if (usesSandboxPng) {
+      const item = classifyReplicationAsset(
+        `sandbox://${String((ref && ref.id) || '').trim()}/output.png`,
+        tabId ? `tab:${tabId}` : 'tab'
+      );
+      if (item) assets.push(item);
+    }
+    if (String((tab && tab.viz_png_base64) || '').trim()) {
+      assets.push({
+        asset_id: sha256Text(`inline:${tabId}:${String((tab && tab.viz_png_base64) || '')}`).slice(0, 24),
+        source: tabId ? `tab:${tabId}` : 'tab',
+        uri: 'inline:vpng',
+        transport: 'inline_data',
+        portable: true,
+        required: false,
+        inline_content: true,
+      });
+    }
+  });
+
+  const dedupedAssets = Array.from(new Map(
+    assets
+      .filter(Boolean)
+      .map((item) => [`${String(item.source || '')}:${String(item.uri || '')}`, item])
+  ).values());
+
+  return {
+    manifest_version: PUBLIC_REFERENCE_MANIFEST_VERSION,
+    tabs: tabs.slice(0, 50).map((tab) => ({
+      tab_id: String((tab && tab.id) || ''),
+      tab_kind: String((tab && tab.tab_kind) || 'web'),
+      title: String((tab && tab.title) || ''),
+      url: String((tab && tab.url) || ''),
+    })),
+    artifacts: artifacts.slice(0, 60).map((artifact) => {
+      const content = String((artifact && artifact.content) || '');
+      const type = normalizeArtifactType((artifact && artifact.type) || 'markdown');
+      return {
+        artifact_id: String((artifact && artifact.id) || ''),
+        type,
+        title: String((artifact && artifact.title) || ''),
+        size_bytes: Buffer.byteLength(content, 'utf8'),
+        content_hash: sha256Text(content),
+        inline_content: true,
+        asset_count: extractArtifactAssetUris(content, type).length,
+      };
+    }),
+    assets: dedupedAssets,
+    context_resources: contextFiles.slice(0, 80).map((file) => ({
+      resource_id: String((file && file.id) || ''),
+      name: String((file && file.original_name) || (file && file.relative_path) || ''),
+      mime_type: String((file && file.mime_type) || 'text/plain'),
+      size_bytes: Number((file && file.size_bytes) || 0),
+      content_hash: String((file && file.content_hash) || ''),
+      inline_content: false,
+    })),
+    totals: {
+      tab_count: tabs.length,
+      artifact_count: artifacts.length,
+      asset_count: dedupedAssets.length,
+      context_resource_count: contextFiles.length,
+      byte_count: artifacts.reduce((sum, artifact) => sum + Buffer.byteLength(String((artifact && artifact.content) || ''), 'utf8'), 0),
+    },
+  };
+}
+
+function buildReplicationManifestSummary(manifest = null) {
+  const safeManifest = (manifest && typeof manifest === 'object') ? manifest : {};
+  const assets = Array.isArray(safeManifest.assets) ? safeManifest.assets : [];
+  const requiredAssets = assets.filter((item) => item && item.required !== false);
+  const missingRequiredAssets = requiredAssets.filter((item) => !item.portable).length;
+  return {
+    manifest_version: Number(safeManifest.manifest_version || PUBLIC_REFERENCE_MANIFEST_VERSION),
+    tab_count: Array.isArray(safeManifest.tabs) ? safeManifest.tabs.length : 0,
+    artifact_count: Array.isArray(safeManifest.artifacts) ? safeManifest.artifacts.length : 0,
+    asset_count: assets.length,
+    required_asset_count: requiredAssets.length,
+    portable_asset_count: assets.filter((item) => item && item.portable).length,
+    missing_required_assets: missingRequiredAssets,
+    content_ready: true,
+    asset_ready: missingRequiredAssets === 0,
+  };
+}
+
+function buildPublicSnapshotContentHash(referencePayload = {}, manifest = null) {
+  const payload = (referencePayload && typeof referencePayload === 'object') ? referencePayload : {};
+  const manifestData = (manifest && typeof manifest === 'object') ? manifest : {};
+  return sha256Text(JSON.stringify({
+    reference_uid: String(payload.reference_uid || ''),
+    lineage_id: String(payload.lineage_id || ''),
+    parent_reference_uid: String(payload.parent_reference_uid || ''),
+    origin_snapshot_id: String(payload.origin_snapshot_id || ''),
+    last_synced_snapshot_id: String(payload.last_synced_snapshot_id || ''),
+    manifest: manifestData,
+    tabs: Array.isArray(payload.tabs) ? payload.tabs : [],
+    artifacts: Array.isArray(payload.artifacts) ? payload.artifacts : [],
+    context_resources: Array.isArray(payload.context_files) ? payload.context_files : [],
+    program: String(payload.program || ''),
+  }));
+}
+
+function determineReplicationState({ metadataOnly = false, contentReady = false, assetReady = false, phase = 'metadata', failed = false } = {}) {
+  if (failed) return 'failed';
+  if (!contentReady) return metadataOnly ? (phase === 'discovered' ? 'discovered' : 'metadata_loaded') : 'fetching_content';
+  if (!assetReady) return 'fetching_assets';
+  return 'ready';
+}
+
 function getPublicReferenceSummaryCache(reference) {
   const cache = reference && reference.public_summary_cache && typeof reference.public_summary_cache === 'object'
     ? reference.public_summary_cache
@@ -10407,6 +10699,10 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         ? snapshot.reference_payload
         : {};
       const snapshotId = String((snapshot && snapshot.snapshot_id) || '').trim();
+      const manifestSummary = (snapshot && snapshot.manifest_summary && typeof snapshot.manifest_summary === 'object')
+        ? snapshot.manifest_summary
+        : ((payload && payload.manifest_summary && typeof payload.manifest_summary === 'object') ? payload.manifest_summary : buildReplicationManifestSummary(payload.manifest));
+      const assetReady = !!(manifestSummary && manifestSummary.asset_ready !== false);
       const blob = buildPublicReferenceSearchBlob(payload);
       const hybrid = q ? scoreHybridTextMatch(blob, q) : { score: 0.4, keyword: 0, semantic: 0 };
       const votes = getVoteStatsForTarget(social, snapshotId);
@@ -10415,6 +10711,8 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         reference_key: `snapshot:${snapshotId}`,
         snapshot_id: snapshotId,
         reference_id: String((snapshot && snapshot.reference_id) || ''),
+        reference_uid: String((snapshot && snapshot.reference_uid) || (payload && payload.reference_uid) || ''),
+        lineage_id: String((snapshot && snapshot.lineage_id) || (payload && payload.lineage_id) || ''),
         title: String((payload && payload.title) || (snapshot && snapshot.reference_title) || 'Untitled'),
         intent: String((payload && payload.intent) || ''),
         peer_id: String((snapshot && snapshot.author_fingerprint) || '').toUpperCase(),
@@ -10429,11 +10727,17 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         summary_text: normalizePublicSummaryText(payload.summary_text || snapshot.summary_text || buildPublicReferenceSummary(payload))
           || 'No summary available.',
         content_excerpt: normalizePublicSummaryText(blob, 520),
+        manifest_summary: manifestSummary,
+        content_ready: true,
+        asset_ready: assetReady,
+        replication_state: determineReplicationState({ contentReady: true, assetReady }),
         search_blob: blob,
         import_payload: {
           source_type: 'public_snapshot',
           snapshot_id: snapshotId,
           reference_id: String((snapshot && snapshot.reference_id) || ''),
+          reference_uid: String((snapshot && snapshot.reference_uid) || (payload && payload.reference_uid) || ''),
+          lineage_id: String((snapshot && snapshot.lineage_id) || (payload && payload.lineage_id) || ''),
           peer_id: String((snapshot && snapshot.author_fingerprint) || '').toUpperCase(),
           peer_name: String((snapshot && snapshot.author_alias) || 'peer'),
           reference_payload: payload,
@@ -10455,6 +10759,11 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         const payload = item.reference_payload && typeof item.reference_payload === 'object'
           ? item.reference_payload
           : item;
+        const manifestSummary = (item && item.manifest_summary && typeof item.manifest_summary === 'object')
+          ? item.manifest_summary
+          : ((payload && payload.manifest_summary && typeof payload.manifest_summary === 'object') ? payload.manifest_summary : null);
+        const contentReady = !!(item && item.reference_payload && typeof item.reference_payload === 'object');
+        const assetReady = contentReady ? !!(manifestSummary && manifestSummary.asset_ready !== false) : false;
         const blob = buildPublicReferenceSearchBlob(payload);
         const logicalPeerId = String((routing && routing.logical_peer_id) || item.peer_id || '').trim().toUpperCase();
         const transportPeerId = String((routing && routing.transport_peer_id) || item.transport_peer_id || item.peer_id || '').trim().toUpperCase();
@@ -10465,6 +10774,8 @@ async function runHyperwebReferenceSearch(query, options = {}) {
           reference_key: `remote:${transportPeerId}:${String(item.reference_id || '')}:${String(item.suggestion_id || '')}`,
           snapshot_id: String(item.snapshot_id || ''),
           reference_id: String(item.reference_id || ''),
+          reference_uid: String(item.reference_uid || payload.reference_uid || ''),
+          lineage_id: String(item.lineage_id || payload.lineage_id || ''),
           title: String(item.title || 'Untitled'),
           intent: String(item.intent || ''),
           peer_id: logicalPeerId,
@@ -10484,6 +10795,15 @@ async function runHyperwebReferenceSearch(query, options = {}) {
           summary_text: normalizePublicSummaryText(item.summary_text || payload.summary_text || buildPublicReferenceSummary(payload))
             || 'No summary available.',
           content_excerpt: normalizePublicSummaryText(blob, 520),
+          manifest_summary: manifestSummary,
+          content_ready: contentReady,
+          asset_ready: assetReady,
+          replication_state: determineReplicationState({
+            metadataOnly: !contentReady,
+            contentReady,
+            assetReady,
+            phase: 'metadata',
+          }),
           search_blob: blob,
           import_payload: {
             ...item,
@@ -10510,6 +10830,9 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         const intent = String((item && item.intent) || '');
         const tags = Array.isArray(item && item.tags) ? item.tags : [];
         const updatedAt = Number((item && item.updated_at) || 0);
+        const manifestSummary = (item && item.manifest_summary && typeof item.manifest_summary === 'object')
+          ? item.manifest_summary
+          : null;
         const blob = buildPublicReferenceSearchBlob({
           title,
           intent,
@@ -10517,8 +10840,10 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         });
         return {
           reference_key: `remote-index:${transportPeerId}:${referenceId}`,
-          snapshot_id: '',
+          snapshot_id: String((item && item.snapshot_id) || ''),
           reference_id: referenceId,
+          reference_uid: String((item && item.reference_uid) || ''),
+          lineage_id: String((item && item.lineage_id) || ''),
           title,
           intent,
           peer_id: logicalPeerId,
@@ -10532,12 +10857,24 @@ async function runHyperwebReferenceSearch(query, options = {}) {
           score_breakdown: { score: 0.3, keyword: 0, semantic: 0 },
           summary_text: 'Remote public reference. Import to fetch the full payload.',
           content_excerpt: normalizePublicSummaryText(blob, 520),
+          manifest_summary: manifestSummary,
+          content_ready: false,
+          asset_ready: false,
+          replication_state: determineReplicationState({
+            metadataOnly: true,
+            contentReady: false,
+            assetReady: false,
+            phase: 'discovered',
+          }),
           search_blob: blob,
           import_payload: {
             peer_id: transportPeerId,
             transport_peer_id: transportPeerId,
             peer_name: displayPeerName || logicalPeerId || 'peer',
             reference_id: referenceId,
+            reference_uid: String((item && item.reference_uid) || ''),
+            lineage_id: String((item && item.lineage_id) || ''),
+            snapshot_id: String((item && item.snapshot_id) || ''),
             title,
             intent,
             tags,
@@ -11733,11 +12070,17 @@ function publishSnapshotFromReference(srId) {
   }
 
   const payload = sanitizePublicReference(ref);
+  const manifest = (payload.manifest && typeof payload.manifest === 'object') ? payload.manifest : buildReferenceReplicationManifest(ref);
+  const contentHash = String(payload.content_hash || buildPublicSnapshotContentHash(payload, manifest));
   const snapshotId = makeId('hwsnap');
   const visible = true;
   const snapshot = {
     snapshot_id: snapshotId,
-    reference_id: String(ref.id || ''),
+    reference_id: String(payload.reference_uid || ref.reference_uid || ref.id || ''),
+    reference_uid: String(payload.reference_uid || ''),
+    lineage_id: String(payload.lineage_id || ''),
+    parent_snapshot_id: String((ref && (ref.last_synced_snapshot_id || ref.origin_snapshot_id)) || ''),
+    root_snapshot_id: String((ref && ref.origin_snapshot_id) || snapshotId),
     reference_title: String(ref.title || ''),
     author_fingerprint: authorFp,
     author_alias: String(author.peer_name || ''),
@@ -11745,6 +12088,11 @@ function publishSnapshotFromReference(srId) {
     updated_at: now,
     status: visible ? 'visible' : 'pending',
     trust_tier: visible ? 'local_identity' : 'pending',
+    manifest_version: PUBLIC_REFERENCE_MANIFEST_VERSION,
+    manifest,
+    manifest_summary: buildReplicationManifestSummary(manifest),
+    payload_mode: 'inline',
+    content_hash: contentHash,
     reference_payload: payload,
     summary_text: String(payload.summary_text || ''),
   };
@@ -11760,8 +12108,23 @@ function publishSnapshotFromReference(srId) {
   });
   pruneHyperwebPublicSnapshotsState(snapshotsState);
   writeHyperwebPublicSnapshotsState(snapshotsState);
+  refs[idx].last_synced_snapshot_id = snapshotId;
+  refs[idx].public_manifest = manifest;
+  refs[idx].manifest_summary = snapshot.manifest_summary;
+  refs[idx].content_ready = true;
+  refs[idx].asset_ready = !!(snapshot.manifest_summary && snapshot.manifest_summary.asset_ready !== false);
+  refs[idx].replication_state = determineReplicationState({
+    contentReady: true,
+    assetReady: refs[idx].asset_ready,
+  });
+  setReferences(refs);
   syncPublicFeedWithSnapshots();
-  hyperwebManager.refreshLocalPublicIndex().catch(() => {});
+  hyperwebManager.refreshLocalPublicIndex().then(() => {
+    const status = hyperwebManager.getStatus();
+    if (status && status.connected) {
+      hyperwebManager.announcePublicIndex().catch(() => {});
+    }
+  }).catch(() => {});
 
   return {
     ok: true,
@@ -11798,7 +12161,12 @@ function deletePublishedSnapshot(snapshotId) {
   snapshotsState.snapshots = snapshots;
   writeHyperwebPublicSnapshotsState(snapshotsState);
   syncPublicFeedWithSnapshots();
-  hyperwebManager.refreshLocalPublicIndex().catch(() => {});
+  hyperwebManager.refreshLocalPublicIndex().then(() => {
+    const status = hyperwebManager.getStatus();
+    if (status && status.connected) {
+      hyperwebManager.announcePublicIndex().catch(() => {});
+    }
+  }).catch(() => {});
 
   return {
     ok: true,
@@ -11808,24 +12176,163 @@ function deletePublishedSnapshot(snapshotId) {
   };
 }
 
+function findBestLineageAnchorReference(refs = [], lineageId = '', options = {}) {
+  const targetLineageId = String(lineageId || '').trim();
+  if (!targetLineageId) return null;
+  const excludeIds = new Set(
+    (Array.isArray(options && options.exclude_ids) ? options.exclude_ids : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+  );
+  const excludeReferenceUid = String((options && options.exclude_reference_uid) || '').trim();
+  return (Array.isArray(refs) ? refs : [])
+    .filter((ref) => {
+      if (!ref || ref.is_public_candidate) return false;
+      if (excludeIds.has(String((ref && ref.id) || '').trim())) return false;
+      if (String((ref && ref.lineage_id) || '').trim() !== targetLineageId) return false;
+      if (excludeReferenceUid && String((ref && ref.reference_uid) || '').trim() === excludeReferenceUid) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const aScore = Math.max(Number((a && a.last_used_at) || 0), Number((a && a.updated_at) || 0), Number((a && a.created_at) || 0));
+      const bScore = Math.max(Number((b && b.last_used_at) || 0), Number((b && b.updated_at) || 0), Number((b && b.created_at) || 0));
+      return bScore - aScore;
+    })[0] || null;
+}
+
+function attachReferenceToLocalTree(child, parent = null) {
+  const ref = (child && typeof child === 'object') ? child : null;
+  if (!ref) return;
+  const anchor = (parent && typeof parent === 'object') ? parent : null;
+  if (!anchor) {
+    ref.parent_id = null;
+    ref.relation_type = 'root';
+    ref.lineage = [];
+    return;
+  }
+  ref.parent_id = String(anchor.id || '').trim() || null;
+  ref.relation_type = 'fork';
+  ref.lineage = [anchor.id].concat(Array.isArray(anchor.lineage) ? anchor.lineage : []).slice(0, 100);
+  anchor.children = Array.isArray(anchor.children) ? anchor.children : [];
+  if (!anchor.children.includes(ref.id)) anchor.children.push(ref.id);
+  anchor.updated_at = nowTs();
+}
+
 function importPublicReferenceAsPrivateCopy(item = {}) {
   const refs = getReferences();
   const sourcePayload = (item && item.reference_payload && typeof item.reference_payload === 'object')
     ? item.reference_payload
     : item;
+  const snapshotId = String((item && item.snapshot_id) || (sourcePayload && sourcePayload.snapshot_id) || '').trim();
+  const sourceReferenceUid = String((sourcePayload && sourcePayload.reference_uid) || '').trim();
+  const sourceLineageId = String((sourcePayload && sourcePayload.lineage_id) || sourceReferenceUid || '').trim();
   const candidate = createCandidateReferenceFromPublic({
     ...item,
     source_type: 'public_snapshot',
     reference_payload: sourcePayload,
   }, '');
+  const existingExact = refs.find((ref) => (
+    !ref
+      ? false
+      : String(ref.origin_snapshot_id || '').trim() === snapshotId
+        || String(ref.last_synced_snapshot_id || '').trim() === snapshotId
+        || String((((ref.source_metadata || {}).imported_from_snapshot_id) || '')).trim() === snapshotId
+  ));
+  if (existingExact) {
+    return {
+      ok: true,
+      action: 'deduped_snapshot',
+      deduped: true,
+      imported: existingExact,
+      references: refs,
+    };
+  }
+
+  const existingSameReference = refs.find((ref) => {
+    if (!ref || ref.is_public_candidate) return false;
+    const meta = (ref.source_metadata && typeof ref.source_metadata === 'object') ? ref.source_metadata : {};
+    return String(meta.imported_from_reference_uid || '').trim() === sourceReferenceUid
+      && String(ref.lineage_id || '').trim() === sourceLineageId;
+  });
+  if (existingSameReference) {
+    const meta = (existingSameReference.source_metadata && typeof existingSameReference.source_metadata === 'object')
+      ? existingSameReference.source_metadata
+      : {};
+    existingSameReference.title = existingSameReference.title_user_edited
+      ? existingSameReference.title
+      : String(candidate.title || 'Imported Reference').replace(/^\[Public\]\s*/i, '').slice(0, 120);
+    existingSameReference.intent = String(candidate.intent || '');
+    existingSameReference.tags = Array.isArray(candidate.tags) ? [...candidate.tags] : [];
+    existingSameReference.tabs = Array.isArray(candidate.tabs) ? cloneValue(candidate.tabs) : [];
+    existingSameReference.active_tab_id = candidate.active_tab_id || (existingSameReference.tabs[0] ? existingSameReference.tabs[0].id : null);
+    existingSameReference.artifacts = Array.isArray(candidate.artifacts) ? cloneValue(candidate.artifacts) : [];
+    existingSameReference.reference_graph = candidate.reference_graph && typeof candidate.reference_graph === 'object'
+      ? cloneValue(candidate.reference_graph)
+      : { nodes: [], edges: [] };
+    existingSameReference.program = String(candidate.program || '');
+    existingSameReference.skills = Array.isArray(candidate.skills) ? cloneValue(candidate.skills) : [];
+    existingSameReference.context_files = Array.isArray(candidate.context_files) ? cloneValue(candidate.context_files) : [];
+    existingSameReference.source_type = 'hyperweb_import';
+    existingSameReference.source_peer_id = String((item && item.peer_id) || (sourcePayload && sourcePayload.source_peer_id) || '').toUpperCase();
+    existingSameReference.source_peer_name = String((item && item.peer_name) || (sourcePayload && sourcePayload.source_peer_name) || '');
+    existingSameReference.parent_reference_uid = String(sourceReferenceUid || existingSameReference.parent_reference_uid || '').trim() || null;
+    existingSameReference.origin_snapshot_id = String(existingSameReference.origin_snapshot_id || snapshotId || '').trim();
+    existingSameReference.last_synced_snapshot_id = snapshotId || existingSameReference.last_synced_snapshot_id || '';
+    existingSameReference.fork_kind = normalizeReferenceForkKind(existingSameReference.fork_kind, 'imported_copy');
+    existingSameReference.public_manifest = candidate.public_manifest && typeof candidate.public_manifest === 'object'
+      ? cloneValue(candidate.public_manifest)
+      : null;
+    existingSameReference.manifest_summary = candidate.manifest_summary && typeof candidate.manifest_summary === 'object'
+      ? cloneValue(candidate.manifest_summary)
+      : null;
+    existingSameReference.content_ready = candidate.content_ready !== false;
+    existingSameReference.asset_ready = candidate.asset_ready !== false;
+    existingSameReference.replication_state = determineReplicationState({
+      contentReady: existingSameReference.content_ready,
+      assetReady: existingSameReference.asset_ready,
+    });
+    existingSameReference.source_metadata = {
+      ...meta,
+      imported_at: nowTs(),
+      imported_from_snapshot_id: snapshotId,
+      imported_from_reference_uid: sourceReferenceUid,
+      imported_from_lineage_id: sourceLineageId,
+    };
+    existingSameReference.updated_at = nowTs();
+    setReferences(refs);
+    return {
+      ok: true,
+      action: 'updated_existing_local_copy',
+      imported: existingSameReference,
+      references: refs,
+    };
+  }
+
+  const existingSameLineage = findBestLineageAnchorReference(refs, sourceLineageId, {
+    exclude_reference_uid: sourceReferenceUid,
+  });
   const imported = {
     ...createForkReference(candidate, {
       title: String(candidate.title || 'Imported Reference').replace(/^\[Public\]\s*/i, '').slice(0, 120),
+      parent_reference_uid: sourceReferenceUid || candidate.reference_uid || null,
+      fork_kind: existingSameLineage ? 'imported_fork' : 'imported_copy',
       source_metadata: {
         ...(candidate.source_metadata || {}),
         imported_at: nowTs(),
-        imported_from_snapshot_id: String((item && item.snapshot_id) || ''),
+        imported_from_snapshot_id: snapshotId,
+        imported_from_reference_uid: sourceReferenceUid,
+        imported_from_lineage_id: sourceLineageId,
       },
+      public_manifest: (candidate.public_manifest && typeof candidate.public_manifest === 'object') ? cloneValue(candidate.public_manifest) : null,
+      manifest_summary: (candidate.manifest_summary && typeof candidate.manifest_summary === 'object') ? cloneValue(candidate.manifest_summary) : null,
+      content_ready: candidate.content_ready !== false,
+      asset_ready: candidate.asset_ready !== false,
+      replication_state: determineReplicationState({
+        contentReady: candidate.content_ready !== false,
+        assetReady: candidate.asset_ready !== false,
+      }),
+      origin_snapshot_id: snapshotId,
+      last_synced_snapshot_id: snapshotId,
     }),
     visibility: 'private',
     is_public_candidate: false,
@@ -11835,15 +12342,15 @@ function importPublicReferenceAsPrivateCopy(item = {}) {
     source_candidate_key: '',
     is_temp_candidate: false,
     temp_imported_at: 0,
-    parent_id: null,
-    relation_type: 'root',
-    lineage: [],
     updated_at: nowTs(),
   };
+  imported.fork_kind = normalizeReferenceForkKind(imported.fork_kind, existingSameLineage ? 'imported_fork' : 'imported_copy');
+  attachReferenceToLocalTree(imported, existingSameLineage || null);
   refs.unshift(imported);
   setReferences(refs);
   return {
     ok: true,
+    action: existingSameLineage ? 'created_lineage_fork' : 'created_imported_copy',
     imported,
     references: refs,
   };
@@ -11942,7 +12449,7 @@ function createPrivateShare(srId, recipientIds = []) {
     artifacts: Array.isArray(referencePayloadBase.artifacts)
       ? referencePayloadBase.artifacts.slice(0, 12).map((artifact) => ({
         ...artifact,
-        content: String((artifact && artifact.content) || '').slice(0, 4000),
+        content: String((artifact && artifact.content) || ''),
       }))
       : [],
   };
@@ -13182,6 +13689,141 @@ function createArtifact(seed = {}) {
   };
 }
 
+function makeReferenceUid() {
+  return makeId('refuid');
+}
+
+function normalizeReferenceForkKind(value, fallback = 'root') {
+  const raw = String(value || fallback || 'root').trim().toLowerCase();
+  return ['root', 'local_fork', 'imported_copy', 'imported_fork'].includes(raw) ? raw : fallback;
+}
+
+function buildReferenceProtocolFields(seed = {}, parent = null) {
+  const source = (seed && typeof seed === 'object') ? seed : {};
+  const parentRef = (parent && typeof parent === 'object') ? parent : null;
+  const fallbackReferenceUid = makeReferenceUid();
+  const referenceUid = String(source.reference_uid || fallbackReferenceUid).trim() || fallbackReferenceUid;
+  const inheritedLineageId = String(
+    source.lineage_id
+    || (parentRef && (parentRef.lineage_id || parentRef.reference_uid || parentRef.id))
+    || referenceUid
+  ).trim() || referenceUid;
+  const inheritedParentReferenceUid = String(
+    source.parent_reference_uid
+    || (parentRef && (parentRef.reference_uid || parentRef.id))
+    || ''
+  ).trim();
+  const fallbackForkKind = parentRef ? 'local_fork' : 'root';
+  const originSnapshotId = String(source.origin_snapshot_id || '').trim();
+  const lastSyncedSnapshotId = String(source.last_synced_snapshot_id || originSnapshotId || '').trim();
+  return {
+    reference_uid: referenceUid,
+    lineage_id: inheritedLineageId,
+    parent_reference_uid: inheritedParentReferenceUid || null,
+    origin_snapshot_id: originSnapshotId || '',
+    last_synced_snapshot_id: lastSyncedSnapshotId || '',
+    fork_kind: normalizeReferenceForkKind(source.fork_kind, fallbackForkKind),
+  };
+}
+
+function findLegacyReferenceRootId(ref, idMap = new Map()) {
+  const seen = new Set();
+  let cursor = ref;
+  let fallback = String((ref && ref.id) || '').trim();
+  while (cursor && typeof cursor === 'object') {
+    const cursorId = String((cursor && cursor.id) || '').trim();
+    if (cursorId) fallback = cursorId;
+    const parentId = String((cursor && cursor.parent_id) || '').trim();
+    if (!parentId || !idMap.has(parentId) || seen.has(parentId)) return fallback;
+    seen.add(parentId);
+    cursor = idMap.get(parentId);
+  }
+  return fallback;
+}
+
+function migrateReferenceProtocolFields(ref, idMap = new Map()) {
+  if (!ref || typeof ref !== 'object') return false;
+  let changed = false;
+  const sourceMeta = (ref.source_metadata && typeof ref.source_metadata === 'object') ? ref.source_metadata : {};
+  const referenceId = String((ref && ref.id) || '').trim();
+  const rootId = findLegacyReferenceRootId(ref, idMap) || referenceId;
+  const parentId = String((ref && ref.parent_id) || '').trim();
+  const parentRef = parentId && idMap.has(parentId) ? idMap.get(parentId) : null;
+  const importedLineageId = String(sourceMeta.imported_from_lineage_id || '').trim();
+  const importedReferenceUid = String(sourceMeta.imported_from_reference_uid || '').trim();
+  const importedSnapshotId = String(sourceMeta.imported_from_snapshot_id || sourceMeta.source_snapshot_id || '').trim();
+
+  const nextReferenceUid = String(ref.reference_uid || referenceId || makeReferenceUid()).trim() || makeReferenceUid();
+  if (String(ref.reference_uid || '') !== nextReferenceUid) {
+    ref.reference_uid = nextReferenceUid;
+    changed = true;
+  }
+
+  const nextLineageId = String(
+    ref.lineage_id
+    || importedLineageId
+    || (parentRef && (parentRef.lineage_id || parentRef.reference_uid || parentRef.id))
+    || rootId
+    || nextReferenceUid
+  ).trim() || nextReferenceUid;
+  if (String(ref.lineage_id || '') !== nextLineageId) {
+    ref.lineage_id = nextLineageId;
+    changed = true;
+  }
+
+  const nextParentReferenceUid = String(
+    ref.parent_reference_uid
+    || importedReferenceUid
+    || (parentRef && (parentRef.reference_uid || parentRef.id))
+    || ''
+  ).trim();
+  if (String(ref.parent_reference_uid || '') !== nextParentReferenceUid) {
+    ref.parent_reference_uid = nextParentReferenceUid || null;
+    changed = true;
+  }
+
+  if (String(ref.origin_snapshot_id || '') !== importedSnapshotId) {
+    ref.origin_snapshot_id = importedSnapshotId || '';
+    changed = true;
+  }
+  const nextLastSyncedSnapshotId = String(ref.last_synced_snapshot_id || importedSnapshotId || '').trim();
+  if (String(ref.last_synced_snapshot_id || '') !== nextLastSyncedSnapshotId) {
+    ref.last_synced_snapshot_id = nextLastSyncedSnapshotId || '';
+    changed = true;
+  }
+
+  const inferredForkKind = importedSnapshotId
+    ? 'imported_copy'
+    : (parentRef || String((ref && ref.relation_type) || '').trim().toLowerCase() === 'fork' ? 'local_fork' : 'root');
+  const nextForkKind = normalizeReferenceForkKind(ref.fork_kind, inferredForkKind);
+  if (String(ref.fork_kind || '') !== nextForkKind) {
+    ref.fork_kind = nextForkKind;
+    changed = true;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(ref, 'public_manifest')) {
+    ref.public_manifest = null;
+    changed = true;
+  }
+  if (!Object.prototype.hasOwnProperty.call(ref, 'manifest_summary')) {
+    ref.manifest_summary = null;
+    changed = true;
+  }
+  if (typeof ref.content_ready !== 'boolean') {
+    ref.content_ready = true;
+    changed = true;
+  }
+  if (typeof ref.asset_ready !== 'boolean') {
+    ref.asset_ready = true;
+    changed = true;
+  }
+  if (!String(ref.replication_state || '').trim()) {
+    ref.replication_state = 'ready';
+    changed = true;
+  }
+  return changed;
+}
+
 function normalizeReferenceAgentMeta(input = {}) {
   const src = (input && typeof input === 'object') ? input : {};
   const createdBy = String(src.created_by || '').trim();
@@ -13204,8 +13846,10 @@ function normalizeReferenceAgentMeta(input = {}) {
 function createReferenceBase(seed = {}) {
   const tab = createWebTab(seed.current_tab || {});
   const meta = normalizeReferenceAgentMeta(seed.agent_meta);
+  const protocol = buildReferenceProtocolFields(seed);
   const ref = {
     id: makeId('sr'),
+    ...protocol,
     title: String(seed.title || deriveReferenceTitleFromTab(tab) || 'Untitled Reference').slice(0, 120),
     title_user_edited: !!seed.title_user_edited,
     intent: String(seed.intent || ''),
@@ -13248,6 +13892,11 @@ function createReferenceBase(seed = {}) {
     memory: memoryDefaultState(),
     pinned_root: false,
     agent_meta: meta,
+    public_manifest: (seed.public_manifest && typeof seed.public_manifest === 'object') ? seed.public_manifest : null,
+    manifest_summary: (seed.manifest_summary && typeof seed.manifest_summary === 'object') ? seed.manifest_summary : null,
+    content_ready: typeof seed.content_ready === 'boolean' ? seed.content_ready : true,
+    asset_ready: typeof seed.asset_ready === 'boolean' ? seed.asset_ready : true,
+    replication_state: String(seed.replication_state || 'ready').trim() || 'ready',
     created_at: nowTs(),
     updated_at: nowTs(),
     last_used_at: nowTs(),
@@ -13264,12 +13913,14 @@ function createForkReference(parent, seed = {}) {
     : [createArtifact({})];
 
   const meta = normalizeReferenceAgentMeta(seed.agent_meta);
+  const protocol = buildReferenceProtocolFields(seed, parent);
   const inheritsColor = !Object.prototype.hasOwnProperty.call(seed, 'color_tag');
   const resolvedColorTag = inheritsColor
     ? sanitizeReferenceColorTag(parent && parent.color_tag)
     : sanitizeReferenceColorTag(seed.color_tag);
   return {
     id: makeId('sr'),
+    ...protocol,
     title: String(seed.title || `${parent.title || 'Reference'} Fork`).slice(0, 120),
     title_user_edited: !!seed.title_user_edited,
     intent: String(seed.intent || parent.intent || ''),
@@ -13312,6 +13963,19 @@ function createForkReference(parent, seed = {}) {
     memory: memoryDefaultState(),
     pinned_root: false,
     agent_meta: meta,
+    public_manifest: (seed.public_manifest && typeof seed.public_manifest === 'object')
+      ? seed.public_manifest
+      : ((parent && parent.public_manifest && typeof parent.public_manifest === 'object') ? cloneValue(parent.public_manifest) : null),
+    manifest_summary: (seed.manifest_summary && typeof seed.manifest_summary === 'object')
+      ? seed.manifest_summary
+      : ((parent && parent.manifest_summary && typeof parent.manifest_summary === 'object') ? cloneValue(parent.manifest_summary) : null),
+    content_ready: typeof seed.content_ready === 'boolean'
+      ? seed.content_ready
+      : (typeof parent.content_ready === 'boolean' ? parent.content_ready : true),
+    asset_ready: typeof seed.asset_ready === 'boolean'
+      ? seed.asset_ready
+      : (typeof parent.asset_ready === 'boolean' ? parent.asset_ready : true),
+    replication_state: String(seed.replication_state || parent.replication_state || 'ready').trim() || 'ready',
     created_at: nowTs(),
     updated_at: nowTs(),
     last_used_at: nowTs(),
@@ -13840,8 +14504,16 @@ function ensureReferences() {
 function getReferences() {
   const refs = ensureReferences();
   let changed = false;
+  const idMap = new Map();
+  refs.forEach((ref) => {
+    const id = String((ref && ref.id) || '').trim();
+    if (id) idMap.set(id, ref);
+  });
   refs.forEach((ref) => {
     if (migrateLegacyVizTabsInReference(ref)) {
+      changed = true;
+    }
+    if (migrateReferenceProtocolFields(ref, idMap)) {
       changed = true;
     }
     const prevMemoryRaw = JSON.stringify((ref && ref.memory && typeof ref.memory === 'object') ? ref.memory : {});
@@ -13966,9 +14638,15 @@ function getReferences() {
 function setReferences(refs, options = {}) {
   const list = Array.isArray(refs) ? refs : [];
   const skipMemoryCapture = !!(options && options.skipMemoryCapture);
+  const idMap = new Map();
+  list.forEach((ref) => {
+    const id = String((ref && ref.id) || '').trim();
+    if (id) idMap.set(id, ref);
+  });
   list.forEach((ref) => {
     if (!ref || typeof ref !== 'object') return;
     migrateLegacyVizTabsInReference(ref);
+    migrateReferenceProtocolFields(ref, idMap);
     ensureReferenceMemory(ref);
     ref.color_tag = sanitizeReferenceColorTag(ref.color_tag);
     ref.youtube_transcripts = sanitizeYouTubeTranscriptMap(ref.youtube_transcripts);
@@ -13983,6 +14661,14 @@ function setReferences(refs, options = {}) {
     if (ref.abstraction_cache && typeof ref.abstraction_cache === 'object') {
       ref.abstraction_cache = normalizeAbstractionCache(ref.abstraction_cache, String(ref.id || '').trim());
     }
+    ref.public_manifest = (ref.public_manifest && typeof ref.public_manifest === 'object') ? ref.public_manifest : null;
+    ref.manifest_summary = (ref.manifest_summary && typeof ref.manifest_summary === 'object') ? ref.manifest_summary : null;
+    ref.content_ready = ref.content_ready !== false;
+    ref.asset_ready = ref.asset_ready !== false;
+    ref.replication_state = String(ref.replication_state || determineReplicationState({
+      contentReady: ref.content_ready !== false,
+      assetReady: ref.asset_ready !== false,
+    })).trim() || 'ready';
     pruneYouTubeTranscriptContextFiles(ref);
     if (!skipMemoryCapture) {
       capturePeriodicMemoryCheckpoints(ref);
@@ -17748,12 +18434,21 @@ function createCandidateReferenceFromPublic(item, query = '') {
   const tabs = Array.isArray(sourcePayload && sourcePayload.tabs) ? sourcePayload.tabs : [];
   const artifacts = Array.isArray(sourcePayload && sourcePayload.artifacts) ? sourcePayload.artifacts : [];
   const sourceId = String((sourcePayload && sourcePayload.id) || (item && item.reference_id) || makeId('pubsrc'));
+  const sourceSnapshotId = String((item && item.snapshot_id) || (sourcePayload && sourcePayload.snapshot_id) || '').trim();
+  const sourceReferenceUid = String((sourcePayload && sourcePayload.reference_uid) || sourceId || '').trim();
+  const sourceLineageId = String((sourcePayload && sourcePayload.lineage_id) || sourceReferenceUid || '').trim();
+  const sourceManifest = (sourcePayload && sourcePayload.manifest && typeof sourcePayload.manifest === 'object')
+    ? sourcePayload.manifest
+    : buildReferenceReplicationManifest(sourcePayload);
+  const manifestSummary = (sourcePayload && sourcePayload.manifest_summary && typeof sourcePayload.manifest_summary === 'object')
+    ? sourcePayload.manifest_summary
+    : buildReplicationManifestSummary(sourceManifest);
   const sourceNode = String(
     (item && (item.peer_name || item.source_node_name || item.source_node_url || item.source || 'hyperweb-peer'))
     || 'hyperweb-peer'
   );
   const sourcePeerId = String((item && item.peer_id) || (sourcePayload && sourcePayload.source_peer_id) || '').trim();
-  const sourceKey = `${sourceNode}::${sourceId}`;
+  const sourceKey = sourceSnapshotId ? `${sourceNode}::${sourceSnapshotId}` : `${sourceNode}::${sourceId}`;
 
   const candidate = createReferenceBase({
     title: `[Public] ${String((sourcePayload && sourcePayload.title) || 'Untitled')}`.slice(0, 120),
@@ -17769,10 +18464,27 @@ function createCandidateReferenceFromPublic(item, query = '') {
     is_temp_candidate: true,
     temp_imported_at: nowTs(),
     hyperweb_payload_version: Number((item && item.hyperweb_payload_version) || (sourcePayload && sourcePayload.hyperweb_payload_version) || 1),
+    reference_uid: sourceReferenceUid || makeReferenceUid(),
+    lineage_id: sourceLineageId || sourceReferenceUid || makeLineageId(),
+    parent_reference_uid: String((sourcePayload && sourcePayload.parent_reference_uid) || '').trim() || null,
+    origin_snapshot_id: sourceSnapshotId,
+    last_synced_snapshot_id: sourceSnapshotId,
+    fork_kind: 'imported_copy',
+    public_manifest: sourceManifest,
+    manifest_summary: manifestSummary,
+    content_ready: true,
+    asset_ready: manifestSummary.asset_ready !== false,
+    replication_state: determineReplicationState({
+      contentReady: true,
+      assetReady: manifestSummary.asset_ready !== false,
+    }),
     source_metadata: {
       source_id: sourceId,
       source_node: sourceNode,
       query,
+      imported_from_snapshot_id: sourceSnapshotId,
+      imported_from_reference_uid: sourceReferenceUid,
+      imported_from_lineage_id: sourceLineageId,
     },
   });
 
@@ -17844,6 +18556,14 @@ function createCandidateReferenceFromPublic(item, query = '') {
       updated_at: nowTs(),
     }))
     : [];
+  candidate.public_manifest = sourceManifest;
+  candidate.manifest_summary = manifestSummary;
+  candidate.content_ready = true;
+  candidate.asset_ready = manifestSummary.asset_ready !== false;
+  candidate.replication_state = determineReplicationState({
+    contentReady: true,
+    assetReady: manifestSummary.asset_ready !== false,
+  });
   candidate.updated_at = nowTs();
 
   return candidate;
@@ -17907,8 +18627,35 @@ function materializeWorkspaceReferenceFromPrivateShare(message = {}) {
       hyperweb_payload_version: Number((referencePayload && referencePayload.hyperweb_payload_version) || 1),
       reference_payload: referencePayload,
     }, '');
+    const sourceReferenceUid = String((candidate && candidate.reference_uid) || '').trim();
+    const sourceLineageId = String((candidate && candidate.lineage_id) || sourceReferenceUid || '').trim();
+    const lineageAnchor = findBestLineageAnchorReference(refs, sourceLineageId, {
+      exclude_reference_uid: sourceReferenceUid,
+    });
     imported = {
-      ...candidate,
+      ...createForkReference(candidate, {
+        title: String(candidate.title || message.reference_title || 'Shared reference').replace(/^\[Public\]\s*/i, '').slice(0, 120),
+        parent_reference_uid: sourceReferenceUid || candidate.parent_reference_uid || null,
+        origin_snapshot_id: String(candidate.origin_snapshot_id || '').trim(),
+        last_synced_snapshot_id: String(candidate.last_synced_snapshot_id || '').trim(),
+        fork_kind: lineageAnchor ? 'imported_fork' : String(candidate.fork_kind || 'imported_copy'),
+        source_metadata: {
+          ...(candidate.source_metadata || {}),
+          private_share: true,
+          private_share_id: shareId,
+          private_share_room_id: roomId,
+          owner_id: ownerId,
+          owner_alias: ownerAlias,
+        },
+        public_manifest: (candidate.public_manifest && typeof candidate.public_manifest === 'object') ? cloneValue(candidate.public_manifest) : null,
+        manifest_summary: (candidate.manifest_summary && typeof candidate.manifest_summary === 'object') ? cloneValue(candidate.manifest_summary) : null,
+        content_ready: candidate.content_ready !== false,
+        asset_ready: candidate.asset_ready !== false,
+        replication_state: determineReplicationState({
+          contentReady: candidate.content_ready !== false,
+          assetReady: candidate.asset_ready !== false,
+        }),
+      }),
       title: String(candidate.title || message.reference_title || 'Shared reference').replace(/^\[Public\]\s*/i, '').slice(0, 120),
       visibility: 'private',
       is_public_candidate: false,
@@ -17928,6 +18675,7 @@ function materializeWorkspaceReferenceFromPrivateShare(message = {}) {
       },
       updated_at: nowTs(),
     };
+    attachReferenceToLocalTree(imported, lineageAnchor || null);
   } else {
     imported = createReferenceBase({
       title: String(message.reference_title || 'Shared reference').slice(0, 120) || 'Shared reference',
@@ -18055,16 +18803,28 @@ function commitPublicCandidateReference(payload = {}) {
   const newRef = {
     ...createForkReference(candidate, {
       title: String(candidate.title || 'Imported Reference').replace(/^\[Public\]\s*/i, '').slice(0, 120),
+      parent_reference_uid: String(candidate.parent_reference_uid || (((candidate.source_metadata || {}).imported_from_reference_uid) || '')).trim() || null,
+      origin_snapshot_id: String(candidate.origin_snapshot_id || (((candidate.source_metadata || {}).imported_from_snapshot_id) || '')).trim(),
+      last_synced_snapshot_id: String(candidate.last_synced_snapshot_id || (((candidate.source_metadata || {}).imported_from_snapshot_id) || '')).trim(),
+      fork_kind: String(candidate.fork_kind || 'imported_copy'),
       source_metadata: {
         ...(candidate.source_metadata || {}),
         committed_at: nowTs(),
       },
+      public_manifest: (candidate.public_manifest && typeof candidate.public_manifest === 'object') ? cloneValue(candidate.public_manifest) : null,
+      manifest_summary: (candidate.manifest_summary && typeof candidate.manifest_summary === 'object') ? cloneValue(candidate.manifest_summary) : null,
+      content_ready: candidate.content_ready !== false,
+      asset_ready: candidate.asset_ready !== false,
+      replication_state: determineReplicationState({
+        contentReady: candidate.content_ready !== false,
+        assetReady: candidate.asset_ready !== false,
+      }),
     }),
     visibility: 'private',
     is_public_candidate: false,
-    source_type: 'local',
-    source_peer_id: '',
-    source_peer_name: '',
+    source_type: 'hyperweb_import',
+    source_peer_id: String(candidate.source_peer_id || '').toUpperCase(),
+    source_peer_name: String(candidate.source_peer_name || ''),
     source_candidate_key: '',
     is_temp_candidate: false,
     temp_imported_at: 0,
@@ -18077,16 +18837,26 @@ function commitPublicCandidateReference(payload = {}) {
       return { ok: false, message: 'Target reference for fork was not found.' };
     }
     const target = refs[targetIdx];
-    newRef.parent_id = target.id;
-    newRef.relation_type = 'fork';
-    newRef.lineage = [target.id].concat(Array.isArray(target.lineage) ? target.lineage : []).slice(0, 100);
-    target.children = Array.isArray(target.children) ? target.children : [];
-    target.children.push(newRef.id);
-    target.updated_at = nowTs();
+    attachReferenceToLocalTree(newRef, target);
+    newRef.fork_kind = normalizeReferenceForkKind(newRef.fork_kind, 'imported_fork');
   } else {
-    newRef.parent_id = null;
-    newRef.relation_type = 'root';
-    newRef.lineage = [];
+    const lineageAnchor = findBestLineageAnchorReference(
+      refs,
+      String(newRef.lineage_id || '').trim(),
+      {
+        exclude_ids: [candidateId],
+        exclude_reference_uid: String(
+          ((candidate.source_metadata || {}).imported_from_reference_uid)
+          || candidate.parent_reference_uid
+          || candidate.reference_uid
+          || ''
+        ).trim(),
+      }
+    );
+    attachReferenceToLocalTree(newRef, lineageAnchor || null);
+    if (lineageAnchor) {
+      newRef.fork_kind = normalizeReferenceForkKind(newRef.fork_kind, 'imported_fork');
+    }
   }
 
   refs.unshift(newRef);
@@ -21161,18 +21931,173 @@ ipcMain.handle('browser:ragReindex', async (_event, payload) => {
   };
 });
 
+function referenceHasMeaningfulLocalState(ref) {
+  if (!ref || typeof ref !== 'object') return false;
+  if (Array.isArray(ref.children) && ref.children.length > 0) return true;
+  if (Array.isArray(ref.context_files) && ref.context_files.length > 0) return true;
+  if (Array.isArray(ref.folder_mounts) && ref.folder_mounts.length > 0) return true;
+  if (Array.isArray(ref.mail_threads) && ref.mail_threads.length > 0) return true;
+  if (Array.isArray(ref.highlights) && ref.highlights.length > 0) return true;
+  if (ref.chat_thread && Array.isArray(ref.chat_thread.messages) && ref.chat_thread.messages.length > 0) return true;
+  if (Array.isArray(ref.artifacts)) {
+    const substantiveArtifacts = ref.artifacts.filter((artifact) => {
+      const content = String((artifact && artifact.content) || '').trim();
+      if (!content) return false;
+      if (content === '# Notes\n\nStart collecting findings here.') return false;
+      return content.length > 40;
+    });
+    if (substantiveArtifacts.length > 0) return true;
+  }
+  if (Array.isArray(ref.tabs) && ref.tabs.length > 1) return true;
+  return false;
+}
+
+function buildOrphanReferenceScan() {
+  const refs = getReferences();
+  const snapshotsState = pruneHyperwebPublicSnapshotsState(readHyperwebPublicSnapshotsState());
+  const privateSharesState = readHyperwebPrivateSharesState();
+  const now = nowTs();
+  const publishedReferenceUids = new Set(
+    (Array.isArray(snapshotsState.snapshots) ? snapshotsState.snapshots : [])
+      .flatMap((snapshot) => {
+        const payload = (snapshot && snapshot.reference_payload && typeof snapshot.reference_payload === 'object')
+          ? snapshot.reference_payload
+          : {};
+        return [
+          String((snapshot && snapshot.reference_uid) || '').trim(),
+          String((snapshot && snapshot.reference_id) || '').trim(),
+          String((payload && payload.reference_uid) || '').trim(),
+        ].filter(Boolean);
+      })
+  );
+  const privateShareKeys = new Set(
+    (Array.isArray(privateSharesState.shares) ? privateSharesState.shares : []).flatMap((share) => {
+      const shareId = String((share && share.share_id) || '').trim();
+      const roomId = String((share && share.room_id) || '').trim();
+      return [shareId ? `share:${shareId}` : '', roomId ? `room:${roomId}` : ''].filter(Boolean);
+    })
+  );
+  const duplicateGroups = new Map();
+  refs.forEach((ref) => {
+    const meta = (ref && ref.source_metadata && typeof ref.source_metadata === 'object') ? ref.source_metadata : {};
+    const snapshotId = String(ref.origin_snapshot_id || meta.imported_from_snapshot_id || '').trim();
+    const lineageId = String(ref.lineage_id || meta.imported_from_lineage_id || '').trim();
+    const importedReferenceUid = String(meta.imported_from_reference_uid || '').trim();
+    if (!snapshotId || !lineageId || !importedReferenceUid) return;
+    const key = `${snapshotId}::${lineageId}::${importedReferenceUid}`;
+    if (!duplicateGroups.has(key)) duplicateGroups.set(key, []);
+    duplicateGroups.get(key).push(ref);
+  });
+
+  const orphanItems = [];
+  refs.forEach((ref) => {
+    if (!ref || typeof ref !== 'object') return;
+    const meta = (ref.source_metadata && typeof ref.source_metadata === 'object') ? ref.source_metadata : {};
+    const lastTouchedAt = Math.max(
+      Number(ref.last_used_at || 0),
+      Number(ref.updated_at || 0),
+      Number(ref.created_at || 0)
+    );
+    const recent = lastTouchedAt > 0 && (now - lastTouchedAt) < ORPHAN_CANDIDATE_AGE_MS;
+    const meaningful = referenceHasMeaningfulLocalState(ref);
+    const published = publishedReferenceUids.has(String(ref.reference_uid || '').trim()) || publishedReferenceUids.has(String(ref.id || '').trim());
+    const privateShareId = String(meta.private_share_id || '').trim();
+    const privateRoomId = String(meta.private_share_room_id || '').trim();
+    const linkedPrivateShare = !!(
+      (privateShareId && privateShareKeys.has(`share:${privateShareId}`))
+      || (privateRoomId && privateShareKeys.has(`room:${privateRoomId}`))
+    );
+
+    if (ref.is_public_candidate) {
+      if (!recent && !meaningful) {
+        orphanItems.push({
+          sr_id: String(ref.id || ''),
+          title: String(ref.title || 'Untitled'),
+          reason: 'stale_public_candidate',
+          updated_at: Number(ref.updated_at || 0),
+        });
+      }
+      return;
+    }
+
+    if (meta.private_share && !linkedPrivateShare && !meaningful && (now - lastTouchedAt) >= ORPHAN_BROKEN_SHARE_AGE_MS) {
+      orphanItems.push({
+        sr_id: String(ref.id || ''),
+        title: String(ref.title || 'Untitled'),
+        reason: 'broken_private_share_placeholder',
+        updated_at: Number(ref.updated_at || 0),
+      });
+      return;
+    }
+
+    const snapshotId = String(ref.origin_snapshot_id || meta.imported_from_snapshot_id || '').trim();
+    const lineageId = String(ref.lineage_id || meta.imported_from_lineage_id || '').trim();
+    const importedReferenceUid = String(meta.imported_from_reference_uid || '').trim();
+    if (!snapshotId || !lineageId || !importedReferenceUid || meaningful || published || recent) return;
+    const duplicateKey = `${snapshotId}::${lineageId}::${importedReferenceUid}`;
+    const group = duplicateGroups.get(duplicateKey) || [];
+    if (group.length < 2) return;
+    const newest = [...group].sort((a, b) => Number((b && b.updated_at) || 0) - Number((a && a.updated_at) || 0))[0];
+    if (newest && String((newest && newest.id) || '') === String(ref.id || '')) return;
+    if ((now - lastTouchedAt) < ORPHAN_DUPLICATE_AGE_MS) return;
+    orphanItems.push({
+      sr_id: String(ref.id || ''),
+      title: String(ref.title || 'Untitled'),
+      reason: 'duplicate_imported_snapshot',
+      updated_at: Number(ref.updated_at || 0),
+    });
+  });
+
+  orphanItems.sort((a, b) => Number((a && a.updated_at) || 0) - Number((b && b.updated_at) || 0));
+  return {
+    ok: true,
+    total_references: refs.length,
+    orphan_count: orphanItems.length,
+    orphaned_reference_ids: orphanItems.map((item) => String(item.sr_id || '')).filter(Boolean),
+    items: orphanItems,
+  };
+}
+
+function deleteOrphanedReferences() {
+  const scan = buildOrphanReferenceScan();
+  if (!scan.ok) return scan;
+  const targetIds = new Set(Array.isArray(scan.orphaned_reference_ids) ? scan.orphaned_reference_ids : []);
+  if (targetIds.size === 0) {
+    return { ok: true, deleted_count: 0, deleted_ids: [], scan };
+  }
+  const refs = getReferences();
+  const filtered = refs.filter((ref) => !targetIds.has(String((ref && ref.id) || '').trim()));
+  setReferences(filtered);
+  return {
+    ok: true,
+    deleted_count: refs.length - filtered.length,
+    deleted_ids: Array.from(targetIds),
+    scan,
+  };
+}
+
 ipcMain.handle('browser:settingsDiagnostics', async () => {
   const settings = readSettings();
   const hyperweb = buildHyperwebStatusPayload(hyperwebManager.getStatus());
   const identity = getHyperwebIdentityDiagnostics();
   const python = await getPythonRuntimeResolver().diagnostics({ bypassCache: true });
+  const referenceStore = buildOrphanReferenceScan();
   return {
     ok: true,
     settings,
     hyperweb,
     hyperweb_identity: identity,
     python,
+    reference_store: referenceStore,
   };
+});
+
+ipcMain.handle('browser:settingsReferenceOrphanScan', async () => {
+  return buildOrphanReferenceScan();
+});
+
+ipcMain.handle('browser:settingsReferenceOrphanDelete', async () => {
+  return deleteOrphanedReferences();
 });
 
 ipcMain.handle('browser:settingsDangerResetHyperwebIdentity', async (_event, payload) => {

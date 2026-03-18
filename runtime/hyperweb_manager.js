@@ -439,12 +439,21 @@ class HyperwebManager extends EventEmitter {
       this.localFullById.set(id, normalized);
       this.localIndexMeta.push({
         id,
+        reference_uid: normalizeText(item && item.reference_uid),
+        lineage_id: normalizeText(item && item.lineage_id),
+        snapshot_id: normalizeText(item && item.snapshot_id),
         title: normalized.title,
         intent: normalized.intent,
         tags: normalized.tags,
         updated_at: Number(normalized.updated_at || nowTs()),
         tab_count: tabs.length,
         artifact_count: artifacts.length,
+        manifest_summary: (item && item.manifest_summary && typeof item.manifest_summary === 'object')
+          ? item.manifest_summary
+          : null,
+        content_ready: item && item.content_ready !== false,
+        asset_ready: item && item.asset_ready !== false,
+        replication_state: normalizeText(item && item.replication_state) || 'ready',
       });
     });
 
@@ -501,6 +510,9 @@ class HyperwebManager extends EventEmitter {
       peer_id: normalizeText(options.peer_id || this.peerId),
       peer_name: normalizeText(options.peer_name || (this.identity && this.identity.display_name) || this.peerId),
       reference_id: normalizeText(ref && ref.id),
+      reference_uid: normalizeText(ref && ref.reference_uid),
+      lineage_id: normalizeText(ref && ref.lineage_id),
+      snapshot_id: normalizeText(ref && ref.snapshot_id),
       score: Number(options.score || 0),
       title: String((ref && ref.title) || 'Untitled'),
       intent: String((ref && ref.intent) || ''),
@@ -508,6 +520,14 @@ class HyperwebManager extends EventEmitter {
       updated_at: Number((ref && ref.updated_at) || nowTs()),
       tab_count: Array.isArray(ref && ref.tabs) ? ref.tabs.length : 0,
       artifact_count: Array.isArray(ref && ref.artifacts) ? ref.artifacts.length : 0,
+      manifest_summary: (ref && ref.manifest_summary && typeof ref.manifest_summary === 'object')
+        ? ref.manifest_summary
+        : null,
+      content_ready: !!full,
+      asset_ready: !!(ref && ref.asset_ready !== false),
+      replication_state: full
+        ? ((ref && ref.asset_ready !== false) ? 'ready' : 'fetching_assets')
+        : 'metadata_loaded',
       source_type: 'hyperweb_candidate',
       hyperweb_payload_version: 1,
     };

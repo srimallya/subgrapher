@@ -219,6 +219,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ragStatus: (payload = {}) => ipcRenderer.invoke('browser:ragStatus', payload || {}),
     ragReindex: (payload = {}) => ipcRenderer.invoke('browser:ragReindex', payload || {}),
     settingsDiagnostics: () => ipcRenderer.invoke('browser:settingsDiagnostics'),
+    settingsReferenceOrphanScan: () => ipcRenderer.invoke('browser:settingsReferenceOrphanScan'),
+    settingsReferenceOrphanDelete: () => ipcRenderer.invoke('browser:settingsReferenceOrphanDelete'),
     appDataProtectionStatus: () => ipcRenderer.invoke('browser:appDataProtectionStatus'),
     appDataProtectionLock: () => ipcRenderer.invoke('browser:appDataProtectionLock'),
     appDataProtectionUnlock: (payload = {}) => ipcRenderer.invoke('browser:appDataProtectionUnlock', payload || {}),

@@ -629,6 +629,50 @@ function referenceResultKey(item) {
   return `${peer}:${refId}:${String((item && item.title) || '').trim()}`;
 }
 
+function normalizeHyperwebReplicationState(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'discovered') return 'discovered';
+  if (normalized === 'metadata_loaded') return 'metadata_loaded';
+  if (normalized === 'fetching_content') return 'fetching_content';
+  if (normalized === 'fetching_assets') return 'fetching_assets';
+  if (normalized === 'failed') return 'failed';
+  return 'ready';
+}
+
+function getHyperwebReplicationStateLabel(value = '') {
+  const stateValue = normalizeHyperwebReplicationState(value);
+  if (stateValue === 'discovered') return 'Discovered';
+  if (stateValue === 'metadata_loaded') return 'Metadata Loaded';
+  if (stateValue === 'fetching_content') return 'Fetching Content';
+  if (stateValue === 'fetching_assets') return 'Fetching Assets';
+  if (stateValue === 'failed') return 'Failed';
+  return 'Ready';
+}
+
+function patchHyperwebReferenceResult(key, patch = {}) {
+  const targetKey = String(key || '').trim();
+  if (!targetKey || !Array.isArray(state.hyperwebReferenceResults)) return null;
+  let nextRow = null;
+  state.hyperwebReferenceResults = state.hyperwebReferenceResults.map((row) => {
+    if (referenceResultKey(row) !== targetKey) return row;
+    const nextImportPayload = row && row.import_payload && typeof row.import_payload === 'object'
+      ? {
+        ...row.import_payload,
+        ...(Object.prototype.hasOwnProperty.call(patch, 'reference_uid') ? { reference_uid: patch.reference_uid } : {}),
+        ...(Object.prototype.hasOwnProperty.call(patch, 'lineage_id') ? { lineage_id: patch.lineage_id } : {}),
+        ...(Object.prototype.hasOwnProperty.call(patch, 'snapshot_id') ? { snapshot_id: patch.snapshot_id } : {}),
+      }
+      : row.import_payload;
+    nextRow = {
+      ...row,
+      ...patch,
+      import_payload: nextImportPayload,
+    };
+    return nextRow;
+  });
+  return nextRow;
+}
+
 function makeActiveSurface(kind, patch = {}) {
   return {
     kind: String(kind || 'web'),
@@ -4176,6 +4220,36 @@ function renderHtmlRuntimePlaceholder(message) {
   host.innerHTML = `<div class="artifact-html-placeholder">${escapeHtml(String(message || '').trim() || 'Preview unavailable. Click Refresh to rerender.')}</div>`;
 }
 
+function getHtmlArtifactReplicationBlockState(artifact, ref = getActiveReference()) {
+  const safeArtifact = (artifact && typeof artifact === 'object') ? artifact : {};
+  if (normalizeArtifactType((safeArtifact && safeArtifact.type) || 'markdown') !== 'html') {
+    return { blocked: false, message: '' };
+  }
+  const safeRef = (ref && typeof ref === 'object') ? ref : null;
+  if (!safeRef) return { blocked: false, message: '' };
+  const sourceMeta = (safeRef.source_metadata && typeof safeRef.source_metadata === 'object')
+    ? safeRef.source_metadata
+    : {};
+  const isReplicatedPublic = !!(
+    safeRef.origin_snapshot_id
+    || sourceMeta.imported_from_snapshot_id
+    || sourceMeta.imported_from_reference_uid
+  );
+  if (!isReplicatedPublic) return { blocked: false, message: '' };
+  if (safeRef.content_ready === false || String((safeRef.replication_state || '')).trim().toLowerCase() === 'fetching_content') {
+    return { blocked: true, message: 'Public HTML preview is waiting on reference content.' };
+  }
+  const missingRequiredAssets = Number(
+    (safeRef.manifest_summary && safeRef.manifest_summary.missing_required_assets)
+    || (safeRef.public_manifest && safeRef.public_manifest.missing_required_assets)
+    || 0
+  );
+  if (safeRef.asset_ready === false || missingRequiredAssets > 0 || String((safeRef.replication_state || '')).trim().toLowerCase() === 'fetching_assets') {
+    return { blocked: true, message: 'Public HTML preview is waiting on required assets.' };
+  }
+  return { blocked: false, message: '' };
+}
+
 function resetHtmlArtifactCodeViews(ref = getActiveReference()) {
   const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
   artifacts.forEach((artifact) => {
@@ -4262,6 +4336,7 @@ function updateArtifactRuntimeControls(artifact) {
   const artifactId = String((safeArtifact && safeArtifact.id) || '').trim();
   const artifactType = normalizeArtifactType((safeArtifact && safeArtifact.type) || 'markdown');
   const isHtml = artifactType === 'html';
+  const replicationBlock = getHtmlArtifactReplicationBlockState(safeArtifact);
   const mode = getArtifactViewMode(artifactId, artifactType);
   const runtime = (state.htmlArtifactRuntime && typeof state.htmlArtifactRuntime === 'object')
     ? state.htmlArtifactRuntime
@@ -4293,6 +4368,8 @@ function updateArtifactRuntimeControls(artifact) {
   if (runtimeStatus) {
     if (!isHtml) {
       runtimeStatus.textContent = 'Markdown artifact';
+    } else if (replicationBlock.blocked) {
+      runtimeStatus.textContent = replicationBlock.message;
     } else if (!runtimeForArtifact) {
       runtimeStatus.textContent = 'HTML preview loading';
     } else {
@@ -4345,6 +4422,13 @@ function ensureHtmlArtifactRuntime(artifact, htmlContent, options = {}) {
   const safeArtifact = (artifact && typeof artifact === 'object') ? artifact : {};
   const artifactId = String((safeArtifact && safeArtifact.id) || '').trim();
   if (!artifactId || normalizeArtifactType(safeArtifact.type) !== 'html') return false;
+  const replicationBlock = getHtmlArtifactReplicationBlockState(safeArtifact);
+  if (replicationBlock.blocked) {
+    stopHtmlArtifactRuntime({ preserveArtifactId: true });
+    renderHtmlRuntimePlaceholder(replicationBlock.message);
+    updateArtifactRuntimeControls(safeArtifact);
+    return false;
+  }
   const source = String(htmlContent || safeArtifact.content || '');
   const runtime = (state.htmlArtifactRuntime && typeof state.htmlArtifactRuntime === 'object')
     ? state.htmlArtifactRuntime
@@ -8592,6 +8676,8 @@ function renderHyperwebReferenceResults(list) {
     const updatedAt = formatAgo(item && (item.published_at || item.updated_at));
     const snapshotIdRaw = String((item && item.snapshot_id) || '').trim();
     const targetId = escapeHtml(snapshotIdRaw || String((item && item.reference_id) || ''));
+    const replicationState = normalizeHyperwebReplicationState((item && item.replication_state) || '');
+    const replicationLabel = getHyperwebReplicationStateLabel(replicationState);
     const removed = status === 'hidden';
     const identityFingerprint = String((state.hyperwebIdentity && state.hyperwebIdentity.fingerprint) || '').trim().toUpperCase();
     const isLocalSnapshot = String((item && item.reference_key) || '').startsWith('snapshot:');
@@ -8609,6 +8695,7 @@ function renderHyperwebReferenceResults(list) {
             · votes ${Number(votes.net || 0)}
             ${updatedAt ? ` · ${escapeHtml(updatedAt)}` : ''}
             <span class="hyperweb-status-badge ${escapeHtml(status)}">${escapeHtml(statusLabel)}</span>
+            <span class="hyperweb-status-badge ${escapeHtml(replicationState)}">${escapeHtml(replicationLabel)}</span>
           </div>
           ${intent ? `<div class="hyperweb-ref-intent-line muted small">${intent}</div>` : ''}
           <div class="hyperweb-ref-summary">${removed ? 'Removed by community threshold' : summary}</div>
@@ -8649,8 +8736,12 @@ function renderHyperwebReferenceResults(list) {
       const key = String(button.getAttribute('data-hw-ref-import') || '').trim();
       const item = state.hyperwebReferenceResults.find((row) => referenceResultKey(row) === key);
       if (!item) return;
+      patchHyperwebReferenceResult(key, { replication_state: 'fetching_content' });
+      renderHyperwebReferenceResults(state.hyperwebReferenceResults);
       const res = await api.hyperwebImportReference(item.import_payload || item);
       if (!res || !res.ok) {
+        patchHyperwebReferenceResult(key, { replication_state: 'failed' });
+        renderHyperwebReferenceResults(state.hyperwebReferenceResults);
         setStatusText('hyperweb-ref-status', (res && res.message) ? res.message : 'Unable to import reference.');
         return;
       }
@@ -8659,7 +8750,27 @@ function renderHyperwebReferenceResults(list) {
       renderWorkspaceTabs();
       renderContextFiles();
       renderDiffPanel();
-      setStatusText('hyperweb-ref-status', `Imported "${(res.imported && res.imported.title) || 'reference'}".`);
+      const importedTitle = (res.imported && res.imported.title) || 'reference';
+      const importedAssetReady = res.imported ? res.imported.asset_ready !== false : true;
+      const importedContentReady = res.imported ? res.imported.content_ready !== false : true;
+      patchHyperwebReferenceResult(key, {
+        reference_uid: (res.imported && res.imported.reference_uid) || (item && item.reference_uid) || '',
+        lineage_id: (res.imported && res.imported.lineage_id) || (item && item.lineage_id) || '',
+        snapshot_id: (res.imported && (res.imported.last_synced_snapshot_id || res.imported.origin_snapshot_id)) || String((item && item.snapshot_id) || '').trim(),
+        content_ready: importedContentReady,
+        asset_ready: importedAssetReady,
+        replication_state: importedContentReady ? (importedAssetReady ? 'ready' : 'fetching_assets') : 'fetching_content',
+      });
+      renderHyperwebReferenceResults(state.hyperwebReferenceResults);
+      let statusMessage = `Imported "${importedTitle}".`;
+      if (String((res && res.action) || '').trim() === 'deduped_snapshot') {
+        statusMessage = `Already had "${importedTitle}" from this snapshot.`;
+      } else if (String((res && res.action) || '').trim() === 'updated_existing_local_copy') {
+        statusMessage = `Updated local copy of "${importedTitle}" from the newer public snapshot.`;
+      } else if (String((res && res.action) || '').trim() === 'created_lineage_fork') {
+        statusMessage = `Imported "${importedTitle}" as a lineage fork.`;
+      }
+      setStatusText('hyperweb-ref-status', statusMessage);
       const importedId = String((res && res.imported && res.imported.id) || '').trim();
       if (importedId) {
         await setAppView('workspace');
@@ -9541,9 +9652,30 @@ function renderSettingsDiagnostics() {
   const hyper = e('settings-diagnostics-hyperweb');
   const identity = e('settings-diagnostics-identity');
   const python = e('settings-diagnostics-python');
+  const referenceStore = e('settings-diagnostics-reference-store');
+  const orphanDeleteBtn = e('settings-reference-orphan-delete-btn');
   const pythonDownloadBtn = e('settings-python-download-btn');
   if (hyper) hyper.textContent = JSON.stringify((diag && diag.hyperweb) || {}, null, 2);
   if (identity) identity.textContent = JSON.stringify((diag && diag.hyperweb_identity) || {}, null, 2);
+  if (referenceStore) {
+    const store = (diag && diag.reference_store && typeof diag.reference_store === 'object')
+      ? diag.reference_store
+      : {};
+    const lines = [];
+    lines.push(`total references: ${Number(store.total_references || 0)}`);
+    lines.push(`orphaned references: ${Number(store.orphan_count || 0)}`);
+    if (Array.isArray(store.items) && store.items.length > 0) {
+      store.items.slice(0, 12).forEach((item) => {
+        lines.push(`- ${String((item && item.title) || 'Untitled')}: ${String((item && item.reason) || 'unknown')}`);
+      });
+      if (store.items.length > 12) {
+        lines.push(`...and ${store.items.length - 12} more`);
+      }
+    } else {
+      lines.push('no orphaned references detected');
+    }
+    referenceStore.textContent = lines.join('\n');
+  }
   if (python) {
     const tool = (diag && diag.python && diag.python.tool && typeof diag.python.tool === 'object')
       ? diag.python.tool
@@ -9561,6 +9693,9 @@ function renderSettingsDiagnostics() {
   }
   if (pythonDownloadBtn) {
     pythonDownloadBtn.hidden = !(electronApi && electronApi.platform === 'win32');
+  }
+  if (orphanDeleteBtn) {
+    orphanDeleteBtn.disabled = !(diag && diag.reference_store && Number(diag.reference_store.orphan_count || 0) > 0);
   }
   renderSettingsHyperwebControls();
 }
@@ -11673,6 +11808,53 @@ function bindControls() {
       state.settingsDiagnostics = diagnostics;
       renderSettingsDiagnostics();
     }
+  });
+
+  e('settings-reference-orphan-scan-btn')?.addEventListener('click', async () => {
+    if (!api || typeof api.settingsReferenceOrphanScan !== 'function') return;
+    state.settingsSaveState = 'Scanning orphaned references...';
+    renderSettingsStatusLine();
+    const res = await api.settingsReferenceOrphanScan();
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to scan orphaned references.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const diagnostics = await api.settingsDiagnostics();
+    if (diagnostics && diagnostics.ok) {
+      state.settingsDiagnostics = diagnostics;
+      renderSettingsDiagnostics();
+    }
+    state.settingsSaveState = `Found ${Number(res.orphan_count || 0)} orphaned reference(s).`;
+    renderSettingsStatusLine();
+  });
+
+  e('settings-reference-orphan-delete-btn')?.addEventListener('click', async () => {
+    if (!api || typeof api.settingsReferenceOrphanDelete !== 'function') return;
+    const orphanCount = Number((((state.settingsDiagnostics || {}).reference_store || {}).orphan_count) || 0);
+    if (orphanCount <= 0) {
+      state.settingsSaveState = 'No orphaned references to delete.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const confirmed = window.confirm(`Delete ${orphanCount} orphaned reference(s)?`);
+    if (!confirmed) return;
+    state.settingsSaveState = 'Deleting orphaned references...';
+    renderSettingsStatusLine();
+    const res = await api.settingsReferenceOrphanDelete();
+    if (!res || !res.ok) {
+      state.settingsSaveState = (res && res.message) ? res.message : 'Unable to delete orphaned references.';
+      renderSettingsStatusLine();
+      return;
+    }
+    const diagnostics = await api.settingsDiagnostics();
+    if (diagnostics && diagnostics.ok) {
+      state.settingsDiagnostics = diagnostics;
+      renderSettingsDiagnostics();
+    }
+    state.settingsSaveState = `Deleted ${Number(res.deleted_count || 0)} orphaned reference(s).`;
+    renderSettingsStatusLine();
+    await loadReferenceList({ preserveSelection: true });
   });
 
   e('settings-python-download-btn')?.addEventListener('click', async () => {
