@@ -178,6 +178,7 @@ const state = {
     rssSources: [],
     rssTopics: ['all'],
     rssSelectedTopic: 'all',
+    rssSearchQuery: '',
     rssLastRefreshedAt: 0,
     notifications: [],
     calendarCursor: '',
@@ -198,7 +199,7 @@ const BROWSER_URL_PLACEHOLDER_WEB = 'type anything to search or enter URL...';
 const BROWSER_URL_PLACEHOLDER_ARTIFACT = 'Commands: /add /create /rename/<name> /rm';
 const BROWSER_URL_PLACEHOLDER_FILES = 'Files tab active: enter URL/search to open web tab';
 const BROWSER_URL_PLACEHOLDER_SKILLS = 'Skills tab active: enter URL/search to open web tab';
-const BROWSER_URL_PLACEHOLDER_STATUS = 'Status tab active: enter URL/search to open web tab';
+const BROWSER_URL_PLACEHOLDER_STATUS = 'Search or enter URL to open a web tab';
 const BROWSER_MARKER_MODE_KEY = 'subgrapher_browser_marker_mode_v1';
 const BROWSER_MARKER_HOLD_MS = 650;
 const HYPERWEB_SPLIT_RATIO_KEY = 'subgrapher_hyperweb_split_ratio_v1';
@@ -1994,8 +1995,16 @@ function parseUrlBarCommand(rawInput) {
   return null;
 }
 
+function updateWorkspaceChromeForSurface() {
+  document.body.classList.toggle(
+    'workspace-status-mode',
+    state.appView === 'workspace' && state.activeSurface.kind === 'status',
+  );
+}
+
 async function syncUrlBarForActiveSurface() {
   const input = e('browser-url-input');
+  updateWorkspaceChromeForSurface();
   if (!input) return;
   const ref = getActiveReference();
 
@@ -2930,6 +2939,7 @@ function renderWorkspaceTabs() {
     </div>
     <div class="workspace-tab workspace-tab-pinned ${(state.activeSurface.kind === 'status') ? 'active' : ''}" data-kind="status" data-tab-id="${STATUS_SURFACE_ID}">
       <span class="workspace-tab-label-wrap"><span class="workspace-tab-label" title="Status">Status</span></span>
+      <span class="workspace-tab-close-ghost" aria-hidden="true">×</span>
     </div>
     ${webTabs.map((tab) => `
       <div class="workspace-tab ${(state.activeSurface.kind === 'web' && String(state.activeSurface.tabId || activeWebId) === String(tab.id || '')) ? 'active' : ''}" data-kind="web" data-tab-id="${escapeHtml(tab.id)}">
@@ -4575,6 +4585,16 @@ function formatStatusMonthLabel(date = new Date()) {
   }).format(date);
 }
 
+function getStatusWeekNumber(now = new Date()) {
+  const date = new Date(now);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
+  const firstThursday = new Date(date.getFullYear(), 0, 4);
+  firstThursday.setHours(0, 0, 0, 0);
+  firstThursday.setDate(firstThursday.getDate() + 3 - ((firstThursday.getDay() + 6) % 7));
+  return 1 + Math.round((date.getTime() - firstThursday.getTime()) / (7 * 24 * 60 * 60 * 1000));
+}
+
 function formatStatusClockParts(now = new Date()) {
   const timeText = new Intl.DateTimeFormat('en-US', {
     hour: 'numeric',
@@ -4585,11 +4605,6 @@ function formatStatusClockParts(now = new Date()) {
   return {
     time: match ? String(match[1] || '').trim() : timeText,
     meridiem: match ? String(match[2] || '').toUpperCase() : '',
-    date: new Intl.DateTimeFormat('en-US', {
-      weekday: 'long',
-      month: 'short',
-      day: 'numeric',
-    }).format(now),
   };
 }
 
@@ -4662,6 +4677,15 @@ function accumulateDayNightMs(startMs, endMs) {
 }
 
 function getStatusProgressItems(now = new Date()) {
+  const weekdayLabel = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(now);
+  const monthLabel = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(now);
+  const yearLabel = String(now.getFullYear());
+  const labels = {
+    day: weekdayLabel,
+    week: `week ${getStatusWeekNumber(now)}`,
+    month: monthLabel,
+    year: yearLabel,
+  };
   return ['day', 'week', 'month', 'year'].map((kind) => {
     const bounds = buildPeriodBounds(kind, now);
     const total = Math.max(1, bounds.end - bounds.start);
@@ -4669,12 +4693,23 @@ function getStatusProgressItems(now = new Date()) {
     const split = accumulateDayNightMs(bounds.start, bounds.start + elapsed);
     return {
       key: kind,
-      label: kind,
+      label: labels[kind],
       percent: clampRatio(elapsed / total),
       dayRatio: clampRatio(split.dayMs / total),
       nightRatio: clampRatio(split.nightMs / total),
     };
   });
+}
+
+function getStatusClockIdentityLabel() {
+  const identity = (state.hyperwebIdentity && typeof state.hyperwebIdentity === 'object')
+    ? state.hyperwebIdentity
+    : {};
+  const alias = String(identity.display_alias || '').trim();
+  if (alias) return alias;
+  const fingerprint = String(identity.fingerprint || '').trim().toUpperCase();
+  if (fingerprint) return fingerprint.slice(0, 12);
+  return 'Hyperweb';
 }
 
 function formatStatusPercent(value) {
@@ -4729,14 +4764,18 @@ function renderStatusClockAndBars() {
   const clockNode = e('status-clock');
   const barsNode = e('status-progress-bars');
   if (!clockNode || !barsNode) return;
-  const parts = formatStatusClockParts(new Date());
+  const now = new Date();
+  const parts = formatStatusClockParts(now);
+  const identityLabel = getStatusClockIdentityLabel();
   clockNode.innerHTML = `
-    <div class="status-clock-time">${escapeHtml(parts.time)}</div>
-    <div class="status-clock-meridiem">${escapeHtml(parts.meridiem)}</div>
-    <div class="status-clock-date muted">${escapeHtml(parts.date)}</div>
+    <div class="status-clock-identity">${escapeHtml(identityLabel)}</div>
+    <div class="status-clock-inline">
+      <span class="status-clock-time">${escapeHtml(parts.time)}</span>
+      <span class="status-clock-meridiem">${escapeHtml(parts.meridiem)}</span>
+    </div>
   `;
-  const segmentCount = 24;
-  barsNode.innerHTML = getStatusProgressItems(new Date()).map((item) => {
+  const segmentCount = 48;
+  barsNode.innerHTML = getStatusProgressItems(now).map((item) => {
     const dayCount = Math.round(clampRatio(item.dayRatio) * segmentCount);
     const nightCount = Math.round(clampRatio(item.nightRatio) * segmentCount);
     return `
@@ -4747,10 +4786,10 @@ function renderStatusClockAndBars() {
         </div>
         <div class="status-progress-lanes">
           <div class="status-progress-lane status-progress-lane-day">
-            ${Array.from({ length: segmentCount }, (_unused, index) => `<span class="status-progress-segment${index < dayCount ? ' active' : ''}"></span>`).join('')}
+            ${Array.from({ length: segmentCount }, (_unused, index) => `<span class="status-progress-segment${index >= (segmentCount - dayCount) ? ' active' : ''}"></span>`).join('')}
           </div>
           <div class="status-progress-lane status-progress-lane-night">
-            ${Array.from({ length: segmentCount }, (_unused, index) => `<span class="status-progress-segment${index < nightCount ? ' active' : ''}"></span>`).join('')}
+            ${Array.from({ length: segmentCount }, (_unused, index) => `<span class="status-progress-segment${index >= (segmentCount - nightCount) ? ' active' : ''}"></span>`).join('')}
           </div>
         </div>
       </div>
@@ -4835,29 +4874,54 @@ function renderStatusFeed() {
   const filtersNode = e('status-rss-filters');
   const listNode = e('status-rss-list');
   const metaNode = e('status-rss-meta');
-  if (!filtersNode || !listNode || !metaNode) return;
+  const searchInput = e('status-rss-search-input');
+  if (!filtersNode || !listNode || !metaNode || !searchInput) return;
   const topics = Array.isArray(state.dashboard.rssTopics) && state.dashboard.rssTopics.length
     ? state.dashboard.rssTopics
     : ['all'];
   const selected = String(state.dashboard.rssSelectedTopic || 'all').trim().toLowerCase() || 'all';
+  const topicLabels = {
+    all: 'all',
+    politics: 'politics',
+    world: 'world',
+    econ: 'econ',
+    tech: 'tech',
+    general: 'other',
+  };
   filtersNode.innerHTML = topics.map((topic) => `
-    <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(topic)}</button>
+    <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(topicLabels[topic] || topic)}</button>
   `).join('');
+  const query = String(state.dashboard.rssSearchQuery || '').trim();
+  if (searchInput.value !== query) searchInput.value = query;
   const refreshedAt = Number(state.dashboard.rssLastRefreshedAt || 0);
-  metaNode.textContent = refreshedAt > 0 ? `Updated ${formatAgo(refreshedAt)}` : 'Waiting for feed.';
   const items = Array.isArray(state.dashboard.rssItems) ? state.dashboard.rssItems : [];
-  listNode.innerHTML = items.length
-    ? items.map((item) => `
+  const normalizedQuery = query.toLowerCase();
+  const visibleItems = normalizedQuery
+    ? items.filter((item) => {
+      const haystack = [
+        String((item && item.title) || ''),
+        String((item && item.summary) || ''),
+        String((item && item.source_name) || ''),
+        String((item && item.source_domain) || ''),
+        String((item && item.url) || ''),
+      ].join(' ').toLowerCase();
+      return haystack.includes(normalizedQuery);
+    })
+    : items;
+  metaNode.textContent = refreshedAt > 0
+    ? `Updated ${formatAgo(refreshedAt)} · ${visibleItems.length} item${visibleItems.length === 1 ? '' : 's'}`
+    : `${visibleItems.length} item${visibleItems.length === 1 ? '' : 's'}`;
+  listNode.innerHTML = visibleItems.length
+    ? visibleItems.map((item) => `
       <button type="button" class="status-rss-item" data-status-rss-url="${escapeHtml(String((item && item.url) || '').trim())}" data-status-rss-title="${escapeHtml(String((item && item.title) || '').trim())}">
         <div class="status-rss-item-head">
           <span class="status-rss-source">${escapeHtml(String((item && item.source_name) || (item && item.source_domain) || 'feed'))}</span>
           <span class="status-rss-time muted">${Number((item && item.published_at) || 0) > 0 ? escapeHtml(formatAgo(Number(item.published_at || 0))) : ''}</span>
         </div>
         <div class="status-rss-title">${escapeHtml(String((item && item.title) || 'Untitled'))}</div>
-        <div class="status-rss-summary muted">${escapeHtml(String((item && item.summary) || ''))}</div>
       </button>
     `).join('')
-    : '<div class="status-empty muted">No feed items.</div>';
+    : `<div class="status-empty muted">${normalizedQuery ? 'No matches.' : 'No feed items.'}</div>`;
 }
 
 function renderStatusSurface() {
@@ -4885,6 +4949,14 @@ async function refreshStatusData(options = {}) {
       state.dashboard.rssItems = Array.isArray(stateRes.feed_items) ? stateRes.feed_items : [];
       if (!String(state.dashboard.calendarCursor || '').trim()) ensureDashboardCalendarCursor();
       state.dashboard.loaded = true;
+    }
+    if (api.hyperwebSocialStatus) {
+      try {
+        const social = await api.hyperwebSocialStatus();
+        if (social && social.identity) state.hyperwebIdentity = social.identity;
+      } catch (_) {
+        // noop
+      }
     }
     if (options.notifications !== false && api.dashboardListNotifications) {
       const notificationsRes = await api.dashboardListNotifications(30);
@@ -5106,6 +5178,10 @@ function bindStatusSurfaceEvents() {
     if (!button) return;
     const topic = String(button.getAttribute('data-status-topic') || '').trim();
     if (topic) await setStatusFeedTopic(topic);
+  });
+  e('status-rss-search-input')?.addEventListener('input', (event) => {
+    state.dashboard.rssSearchQuery = String((event && event.target && event.target.value) || '').trimStart();
+    renderStatusFeed();
   });
   e('status-rss-list')?.addEventListener('click', async (event) => {
     const button = event.target && typeof event.target.closest === 'function'
@@ -8320,6 +8396,7 @@ async function setAppView(viewName) {
   if (settings) settings.classList.toggle('hidden', state.appView !== 'settings');
   if (history) history.classList.toggle('hidden', state.appView !== 'history');
   document.body.classList.remove('mobile-left-open', 'mobile-right-open');
+  updateWorkspaceChromeForSurface();
   closeTopbarMenu();
   updateTopbarViewButtons();
   if (state.appView === 'hyperweb') {

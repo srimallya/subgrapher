@@ -6,9 +6,11 @@ const FEED_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 const DEFAULT_TOPIC = 'all';
 
 const STARTER_FEEDS = [
+  { id: 'reuters-politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/Reuters/PoliticsNews', topic: 'politics' },
   { id: 'reuters-world', name: 'Reuters World', url: 'https://feeds.reuters.com/Reuters/worldNews', topic: 'world' },
   { id: 'reuters-business', name: 'Reuters Business', url: 'https://feeds.reuters.com/reuters/businessNews', topic: 'econ' },
   { id: 'reuters-tech', name: 'Reuters Technology', url: 'https://feeds.reuters.com/reuters/technologyNews', topic: 'tech' },
+  { id: 'ap-politics', name: 'AP Politics', url: 'https://apnews.com/politics?output=rss', topic: 'politics' },
   { id: 'ft-world', name: 'Financial Times World', url: 'https://www.ft.com/world?format=rss', topic: 'world' },
   { id: 'ft-companies', name: 'Financial Times Companies', url: 'https://www.ft.com/companies?format=rss', topic: 'econ' },
   { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech' },
@@ -35,7 +37,7 @@ function hashText(value = '') {
 function normalizeTopic(value = '') {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return DEFAULT_TOPIC;
-  const allowed = new Set([DEFAULT_TOPIC, 'general', 'tech', 'econ', 'world']);
+  const allowed = new Set([DEFAULT_TOPIC, 'general', 'tech', 'econ', 'world', 'politics']);
   return allowed.has(raw) ? raw : DEFAULT_TOPIC;
 }
 
@@ -244,7 +246,8 @@ function createDashboardStore(options = {}) {
   }
 
   function getTopics() {
-    return [DEFAULT_TOPIC, ...Array.from(new Set(STARTER_FEEDS.map((feed) => normalizeTopic(feed.topic)).filter((topic) => topic !== DEFAULT_TOPIC)))];
+    const available = new Set(STARTER_FEEDS.map((feed) => normalizeTopic(feed.topic)).filter((topic) => topic !== DEFAULT_TOPIC));
+    return [DEFAULT_TOPIC, 'politics', 'world', 'econ', 'tech', 'general'].filter((topic) => topic === DEFAULT_TOPIC || available.has(topic));
   }
 
   function getState() {

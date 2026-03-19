@@ -909,6 +909,31 @@ summary:focus-visible {
   justify-content: flex-end;
 }
 
+body.workspace-status-mode .nav-bar {
+  justify-content: center;
+}
+
+body.workspace-status-mode .nav-bar-main {
+  flex: 0 1 860px;
+  max-width: 860px;
+}
+
+body.workspace-status-mode #browser-reload-btn,
+body.workspace-status-mode #browser-memory-btn,
+body.workspace-status-mode #browser-marker-mode-btn,
+body.workspace-status-mode .nav-actions {
+  display: none;
+}
+
+body.workspace-status-mode .browser-url-wrap {
+  flex: 1 1 auto;
+}
+
+body.workspace-status-mode .nav-bar-main input {
+  padding-right: 18px;
+  text-align: center;
+}
+
 .workspace-status-chip {
   position: absolute;
   top: 50%;
@@ -967,6 +992,18 @@ summary:focus-visible {
 .workspace-tab.workspace-tab-pinned {
   width: 130px;
   flex: 0 0 130px;
+  justify-content: center;
+}
+
+.workspace-tab.workspace-tab-pinned .workspace-tab-label-wrap {
+  display: flex;
+  justify-content: center;
+}
+
+.workspace-tab-close-ghost {
+  width: 12px;
+  flex: 0 0 12px;
+  visibility: hidden;
 }
 
 .workspace-tab[data-kind="artifact"],
@@ -1076,7 +1113,7 @@ summary:focus-visible {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 360px;
+  grid-template-columns: 320px minmax(0, 1fr) 320px;
   gap: 12px;
 }
 
@@ -1086,6 +1123,10 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.status-left {
+  align-self: start;
 }
 
 .status-block {
@@ -1100,13 +1141,27 @@ summary:focus-visible {
 }
 
 .status-left .status-progress-block {
-  flex: 1;
-  padding: 14px 12px;
+  flex: 0 0 auto;
+  padding: 12px 14px 14px;
 }
 
 .status-clock {
   display: grid;
-  gap: 4px;
+  gap: 10px;
+}
+
+.status-clock-identity {
+  font-size: 13px;
+  color: #d9d0c2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-clock-inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
 }
 
 .status-clock-time,
@@ -1121,30 +1176,30 @@ summary:focus-visible {
 
 .status-clock-meridiem {
   font-size: 14px;
-  letter-spacing: 0.08em;
-}
-
-.status-clock-date {
-  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
 }
 
 .status-progress-bars {
-  height: 100%;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
+  align-items: end;
 }
 
 .status-progress-item {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-height: 0;
+  gap: 8px;
+  align-items: center;
 }
 
 .status-progress-head {
   display: grid;
-  gap: 2px;
+  gap: 3px;
+  width: 100%;
+  justify-items: center;
+  text-align: center;
 }
 
 .status-progress-label,
@@ -1153,26 +1208,25 @@ summary:focus-visible {
 }
 
 .status-progress-lanes {
-  flex: 1;
-  min-height: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, 8px);
   gap: 5px;
+  justify-content: center;
 }
 
 .status-progress-lane {
-  min-height: 0;
-  display: flex;
-  flex-direction: column-reverse;
-  gap: 4px;
+  display: grid;
+  justify-items: center;
+  align-content: end;
+  gap: 3px;
 }
 
 .status-progress-segment {
   display: block;
-  flex: 1 1 0;
-  min-height: 6px;
-  border-radius: 999px;
-  background: #353535;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #3a3a3a;
 }
 
 .status-progress-lane-day .status-progress-segment.active {
@@ -1314,8 +1368,7 @@ summary:focus-visible {
 }
 
 .status-upcoming-meta,
-.status-notification-preview,
-.status-rss-summary {
+.status-notification-preview {
   font-size: 12px;
 }
 
@@ -1344,6 +1397,23 @@ summary:focus-visible {
   background: #28221d;
 }
 
+.status-notification-title,
+.status-notification-preview,
+.status-rss-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.status-notification-title,
+.status-rss-title {
+  -webkit-line-clamp: 2;
+}
+
+.status-notification-preview {
+  -webkit-line-clamp: 2;
+}
+
 .status-notification-head,
 .status-rss-item-head {
   display: flex;
@@ -1360,14 +1430,24 @@ summary:focus-visible {
 }
 
 .status-rss-head {
-  align-items: flex-start;
-  flex-direction: column;
+  display: grid;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.status-rss-toolbar {
+  display: grid;
+  gap: 8px;
 }
 
 .status-rss-filters {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.status-rss-search-input {
+  width: 100%;
 }
 
 .status-rss-filters button {
@@ -3432,6 +3512,11 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 @media (max-width: 980px) {
+  body.workspace-status-mode .nav-bar-main {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+
   .status-grid {
     grid-template-columns: 1fr;
   }
