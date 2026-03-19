@@ -111,6 +111,13 @@
               <div class="status-block status-progress-block">
                 <div id="status-progress-bars" class="status-progress-bars"></div>
               </div>
+              <div class="status-block status-tasks-block">
+                <form id="status-task-form" class="status-task-form">
+                  <input id="status-task-input" type="text" placeholder="Add task" />
+                  <button id="status-task-add-btn" type="submit">Add</button>
+                </form>
+                <div id="status-task-list" class="status-task-list"></div>
+              </div>
             </section>
 
             <section class="status-section status-middle">
@@ -1187,14 +1194,28 @@
   <div id="status-event-overlay" class="modal-overlay hidden">
     <div class="modal-card action-modal status-event-modal-card">
       <h2>Event</h2>
+      <div id="status-event-day-list" class="status-event-day-list"></div>
       <label class="settings-field">Title
         <input id="status-event-title-input" type="text" placeholder="Brief event" />
       </label>
-      <label class="settings-field">Date
-        <input id="status-event-date-input" type="date" />
+      <div class="status-event-date-grid">
+        <label class="settings-field">Start Date
+          <input id="status-event-start-date-input" type="date" />
+        </label>
+        <label class="settings-field">End Date
+          <input id="status-event-end-date-input" type="date" />
+        </label>
+      </div>
+      <label class="settings-field">Repeat
+        <select id="status-event-repeat-input">
+          <option value="off">Off</option>
+          <option value="weekly">Repeat weekly</option>
+          <option value="monthly">Repeat monthly</option>
+          <option value="yearly">Repeat yearly</option>
+        </select>
       </label>
-      <label class="settings-field">Time
-        <input id="status-event-time-input" type="time" />
+      <label class="settings-field">Note
+        <textarea id="status-event-note-input" rows="4" placeholder="Optional context"></textarea>
       </label>
       <div id="status-event-modal-status" class="muted small"></div>
       <div class="modal-footer">

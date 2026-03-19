@@ -41,6 +41,12 @@ function normalizeTopic(value = '') {
   return allowed.has(raw) ? raw : DEFAULT_TOPIC;
 }
 
+function normalizeRepeat(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  const allowed = new Set(['off', 'weekly', 'monthly', 'yearly']);
+  return allowed.has(raw) ? raw : 'off';
+}
+
 function escapeRegex(value = '') {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -170,17 +176,26 @@ function normalizeEvent(input = {}, existing = null) {
   const base = (existing && typeof existing === 'object') ? existing : {};
   const src = (input && typeof input === 'object') ? input : {};
   const title = String(Object.prototype.hasOwnProperty.call(src, 'title') ? src.title : (base.title || '')).trim().slice(0, 160);
-  const date = String(Object.prototype.hasOwnProperty.call(src, 'date') ? src.date : (base.date || '')).trim();
+  const legacyDate = String(Object.prototype.hasOwnProperty.call(src, 'date') ? src.date : (base.date || '')).trim();
+  const startDate = String(Object.prototype.hasOwnProperty.call(src, 'start_date') ? src.start_date : (base.start_date || legacyDate)).trim();
+  const endDate = String(Object.prototype.hasOwnProperty.call(src, 'end_date') ? src.end_date : (base.end_date || startDate || legacyDate)).trim();
+  const repeat = normalizeRepeat(Object.prototype.hasOwnProperty.call(src, 'repeat') ? src.repeat : (base.repeat || 'off'));
+  const note = String(Object.prototype.hasOwnProperty.call(src, 'note') ? src.note : (base.note || '')).trim().slice(0, 2000);
   const time = String(Object.prototype.hasOwnProperty.call(src, 'time') ? src.time : (base.time || '')).trim();
   if (!title) return { ok: false, message: 'title is required.' };
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, message: 'date must be YYYY-MM-DD.' };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return { ok: false, message: 'start_date must be YYYY-MM-DD.' };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return { ok: false, message: 'end_date must be YYYY-MM-DD.' };
+  if (endDate < startDate) return { ok: false, message: 'end_date must be on or after start_date.' };
   if (time && !/^\d{2}:\d{2}$/.test(time)) return { ok: false, message: 'time must be HH:MM.' };
   return {
     ok: true,
     event: {
       id: String(base.id || src.id || makeId('evt')).trim(),
       title,
-      date,
+      start_date: startDate,
+      end_date: endDate,
+      repeat,
+      note,
       time,
       created_at: Number(base.created_at || nowTs()),
       updated_at: nowTs(),
@@ -189,9 +204,25 @@ function normalizeEvent(input = {}, existing = null) {
 }
 
 function toEventSortTs(event = {}) {
-  const raw = `${String(event.date || '').trim()}T${String(event.time || '23:59').trim() || '23:59'}:00`;
+  const raw = `${String(event.start_date || event.date || '').trim()}T${String(event.time || '23:59').trim() || '23:59'}:00`;
   const parsed = Date.parse(raw);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeTask(input = {}, existing = null) {
+  const base = (existing && typeof existing === 'object') ? existing : {};
+  const src = (input && typeof input === 'object') ? input : {};
+  const title = String(Object.prototype.hasOwnProperty.call(src, 'title') ? src.title : (base.title || '')).trim().slice(0, 140);
+  if (!title) return { ok: false, message: 'title is required.' };
+  return {
+    ok: true,
+    task: {
+      id: String(base.id || src.id || makeId('tsk')).trim(),
+      title,
+      created_at: Number(base.created_at || nowTs()),
+      updated_at: nowTs(),
+    },
+  };
 }
 
 function createDashboardStore(options = {}) {
@@ -204,6 +235,7 @@ function createDashboardStore(options = {}) {
         return {
           version: 1,
           events: [],
+          tasks: [],
           filters: { selected_topic: DEFAULT_TOPIC },
           rss: { items: [], last_refreshed_at: 0 },
         };
@@ -212,6 +244,7 @@ function createDashboardStore(options = {}) {
       return {
         version: 1,
         events: Array.isArray(parsed && parsed.events) ? parsed.events : [],
+        tasks: Array.isArray(parsed && parsed.tasks) ? parsed.tasks : [],
         filters: {
           selected_topic: normalizeTopic(parsed && parsed.filters ? parsed.filters.selected_topic : DEFAULT_TOPIC),
         },
@@ -224,6 +257,7 @@ function createDashboardStore(options = {}) {
       return {
         version: 1,
         events: [],
+        tasks: [],
         filters: { selected_topic: DEFAULT_TOPIC },
         rss: { items: [], last_refreshed_at: 0 },
       };
@@ -234,6 +268,7 @@ function createDashboardStore(options = {}) {
     const next = {
       version: 1,
       events: Array.isArray(state && state.events) ? state.events : [],
+      tasks: Array.isArray(state && state.tasks) ? state.tasks : [],
       filters: {
         selected_topic: normalizeTopic(state && state.filters ? state.filters.selected_topic : DEFAULT_TOPIC),
       },
@@ -257,10 +292,16 @@ function createDashboardStore(options = {}) {
       .filter((item) => item && item.ok && item.event)
       .map((item) => item.event)
       .sort((a, b) => toEventSortTs(a) - toEventSortTs(b));
+    const tasks = (Array.isArray(state.tasks) ? state.tasks : [])
+      .map((item) => normalizeTask(item, item))
+      .filter((item) => item && item.ok && item.task)
+      .map((item) => item.task)
+      .sort((a, b) => Number((a && a.created_at) || 0) - Number((b && b.created_at) || 0));
     return {
       ok: true,
       state: {
         events,
+        tasks,
         filters: { selected_topic: normalizeTopic(state.filters.selected_topic) },
         rss: {
           last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
@@ -378,6 +419,32 @@ function createDashboardStore(options = {}) {
     return { ok: true, events: clone(next) };
   }
 
+  function saveTask(payload = {}) {
+    const state = readState();
+    state.tasks = Array.isArray(state.tasks) ? state.tasks : [];
+    const taskId = String((payload && payload.id) || '').trim();
+    const existingIndex = taskId
+      ? state.tasks.findIndex((item) => String((item && item.id) || '') === taskId)
+      : -1;
+    const normalized = normalizeTask(payload, existingIndex >= 0 ? state.tasks[existingIndex] : null);
+    if (!normalized.ok) return normalized;
+    if (existingIndex >= 0) state.tasks[existingIndex] = normalized.task;
+    else state.tasks.push(normalized.task);
+    state.tasks.sort((a, b) => Number((a && a.created_at) || 0) - Number((b && b.created_at) || 0));
+    writeState(state);
+    return { ok: true, task: clone(normalized.task), tasks: clone(state.tasks) };
+  }
+
+  function deleteTask(taskId = '') {
+    const id = String(taskId || '').trim();
+    if (!id) return { ok: false, message: 'task_id is required.' };
+    const state = readState();
+    const next = (Array.isArray(state.tasks) ? state.tasks : []).filter((item) => String((item && item.id) || '') !== id);
+    state.tasks = next;
+    writeState(state);
+    return { ok: true, tasks: clone(next) };
+  }
+
   return {
     getState,
     shouldRefreshFeeds,
@@ -386,6 +453,8 @@ function createDashboardStore(options = {}) {
     setSelectedTopic,
     saveEvent,
     deleteEvent,
+    saveTask,
+    deleteTask,
   };
 }
 

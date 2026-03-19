@@ -174,6 +174,7 @@ const state = {
   chatPanelWidth: 252,
   dashboard: {
     events: [],
+    tasks: [],
     rssItems: [],
     rssSources: [],
     rssTopics: ['all'],
@@ -184,8 +185,11 @@ const state = {
     calendarCursor: '',
     modal: {
       title: '',
-      date: '',
-      time: '',
+      startDate: '',
+      endDate: '',
+      repeat: 'off',
+      note: '',
+      selectedDate: '',
       status: '',
     },
     loaded: false,
@@ -4585,6 +4589,54 @@ function formatStatusMonthLabel(date = new Date()) {
   }).format(date);
 }
 
+function parseDashboardDate(value = '') {
+  const raw = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const [year, month, day] = raw.split('-').map((item) => Number(item || 0));
+  if (!year || !month || !day) return null;
+  const next = new Date(year, month - 1, day);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function formatDashboardDateIso(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function addDashboardDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + Number(days || 0));
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function addDashboardMonths(date, months) {
+  const source = new Date(date);
+  const originalDay = source.getDate();
+  const next = new Date(source.getFullYear(), source.getMonth() + Number(months || 0), 1);
+  next.setHours(0, 0, 0, 0);
+  const lastDay = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
+  next.setDate(Math.min(originalDay, lastDay));
+  return next;
+}
+
+function addDashboardYears(date, years) {
+  const source = new Date(date);
+  const originalDay = source.getDate();
+  const next = new Date(source.getFullYear() + Number(years || 0), source.getMonth(), 1);
+  next.setHours(0, 0, 0, 0);
+  const lastDay = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
+  next.setDate(Math.min(originalDay, lastDay));
+  return next;
+}
+
+function diffDashboardDays(start, end) {
+  const startDate = parseDashboardDate(formatDashboardDateIso(new Date(start)));
+  const endDate = parseDashboardDate(formatDashboardDateIso(new Date(end)));
+  if (!startDate || !endDate) return 0;
+  return Math.round((endDate.getTime() - startDate.getTime()) / (24 * 60 * 60 * 1000));
+}
+
 function getStatusWeekNumber(now = new Date()) {
   const date = new Date(now);
   date.setHours(0, 0, 0, 0);
@@ -4691,12 +4743,13 @@ function getStatusProgressItems(now = new Date()) {
     const total = Math.max(1, bounds.end - bounds.start);
     const elapsed = Math.max(0, Math.min(bounds.now - bounds.start, total));
     const split = accumulateDayNightMs(bounds.start, bounds.start + elapsed);
+    const fullSplit = accumulateDayNightMs(bounds.start, bounds.end);
     return {
       key: kind,
       label: labels[kind],
       percent: clampRatio(elapsed / total),
-      dayRatio: clampRatio(split.dayMs / total),
-      nightRatio: clampRatio(split.nightMs / total),
+      dayRatio: clampRatio(split.dayMs / Math.max(1, fullSplit.dayMs)),
+      nightRatio: clampRatio(split.nightMs / Math.max(1, fullSplit.nightMs)),
     };
   });
 }
@@ -4717,47 +4770,114 @@ function formatStatusPercent(value) {
 }
 
 function formatStatusEventMeta(event = {}) {
-  const date = String((event && event.date) || '').trim();
-  const time = String((event && event.time) || '').trim();
-  const [year, month, day] = date.split('-').map((item) => Number(item || 0));
-  const parsed = (year && month && day) ? new Date(year, month - 1, day) : new Date();
-  const dateLabel = new Intl.DateTimeFormat('en-US', {
+  const startDate = parseDashboardDate(String((event && (event.occurrence_start_date || event.start_date || event.date)) || '').trim());
+  const endDate = parseDashboardDate(String((event && (event.occurrence_end_date || event.end_date || event.date)) || '').trim());
+  if (!startDate) return '';
+  const startLabel = new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
-  }).format(parsed);
-  if (!time) return dateLabel;
-  const clock = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  }).format(new Date(`${date}T${time}:00`));
-  return `${dateLabel} ${clock}`;
+  }).format(startDate);
+  const repeat = String((event && event.repeat) || 'off').trim().toLowerCase();
+  if (!endDate || formatDashboardDateIso(endDate) === formatDashboardDateIso(startDate)) {
+    return repeat && repeat !== 'off' ? `${startLabel} · ${repeat}` : startLabel;
+  }
+  const endLabel = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+  }).format(endDate);
+  return repeat && repeat !== 'off'
+    ? `${startLabel} - ${endLabel} · ${repeat}`
+    : `${startLabel} - ${endLabel}`;
+}
+
+function getDashboardEventDurationDays(event = {}) {
+  const startDate = parseDashboardDate(String((event && (event.start_date || event.date)) || '').trim());
+  const endDate = parseDashboardDate(String((event && (event.end_date || event.date)) || '').trim());
+  if (!startDate || !endDate) return 1;
+  return Math.max(1, diffDashboardDays(startDate, endDate) + 1);
+}
+
+function buildDashboardOccurrence(event = {}, occurrenceStart) {
+  const durationDays = getDashboardEventDurationDays(event);
+  const occurrenceEnd = addDashboardDays(occurrenceStart, durationDays - 1);
+  return {
+    ...event,
+    occurrence_id: `${String((event && event.id) || '').trim()}:${formatDashboardDateIso(occurrenceStart)}`,
+    occurrence_start_date: formatDashboardDateIso(occurrenceStart),
+    occurrence_end_date: formatDashboardDateIso(occurrenceEnd),
+    sortTs: occurrenceStart.getTime(),
+  };
+}
+
+function listDashboardOccurrences(rangeStart, rangeEnd) {
+  const startBound = parseDashboardDate(String(rangeStart || '').trim());
+  const endBound = parseDashboardDate(String(rangeEnd || '').trim());
+  if (!startBound || !endBound) return [];
+  const events = Array.isArray(state.dashboard.events) ? state.dashboard.events : [];
+  const out = [];
+  events.forEach((event) => {
+    const eventStart = parseDashboardDate(String((event && (event.start_date || event.date)) || '').trim());
+    if (!eventStart) return;
+    const durationDays = getDashboardEventDurationDays(event);
+    const repeat = String((event && event.repeat) || 'off').trim().toLowerCase();
+    let cursor = new Date(eventStart);
+    let guard = 0;
+    while (cursor && guard < 240) {
+      const occurrenceEnd = addDashboardDays(cursor, durationDays - 1);
+      if (occurrenceEnd.getTime() >= startBound.getTime() && cursor.getTime() <= endBound.getTime()) {
+        out.push(buildDashboardOccurrence(event, cursor));
+      }
+      if (repeat === 'off') break;
+      if (cursor.getTime() > endBound.getTime()) break;
+      if (repeat === 'weekly') cursor = addDashboardDays(cursor, 7);
+      else if (repeat === 'monthly') cursor = addDashboardMonths(cursor, 1);
+      else if (repeat === 'yearly') cursor = addDashboardYears(cursor, 1);
+      else break;
+      guard += 1;
+    }
+  });
+  return out.sort((a, b) => Number((a && a.sortTs) || 0) - Number((b && b.sortTs) || 0));
 }
 
 function getDashboardUpcomingEvents(limit = 6) {
-  const now = Date.now();
-  return (Array.isArray(state.dashboard.events) ? state.dashboard.events : [])
-    .map((event) => ({
-      ...event,
-      sortTs: Date.parse(`${String(event.date || '').trim()}T${String(event.time || '23:59').trim() || '23:59'}:00`),
-    }))
-    .filter((event) => Number.isFinite(event.sortTs) && event.sortTs >= now - (60 * 1000))
-    .sort((a, b) => Number(a.sortTs || 0) - Number(b.sortTs || 0))
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const horizon = addDashboardDays(today, 180);
+  return listDashboardOccurrences(formatDashboardDateIso(today), formatDashboardDateIso(horizon))
+    .filter((event) => {
+      const occurrenceEnd = parseDashboardDate(String((event && event.occurrence_end_date) || '').trim());
+      return !!occurrenceEnd && occurrenceEnd.getTime() >= today.getTime();
+    })
     .slice(0, limit);
 }
 
-function getDashboardEventsByDate() {
+function getDashboardEventsByDate(rangeStart, rangeEnd) {
+  const startBound = parseDashboardDate(String(rangeStart || '').trim());
+  const endBound = parseDashboardDate(String(rangeEnd || '').trim());
   const out = new Map();
-  (Array.isArray(state.dashboard.events) ? state.dashboard.events : []).forEach((event) => {
-    const key = String((event && event.date) || '').trim();
-    if (!key) return;
-    if (!out.has(key)) out.set(key, []);
-    out.get(key).push(event);
+  if (!startBound || !endBound) return out;
+  listDashboardOccurrences(rangeStart, rangeEnd).forEach((event) => {
+    const occurrenceStart = parseDashboardDate(String((event && event.occurrence_start_date) || '').trim());
+    const occurrenceEnd = parseDashboardDate(String((event && event.occurrence_end_date) || '').trim());
+    if (!occurrenceStart || !occurrenceEnd) return;
+    let cursor = new Date(Math.max(occurrenceStart.getTime(), startBound.getTime()));
+    while (cursor.getTime() <= occurrenceEnd.getTime() && cursor.getTime() <= endBound.getTime()) {
+      const key = formatDashboardDateIso(cursor);
+      if (!out.has(key)) out.set(key, []);
+      out.get(key).push(event);
+      cursor = addDashboardDays(cursor, 1);
+    }
   });
   out.forEach((items) => {
-    items.sort((a, b) => String((a && a.time) || '').localeCompare(String((b && b.time) || '')));
+    items.sort((a, b) => String((a && a.title) || '').localeCompare(String((b && b.title) || '')));
   });
   return out;
+}
+
+function getDashboardEventsForDate(date = '') {
+  const day = parseDashboardDate(String(date || '').trim());
+  if (!day) return [];
+  return getDashboardEventsByDate(formatDashboardDateIso(day), formatDashboardDateIso(day)).get(formatDashboardDateIso(day)) || [];
 }
 
 function renderStatusClockAndBars() {
@@ -4774,7 +4894,7 @@ function renderStatusClockAndBars() {
       <span class="status-clock-meridiem">${escapeHtml(parts.meridiem)}</span>
     </div>
   `;
-  const segmentCount = 48;
+  const segmentCount = 60;
   barsNode.innerHTML = getStatusProgressItems(now).map((item) => {
     const dayCount = Math.round(clampRatio(item.dayRatio) * segmentCount);
     const nightCount = Math.round(clampRatio(item.nightRatio) * segmentCount);
@@ -4797,6 +4917,22 @@ function renderStatusClockAndBars() {
   }).join('');
 }
 
+function renderStatusTasks() {
+  const listNode = e('status-task-list');
+  const input = e('status-task-input');
+  if (!listNode || !input) return;
+  const tasks = Array.isArray(state.dashboard.tasks) ? state.dashboard.tasks : [];
+  listNode.innerHTML = tasks.length
+    ? tasks.map((task) => `
+      <label class="status-task-item">
+        <input type="checkbox" data-status-task-id="${escapeHtml(String((task && task.id) || '').trim())}" />
+        <span>${escapeHtml(String((task && task.title) || 'Task'))}</span>
+      </label>
+    `).join('')
+    : '<div class="status-empty muted">No tasks.</div>';
+  if (document.activeElement !== input) input.value = '';
+}
+
 function renderStatusCalendarPanel() {
   const header = e('status-calendar-label');
   const grid = e('status-calendar-grid');
@@ -4804,12 +4940,14 @@ function renderStatusCalendarPanel() {
   if (!header || !grid || !upcoming) return;
   const cursor = getDashboardCalendarDate();
   const cursorMonth = cursor.getMonth();
-  const eventsByDate = getDashboardEventsByDate();
   header.textContent = formatStatusMonthLabel(cursor);
 
   const weekdayOffset = (cursor.getDay() + 6) % 7;
   const gridStart = new Date(cursor);
   gridStart.setDate(cursor.getDate() - weekdayOffset);
+  gridStart.setHours(0, 0, 0, 0);
+  const gridEnd = addDashboardDays(gridStart, 41);
+  const eventsByDate = getDashboardEventsByDate(formatDashboardDateIso(gridStart), formatDashboardDateIso(gridEnd));
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -4825,10 +4963,11 @@ function renderStatusCalendarPanel() {
     const events = eventsByDate.get(iso) || [];
     const isCurrentMonth = day.getMonth() === cursorMonth;
     const isToday = day.getTime() === today.getTime();
+    const isPastWithoutEvents = day.getTime() < today.getTime() && events.length === 0;
     return `
-      <button type="button" class="status-calendar-day${isCurrentMonth ? '' : ' is-outside'}${isToday ? ' is-today' : ''}${events.length ? ' has-event' : ''}" data-status-date="${iso}">
+      <button type="button" class="status-calendar-day${isCurrentMonth ? '' : ' is-outside'}${isToday ? ' is-today' : ''}${events.length ? ' has-event' : ''}${isPastWithoutEvents ? ' is-locked' : ''}" data-status-date="${iso}"${isPastWithoutEvents ? ' disabled' : ''}>
         <span class="status-calendar-day-number">${day.getDate()}</span>
-        <span class="status-calendar-day-markers">${events.slice(0, 3).map(() => '<span></span>').join('')}</span>
+        <span class="status-calendar-day-count">${events.length ? events.length : ''}</span>
       </button>
     `;
   }).join('');
@@ -4842,7 +4981,7 @@ function renderStatusCalendarPanel() {
   upcoming.innerHTML = upcomingItems.length
     ? upcomingItems.map((event) => `
       <div class="status-upcoming-item">
-        <button type="button" class="status-upcoming-main" data-status-date="${escapeHtml(String((event && event.date) || '').trim())}">
+        <button type="button" class="status-upcoming-main" data-status-date="${escapeHtml(String((event && event.occurrence_start_date) || '').trim())}">
           <span class="status-upcoming-title">${escapeHtml(String((event && event.title) || 'Event'))}</span>
           <span class="status-upcoming-meta muted">${escapeHtml(formatStatusEventMeta(event))}</span>
         </button>
@@ -4868,6 +5007,38 @@ function renderStatusNotifications() {
       </button>
     `).join('')
     : '<div class="status-empty muted">No notifications.</div>';
+}
+
+function renderStatusEventModalDayList(date = '') {
+  const listNode = e('status-event-day-list');
+  if (!listNode) return;
+  const normalizedDate = String(date || '').trim();
+  if (!normalizedDate) {
+    listNode.innerHTML = '';
+    return;
+  }
+  const items = getDashboardEventsForDate(normalizedDate);
+  const dateLabel = (() => {
+    const parsed = parseDashboardDate(normalizedDate);
+    return parsed
+      ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(parsed)
+      : normalizedDate;
+  })();
+  listNode.innerHTML = `
+    <div class="status-event-day-label muted">${escapeHtml(dateLabel)}</div>
+    ${items.length
+      ? items.map((event) => `
+        <div class="status-event-day-item">
+          <div class="status-event-day-copy">
+            <div class="status-event-day-title">${escapeHtml(String((event && event.title) || 'Event'))}</div>
+            <div class="status-event-day-meta muted">${escapeHtml(formatStatusEventMeta(event))}</div>
+            ${String((event && event.note) || '').trim() ? `<div class="status-event-day-note muted">${escapeHtml(String(event.note || '').trim())}</div>` : ''}
+          </div>
+          <button type="button" class="status-upcoming-delete" data-status-delete-event="${escapeHtml(String((event && event.id) || '').trim())}" aria-label="Delete event">×</button>
+        </div>
+      `).join('')
+      : '<div class="status-empty muted">No events on this date.</div>'}
+  `;
 }
 
 function renderStatusFeed() {
@@ -4926,9 +5097,11 @@ function renderStatusFeed() {
 
 function renderStatusSurface() {
   renderStatusClockAndBars();
+  renderStatusTasks();
   renderStatusCalendarPanel();
   renderStatusNotifications();
   renderStatusFeed();
+  renderStatusEventModalDayList(String((state.dashboard.modal && state.dashboard.modal.selectedDate) || '').trim());
 }
 
 async function refreshStatusData(options = {}) {
@@ -4942,6 +5115,7 @@ async function refreshStatusData(options = {}) {
     if (stateRes && stateRes.ok && stateRes.state) {
       const dashboardState = stateRes.state || {};
       state.dashboard.events = Array.isArray(dashboardState.events) ? dashboardState.events : [];
+      state.dashboard.tasks = Array.isArray(dashboardState.tasks) ? dashboardState.tasks : [];
       state.dashboard.rssSources = Array.isArray(dashboardState.rss && dashboardState.rss.sources) ? dashboardState.rss.sources : [];
       state.dashboard.rssTopics = Array.isArray(dashboardState.rss && dashboardState.rss.topics) ? dashboardState.rss.topics : ['all'];
       state.dashboard.rssSelectedTopic = String(((dashboardState.filters || {}).selected_topic) || 'all').trim().toLowerCase() || 'all';
@@ -5033,24 +5207,32 @@ async function openStatusHyperwebNotification(payload = {}) {
 function openStatusEventModal(date = '') {
   const overlay = e('status-event-overlay');
   const titleInput = e('status-event-title-input');
-  const dateInput = e('status-event-date-input');
-  const timeInput = e('status-event-time-input');
+  const startDateInput = e('status-event-start-date-input');
+  const endDateInput = e('status-event-end-date-input');
+  const repeatInput = e('status-event-repeat-input');
+  const noteInput = e('status-event-note-input');
   const statusNode = e('status-event-modal-status');
-  if (!overlay || !titleInput || !dateInput || !timeInput || !statusNode) return;
+  if (!overlay || !titleInput || !startDateInput || !endDateInput || !repeatInput || !noteInput || !statusNode) return;
   const defaultDate = String(date || '').trim() || (() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   })();
   state.dashboard.modal = {
     title: '',
-    date: defaultDate,
-    time: '',
+    startDate: defaultDate,
+    endDate: defaultDate,
+    repeat: 'off',
+    note: '',
+    selectedDate: defaultDate,
     status: '',
   };
   titleInput.value = '';
-  dateInput.value = defaultDate;
-  timeInput.value = '';
+  startDateInput.value = defaultDate;
+  endDateInput.value = defaultDate;
+  repeatInput.value = 'off';
+  noteInput.value = '';
   statusNode.textContent = '';
+  renderStatusEventModalDayList(defaultDate);
   overlay.classList.remove('hidden');
   titleInput.focus();
 }
@@ -5060,22 +5242,27 @@ function closeStatusEventModal() {
   const statusNode = e('status-event-modal-status');
   if (overlay) overlay.classList.add('hidden');
   if (statusNode) statusNode.textContent = '';
+  state.dashboard.modal.selectedDate = '';
 }
 
 async function saveStatusEventFromModal() {
   if (!api.dashboardSaveEvent) return;
   const titleInput = e('status-event-title-input');
-  const dateInput = e('status-event-date-input');
-  const timeInput = e('status-event-time-input');
+  const startDateInput = e('status-event-start-date-input');
+  const endDateInput = e('status-event-end-date-input');
+  const repeatInput = e('status-event-repeat-input');
+  const noteInput = e('status-event-note-input');
   const statusNode = e('status-event-modal-status');
   const title = String((titleInput && titleInput.value) || '').trim();
-  const date = String((dateInput && dateInput.value) || '').trim();
-  const time = String((timeInput && timeInput.value) || '').trim();
-  if (!title || !date) {
-    if (statusNode) statusNode.textContent = 'Title and date are required.';
+  const startDate = String((startDateInput && startDateInput.value) || '').trim();
+  const endDate = String((endDateInput && endDateInput.value) || '').trim();
+  const repeat = String((repeatInput && repeatInput.value) || 'off').trim().toLowerCase() || 'off';
+  const note = String((noteInput && noteInput.value) || '').trim();
+  if (!title || !startDate || !endDate) {
+    if (statusNode) statusNode.textContent = 'Title, start date, and end date are required.';
     return;
   }
-  const res = await api.dashboardSaveEvent({ title, date, time });
+  const res = await api.dashboardSaveEvent({ title, start_date: startDate, end_date: endDate, repeat, note });
   if (!res || !res.ok) {
     if (statusNode) statusNode.textContent = (res && res.message) || 'Unable to save event.';
     return;
@@ -5095,6 +5282,7 @@ async function deleteStatusEvent(eventId = '') {
   }
   state.dashboard.events = Array.isArray(res.events) ? res.events : [];
   renderStatusCalendarPanel();
+  renderStatusEventModalDayList(String((state.dashboard.modal && state.dashboard.modal.selectedDate) || '').trim());
 }
 
 async function setStatusFeedTopic(topic = 'all') {
@@ -5105,7 +5293,14 @@ async function setStatusFeedTopic(topic = 'all') {
   } else {
     state.dashboard.rssSelectedTopic = next;
   }
-  if (api.dashboardListFeedItems) {
+  if (api.dashboardRefreshFeeds) {
+    const res = await api.dashboardRefreshFeeds(state.dashboard.rssSelectedTopic, 80);
+    if (res && res.ok) {
+      state.dashboard.rssItems = Array.isArray(res.items) ? res.items : [];
+      state.dashboard.rssLastRefreshedAt = Number(res.last_refreshed_at || state.dashboard.rssLastRefreshedAt || 0);
+      state.dashboard.rssTopics = Array.isArray(res.topics) ? res.topics : state.dashboard.rssTopics;
+    }
+  } else if (api.dashboardListFeedItems) {
     const res = await api.dashboardListFeedItems(state.dashboard.rssSelectedTopic, 80);
     if (res && res.ok) {
       state.dashboard.rssItems = Array.isArray(res.items) ? res.items : [];
@@ -5116,7 +5311,43 @@ async function setStatusFeedTopic(topic = 'all') {
   renderStatusFeed();
 }
 
+async function saveStatusTaskFromInput() {
+  const input = e('status-task-input');
+  if (!input || !api.dashboardSaveTask) return;
+  const title = String(input.value || '').trim();
+  if (!title) return;
+  const res = await api.dashboardSaveTask({ title });
+  if (!res || !res.ok) {
+    showPassiveNotification((res && res.message) || 'Unable to add task.');
+    return;
+  }
+  state.dashboard.tasks = Array.isArray(res.tasks) ? res.tasks : state.dashboard.tasks;
+  input.value = '';
+  renderStatusTasks();
+}
+
+async function deleteStatusTask(taskId = '') {
+  const id = String(taskId || '').trim();
+  if (!id || !api.dashboardDeleteTask) return;
+  const res = await api.dashboardDeleteTask(id);
+  if (!res || !res.ok) return;
+  state.dashboard.tasks = Array.isArray(res.tasks) ? res.tasks : [];
+  renderStatusTasks();
+}
+
 function bindStatusSurfaceEvents() {
+  e('status-task-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await saveStatusTaskFromInput();
+  });
+  e('status-task-list')?.addEventListener('change', async (event) => {
+    const checkbox = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('input[data-status-task-id]')
+      : null;
+    if (!checkbox || !checkbox.checked) return;
+    const taskId = String(checkbox.getAttribute('data-status-task-id') || '').trim();
+    if (taskId) await deleteStatusTask(taskId);
+  });
   e('status-calendar-prev-btn')?.addEventListener('click', () => {
     const next = getDashboardCalendarDate();
     next.setMonth(next.getMonth() - 1);
@@ -5156,6 +5387,14 @@ function bindStatusSurfaceEvents() {
     if (!openButton) return;
     const date = String(openButton.getAttribute('data-status-date') || '').trim();
     if (date) openStatusEventModal(date);
+  });
+  e('status-event-day-list')?.addEventListener('click', async (event) => {
+    const deleteButton = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('button[data-status-delete-event]')
+      : null;
+    if (!deleteButton) return;
+    const eventId = String(deleteButton.getAttribute('data-status-delete-event') || '').trim();
+    if (eventId) await deleteStatusEvent(eventId);
   });
   e('status-notifications-list')?.addEventListener('click', async (event) => {
     const button = event.target && typeof event.target.closest === 'function'

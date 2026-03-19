@@ -1113,7 +1113,7 @@ body.workspace-status-mode .nav-bar-main input {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr) 320px;
+  grid-template-columns: 30% minmax(0, 40%) 30%;
   gap: 12px;
 }
 
@@ -1123,10 +1123,6 @@ body.workspace-status-mode .nav-bar-main input {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.status-left {
-  align-self: start;
 }
 
 .status-block {
@@ -1143,6 +1139,14 @@ body.workspace-status-mode .nav-bar-main input {
 .status-left .status-progress-block {
   flex: 0 0 auto;
   padding: 12px 14px 14px;
+}
+
+.status-left .status-tasks-block {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
 }
 
 .status-clock {
@@ -1223,8 +1227,8 @@ body.workspace-status-mode .nav-bar-main input {
 
 .status-progress-segment {
   display: block;
-  width: 4px;
-  height: 4px;
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
   background: #3a3a3a;
 }
@@ -1307,6 +1311,11 @@ body.workspace-status-mode .nav-bar-main input {
   color: #7e7a73;
 }
 
+.status-calendar-day.is-locked {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .status-calendar-day.is-today {
   border-color: #6a513e;
   background: #2a241f;
@@ -1316,20 +1325,20 @@ body.workspace-status-mode .nav-bar-main input {
   color: #f0d4c3;
 }
 
+.status-calendar-day.has-event {
+  border-color: #5f4a38;
+  background: #28231e;
+}
+
 .status-calendar-day-number {
   font-size: 12px;
 }
 
-.status-calendar-day-markers {
-  display: flex;
-  gap: 3px;
-}
-
-.status-calendar-day-markers span {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
+.status-calendar-day-count {
+  align-self: center;
+  min-height: 14px;
+  font-size: 11px;
+  color: #d4b39c;
 }
 
 .status-upcoming-list {
@@ -1359,6 +1368,35 @@ body.workspace-status-mode .nav-bar-main input {
   display: grid;
   gap: 2px;
   text-align: left;
+}
+
+.status-task-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.status-task-list {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  overflow: auto;
+}
+
+.status-task-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.status-task-item span {
+  min-width: 0;
+  line-height: 1.4;
 }
 
 .status-upcoming-title,
@@ -1448,6 +1486,47 @@ body.workspace-status-mode .nav-bar-main input {
 
 .status-rss-search-input {
   width: 100%;
+}
+
+.status-event-date-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.status-event-day-list {
+  display: grid;
+  gap: 8px;
+}
+
+.status-event-day-label {
+  font-size: 12px;
+}
+
+.status-event-day-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: #242424;
+}
+
+.status-event-day-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.status-event-day-title {
+  font-size: 13px;
+}
+
+.status-event-day-meta,
+.status-event-day-note {
+  font-size: 12px;
 }
 
 .status-rss-filters button {
@@ -2926,7 +3005,7 @@ body.workspace-status-mode .nav-bar-main input {
 }
 
 .status-event-modal-card {
-  width: min(360px, 92vw);
+  width: min(520px, 92vw);
 }
 
 .context-preview-close {
@@ -3525,6 +3604,10 @@ body.chat-collapsed #chat-panel-resizer {
   .status-middle .status-notifications-block,
   .status-middle .status-calendar-block {
     min-height: 320px;
+  }
+
+  .status-event-date-grid {
+    grid-template-columns: 1fr;
   }
 
   .mail-layout {

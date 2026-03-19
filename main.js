@@ -21206,7 +21206,7 @@ ipcMain.handle('browser:dashboardGet', async () => {
   const feedRes = store.listFeedItems({ topic: selectedTopic, limit: 80 });
   return {
     ok: true,
-    state: stateRes && stateRes.ok ? stateRes.state : { events: [], filters: { selected_topic: 'all' }, rss: { sources: [], topics: ['all'], last_refreshed_at: 0 } },
+    state: stateRes && stateRes.ok ? stateRes.state : { events: [], tasks: [], filters: { selected_topic: 'all' }, rss: { sources: [], topics: ['all'], last_refreshed_at: 0 } },
     feed_items: Array.isArray(feedRes && feedRes.items) ? feedRes.items : [],
   };
 });
@@ -21217,6 +21217,14 @@ ipcMain.handle('browser:dashboardSaveEvent', async (_event, payload) => {
 
 ipcMain.handle('browser:dashboardDeleteEvent', async (_event, payload) => {
   return getDashboardStore().deleteEvent(String((payload && payload.event_id) || '').trim());
+});
+
+ipcMain.handle('browser:dashboardSaveTask', async (_event, payload) => {
+  return getDashboardStore().saveTask(payload || {});
+});
+
+ipcMain.handle('browser:dashboardDeleteTask', async (_event, payload) => {
+  return getDashboardStore().deleteTask(String((payload && payload.task_id) || '').trim());
 });
 
 ipcMain.handle('browser:dashboardSetFilter', async (_event, payload) => {

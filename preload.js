@@ -163,6 +163,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     dashboardGet: () => ipcRenderer.invoke('browser:dashboardGet'),
     dashboardSaveEvent: (event = {}) => ipcRenderer.invoke('browser:dashboardSaveEvent', event || {}),
     dashboardDeleteEvent: (eventId = '') => ipcRenderer.invoke('browser:dashboardDeleteEvent', { event_id: eventId }),
+    dashboardSaveTask: (task = {}) => ipcRenderer.invoke('browser:dashboardSaveTask', task || {}),
+    dashboardDeleteTask: (taskId = '') => ipcRenderer.invoke('browser:dashboardDeleteTask', { task_id: taskId }),
     dashboardSetFilter: (topic = 'all') => ipcRenderer.invoke('browser:dashboardSetFilter', { topic }),
     dashboardListFeedItems: (topic = 'all', limit = 80) => ipcRenderer.invoke('browser:dashboardListFeedItems', { topic, limit }),
     dashboardRefreshFeeds: (topic = 'all', limit = 80) => ipcRenderer.invoke('browser:dashboardRefreshFeeds', { topic, limit }),
