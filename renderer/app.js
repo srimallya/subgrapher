@@ -68,6 +68,8 @@ const state = {
   activeFilesByRef: new Map(),
   activeSkillsByRef: new Map(),
   activeMailByRef: new Map(),
+  activeSpecialSurfaceByRef: new Map(),
+  activeSurfaceKindByRef: new Map(),
   workspaceBrowserTabMap: new Map(),
   hyperwebStatus: null,
   hyperwebSuggestions: [],
@@ -170,6 +172,24 @@ const state = {
   referenceActivationSeq: 0,
   chatPanelCollapsed: false,
   chatPanelWidth: 252,
+  dashboard: {
+    events: [],
+    rssItems: [],
+    rssSources: [],
+    rssTopics: ['all'],
+    rssSelectedTopic: 'all',
+    rssLastRefreshedAt: 0,
+    notifications: [],
+    calendarCursor: '',
+    modal: {
+      title: '',
+      date: '',
+      time: '',
+      status: '',
+    },
+    loaded: false,
+    refreshPending: false,
+  },
 };
 
 const PROVIDERS = ['openai', 'cerebras', 'google', 'anthropic', 'lmstudio'];
@@ -178,6 +198,7 @@ const BROWSER_URL_PLACEHOLDER_WEB = 'type anything to search or enter URL...';
 const BROWSER_URL_PLACEHOLDER_ARTIFACT = 'Commands: /add /create /rename/<name> /rm';
 const BROWSER_URL_PLACEHOLDER_FILES = 'Files tab active: enter URL/search to open web tab';
 const BROWSER_URL_PLACEHOLDER_SKILLS = 'Skills tab active: enter URL/search to open web tab';
+const BROWSER_URL_PLACEHOLDER_STATUS = 'Status tab active: enter URL/search to open web tab';
 const BROWSER_MARKER_MODE_KEY = 'subgrapher_browser_marker_mode_v1';
 const BROWSER_MARKER_HOLD_MS = 650;
 const HYPERWEB_SPLIT_RATIO_KEY = 'subgrapher_hyperweb_split_ratio_v1';
@@ -218,9 +239,12 @@ const MAIL_SMART_FOLDER_LABELS = {
   junk: 'Junk',
 };
 const HYPERWEB_LAST_SEEN_KEY = 'subgrapher_hyperweb_last_seen_v1';
+const STATUS_SURFACE_ID = '__status__';
 let passiveNoticeTimer = null;
 let hyperwebChatRefreshPromise = null;
 let hyperwebChatRefreshQueuedMode = '';
+let statusClockTimer = null;
+let statusRefreshTimer = null;
 
 function e(id) {
   return document.getElementById(id);
@@ -844,7 +868,17 @@ function rememberSurfaceForReference(srId, surface = state.activeSurface) {
   const refId = String(srId || '').trim();
   if (!refId || !surface || typeof surface !== 'object') return;
   const kind = String(surface.kind || '').trim().toLowerCase();
+  state.activeSurfaceKindByRef.set(refId, kind || 'web');
+  if (kind === 'status') {
+    state.activeSpecialSurfaceByRef.set(refId, 'status');
+    state.activeArtifactByRef.delete(refId);
+    state.activeFilesByRef.delete(refId);
+    state.activeSkillsByRef.delete(refId);
+    state.activeMailByRef.delete(refId);
+    return;
+  }
   if (kind === 'artifact' && surface.artifactId) {
+    state.activeSpecialSurfaceByRef.delete(refId);
     state.activeArtifactByRef.set(refId, String(surface.artifactId));
     state.activeFilesByRef.delete(refId);
     state.activeSkillsByRef.delete(refId);
@@ -852,6 +886,7 @@ function rememberSurfaceForReference(srId, surface = state.activeSurface) {
     return;
   }
   if (kind === 'files' && surface.filesTabId) {
+    state.activeSpecialSurfaceByRef.delete(refId);
     state.activeFilesByRef.set(refId, String(surface.filesTabId));
     state.activeArtifactByRef.delete(refId);
     state.activeSkillsByRef.delete(refId);
@@ -859,6 +894,7 @@ function rememberSurfaceForReference(srId, surface = state.activeSurface) {
     return;
   }
   if (kind === 'skills' && surface.skillsTabId) {
+    state.activeSpecialSurfaceByRef.delete(refId);
     state.activeSkillsByRef.set(refId, String(surface.skillsTabId));
     state.activeArtifactByRef.delete(refId);
     state.activeFilesByRef.delete(refId);
@@ -866,12 +902,14 @@ function rememberSurfaceForReference(srId, surface = state.activeSurface) {
     return;
   }
   if (kind === 'mail' && surface.mailTabId) {
+    state.activeSpecialSurfaceByRef.delete(refId);
     state.activeMailByRef.set(refId, String(surface.mailTabId));
     state.activeArtifactByRef.delete(refId);
     state.activeFilesByRef.delete(refId);
     state.activeSkillsByRef.delete(refId);
     return;
   }
+  state.activeSpecialSurfaceByRef.delete(refId);
   state.activeArtifactByRef.delete(refId);
   state.activeFilesByRef.delete(refId);
   state.activeSkillsByRef.delete(refId);
@@ -880,17 +918,22 @@ function rememberSurfaceForReference(srId, surface = state.activeSurface) {
 
 function restoreSurfaceForReference(ref) {
   const srId = String((ref && ref.id) || '').trim();
-  if (!srId || !ref) return makeActiveSurface('web');
+  if (!srId || !ref) return makeActiveSurface('status');
   const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
   const tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
+  const lastKind = String(state.activeSurfaceKindByRef.get(srId) || '').trim().toLowerCase();
+
+  if (lastKind === 'status' || String(state.activeSpecialSurfaceByRef.get(srId) || '').trim().toLowerCase() === 'status') {
+    return makeActiveSurface('status');
+  }
 
   const artifactId = String(state.activeArtifactByRef.get(srId) || '').trim();
-  if (artifactId && artifacts.some((artifact) => String((artifact && artifact.id) || '') === artifactId)) {
+  if (lastKind === 'artifact' && artifactId && artifacts.some((artifact) => String((artifact && artifact.id) || '') === artifactId)) {
     return makeActiveSurface('artifact', { artifactId });
   }
 
   const filesTabId = String(state.activeFilesByRef.get(srId) || '').trim();
-  if (filesTabId && tabs.some((tab) => (
+  if (lastKind === 'files' && filesTabId && tabs.some((tab) => (
     String((tab && tab.id) || '') === filesTabId
     && String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'files'
   ))) {
@@ -898,7 +941,7 @@ function restoreSurfaceForReference(ref) {
   }
 
   const skillsTabId = String(state.activeSkillsByRef.get(srId) || '').trim();
-  if (skillsTabId && tabs.some((tab) => (
+  if (lastKind === 'skills' && skillsTabId && tabs.some((tab) => (
     String((tab && tab.id) || '') === skillsTabId
     && String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'skills'
   ))) {
@@ -906,7 +949,7 @@ function restoreSurfaceForReference(ref) {
   }
 
   const mailTabId = String(state.activeMailByRef.get(srId) || '').trim();
-  if (mailTabId && tabs.some((tab) => (
+  if (lastKind === 'mail' && mailTabId && tabs.some((tab) => (
     String((tab && tab.id) || '') === mailTabId
     && String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail'
   ))) {
@@ -914,10 +957,10 @@ function restoreSurfaceForReference(ref) {
   }
 
   const activeWeb = getActiveWebTab(ref);
-  if (activeWeb && activeWeb.id) {
+  if (lastKind === 'web' && activeWeb && activeWeb.id) {
     return makeActiveSurface('web', { tabId: String(activeWeb.id || '').trim() });
   }
-  return makeActiveSurface('web');
+  return makeActiveSurface('status');
 }
 
 function setStatusText(nodeId, text) {
@@ -1969,6 +2012,13 @@ async function syncUrlBarForActiveSurface() {
     return;
   }
 
+  if (state.activeSurface.kind === 'status') {
+    input.value = '';
+    input.placeholder = BROWSER_URL_PLACEHOLDER_STATUS;
+    setUncommittedActionCue(false);
+    return;
+  }
+
   if (state.activeSurface.kind === 'files') {
     input.value = '';
     input.placeholder = BROWSER_URL_PLACEHOLDER_FILES;
@@ -2878,6 +2928,9 @@ function renderWorkspaceTabs() {
       <button type="button" data-workspace-add-action="mail">+ mail</button>
       <button type="button" data-workspace-add-action="skills">+ skills</button>
     </div>
+    <div class="workspace-tab workspace-tab-pinned ${(state.activeSurface.kind === 'status') ? 'active' : ''}" data-kind="status" data-tab-id="${STATUS_SURFACE_ID}">
+      <span class="workspace-tab-label-wrap"><span class="workspace-tab-label" title="Status">Status</span></span>
+    </div>
     ${webTabs.map((tab) => `
       <div class="workspace-tab ${(state.activeSurface.kind === 'web' && String(state.activeSurface.tabId || activeWebId) === String(tab.id || '')) ? 'active' : ''}" data-kind="web" data-tab-id="${escapeHtml(tab.id)}">
         <span class="workspace-tab-label-wrap"><span class="workspace-tab-label" title="${escapeHtml(tab.title || tab.url || 'Web Tab')}">${escapeHtml(tab.title || tab.url || 'Web Tab')}</span></span>
@@ -3045,6 +3098,16 @@ function renderWorkspaceTabs() {
     });
 
   }
+
+  holder.querySelectorAll('.workspace-tab[data-kind="status"]').forEach((node) => {
+    node.addEventListener('click', async () => {
+      if (state.activeSurface.kind === 'status') return;
+      state.activeSurface = makeActiveSurface('status');
+      rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+      renderWorkspaceTabs();
+      await syncActiveSurface();
+    });
+  });
 
   holder.querySelectorAll('.workspace-tab[data-kind="web"]').forEach((node) => {
     node.addEventListener('click', async (event) => {
@@ -3379,6 +3442,7 @@ async function syncHistoryPreviewBounds() {
 }
 
 function hideNonWebSurfaces() {
+  e('status-panel')?.classList.add('hidden');
   e('artifact-editor')?.classList.add('hidden');
   e('files-panel')?.classList.add('hidden');
   e('skills-panel')?.classList.add('hidden');
@@ -3405,6 +3469,7 @@ function hasBlockingOverlay() {
     || isModalOpen('publish-snapshot-overlay')
     || isModalOpen('share-reference-overlay')
     || isModalOpen('provider-key-overlay')
+    || isModalOpen('status-event-overlay')
   );
 }
 
@@ -3598,6 +3663,7 @@ function getWorkspaceTransportItems(ref = getActiveReference()) {
   const mailTabs = tabs.filter((tab) => String((tab && tab.tab_kind) || '').trim().toLowerCase() === 'mail');
   const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
   return [
+    { kind: 'status', id: STATUS_SURFACE_ID },
     ...webTabs.map((tab) => ({ kind: 'web', id: String((tab && tab.id) || '').trim() })),
     ...filesTabs.map((tab) => ({ kind: 'files', id: String((tab && tab.id) || '').trim() })),
     ...skillsTabs.map((tab) => ({ kind: 'skills', id: String((tab && tab.id) || '').trim() })),
@@ -3612,6 +3678,7 @@ function getActiveWorkspaceTransportIndex(items = getWorkspaceTransportItems()) 
     ? String(state.activeSurface.tabId || (getActiveWebTab(getActiveReference()) && getActiveWebTab(getActiveReference()).id) || '').trim()
     : '';
   const activeIdByKind = {
+    status: STATUS_SURFACE_ID,
     web: activeWebId,
     files: String(state.activeSurface.filesTabId || '').trim(),
     skills: String(state.activeSurface.skillsTabId || '').trim(),
@@ -3625,6 +3692,13 @@ async function activateWorkspaceTransportItem(item) {
   const next = (item && typeof item === 'object') ? item : null;
   if (!next || !next.id || !state.activeSrId) return false;
   const replayMode = isMemoryReplayActive();
+  if (next.kind === 'status') {
+    state.activeSurface = makeActiveSurface('status');
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    renderWorkspaceTabs();
+    await syncActiveSurface();
+    return true;
+  }
   if (next.kind === 'web') {
     if (replayMode) {
       state.activeSurface = makeActiveSurface('web', { tabId: next.id });
@@ -3705,6 +3779,11 @@ async function closeActiveWorkspaceTab() {
 
   const refBeforeClose = getActiveReference();
   if (!refBeforeClose) return false;
+
+  if (state.activeSurface.kind === 'status') {
+    showPassiveNotification('Status is pinned.');
+    return true;
+  }
 
   if (state.activeSurface.kind === 'artifact') {
     return removeActiveArtifactFromCommand();
@@ -4462,6 +4541,617 @@ function refreshActiveHtmlArtifactRuntime() {
   ensureHtmlArtifactRuntime(artifact, source, { force: true, focus: true, focusReason: 'runtime-refresh-button' });
 }
 
+function startOfDashboardMonth(date = new Date()) {
+  const next = new Date(date);
+  next.setDate(1);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function ensureDashboardCalendarCursor() {
+  const raw = String((state.dashboard && state.dashboard.calendarCursor) || '').trim();
+  if (/^\d{4}-\d{2}-01$/.test(raw)) return raw;
+  const cursor = startOfDashboardMonth(new Date());
+  const value = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-01`;
+  state.dashboard.calendarCursor = value;
+  return value;
+}
+
+function getDashboardCalendarDate() {
+  const raw = ensureDashboardCalendarCursor();
+  const parts = raw.split('-').map((item) => Number(item || 0));
+  return new Date(parts[0], Math.max(0, parts[1] - 1), 1);
+}
+
+function setDashboardCalendarDate(date = new Date()) {
+  const next = startOfDashboardMonth(date);
+  state.dashboard.calendarCursor = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+function formatStatusMonthLabel(date = new Date()) {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'long',
+    year: 'numeric',
+  }).format(date);
+}
+
+function formatStatusClockParts(now = new Date()) {
+  const timeText = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(now);
+  const match = timeText.match(/^(.+)\s([AP]M)$/i);
+  return {
+    time: match ? String(match[1] || '').trim() : timeText,
+    meridiem: match ? String(match[2] || '').toUpperCase() : '',
+    date: new Intl.DateTimeFormat('en-US', {
+      weekday: 'long',
+      month: 'short',
+      day: 'numeric',
+    }).format(now),
+  };
+}
+
+function clampRatio(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.max(0, Math.min(1, num));
+}
+
+function buildPeriodBounds(kind, now = new Date()) {
+  const current = new Date(now);
+  const start = new Date(now);
+  const end = new Date(now);
+  if (kind === 'day') {
+    start.setHours(0, 0, 0, 0);
+    end.setHours(24, 0, 0, 0);
+  } else if (kind === 'week') {
+    const weekday = (current.getDay() + 6) % 7;
+    start.setDate(current.getDate() - weekday);
+    start.setHours(0, 0, 0, 0);
+    end.setTime(start.getTime());
+    end.setDate(start.getDate() + 7);
+  } else if (kind === 'month') {
+    start.setDate(1);
+    start.setHours(0, 0, 0, 0);
+    end.setTime(start.getTime());
+    end.setMonth(start.getMonth() + 1);
+  } else {
+    start.setMonth(0, 1);
+    start.setHours(0, 0, 0, 0);
+    end.setTime(start.getTime());
+    end.setFullYear(start.getFullYear() + 1);
+  }
+  return {
+    start: start.getTime(),
+    end: end.getTime(),
+    now: current.getTime(),
+  };
+}
+
+function accumulateDayNightMs(startMs, endMs) {
+  let cursor = Number(startMs || 0);
+  const target = Number(endMs || 0);
+  let dayMs = 0;
+  let nightMs = 0;
+  while (cursor < target) {
+    const base = new Date(cursor);
+    base.setHours(0, 0, 0, 0);
+    const midnight = base.getTime();
+    const daylightStart = new Date(midnight);
+    daylightStart.setHours(6, 0, 0, 0);
+    const daylightEnd = new Date(midnight);
+    daylightEnd.setHours(18, 0, 0, 0);
+    const nextMidnight = new Date(midnight);
+    nextMidnight.setDate(nextMidnight.getDate() + 1);
+    [
+      { start: midnight, end: daylightStart.getTime(), type: 'night' },
+      { start: daylightStart.getTime(), end: daylightEnd.getTime(), type: 'day' },
+      { start: daylightEnd.getTime(), end: nextMidnight.getTime(), type: 'night' },
+    ].forEach((segment) => {
+      const segStart = Math.max(cursor, segment.start);
+      const segEnd = Math.min(target, segment.end);
+      if (segEnd <= segStart) return;
+      if (segment.type === 'day') dayMs += (segEnd - segStart);
+      else nightMs += (segEnd - segStart);
+    });
+    cursor = nextMidnight.getTime();
+  }
+  return { dayMs, nightMs };
+}
+
+function getStatusProgressItems(now = new Date()) {
+  return ['day', 'week', 'month', 'year'].map((kind) => {
+    const bounds = buildPeriodBounds(kind, now);
+    const total = Math.max(1, bounds.end - bounds.start);
+    const elapsed = Math.max(0, Math.min(bounds.now - bounds.start, total));
+    const split = accumulateDayNightMs(bounds.start, bounds.start + elapsed);
+    return {
+      key: kind,
+      label: kind,
+      percent: clampRatio(elapsed / total),
+      dayRatio: clampRatio(split.dayMs / total),
+      nightRatio: clampRatio(split.nightMs / total),
+    };
+  });
+}
+
+function formatStatusPercent(value) {
+  return `${Math.round(clampRatio(value) * 100)}%`;
+}
+
+function formatStatusEventMeta(event = {}) {
+  const date = String((event && event.date) || '').trim();
+  const time = String((event && event.time) || '').trim();
+  const [year, month, day] = date.split('-').map((item) => Number(item || 0));
+  const parsed = (year && month && day) ? new Date(year, month - 1, day) : new Date();
+  const dateLabel = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+  }).format(parsed);
+  if (!time) return dateLabel;
+  const clock = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(new Date(`${date}T${time}:00`));
+  return `${dateLabel} ${clock}`;
+}
+
+function getDashboardUpcomingEvents(limit = 6) {
+  const now = Date.now();
+  return (Array.isArray(state.dashboard.events) ? state.dashboard.events : [])
+    .map((event) => ({
+      ...event,
+      sortTs: Date.parse(`${String(event.date || '').trim()}T${String(event.time || '23:59').trim() || '23:59'}:00`),
+    }))
+    .filter((event) => Number.isFinite(event.sortTs) && event.sortTs >= now - (60 * 1000))
+    .sort((a, b) => Number(a.sortTs || 0) - Number(b.sortTs || 0))
+    .slice(0, limit);
+}
+
+function getDashboardEventsByDate() {
+  const out = new Map();
+  (Array.isArray(state.dashboard.events) ? state.dashboard.events : []).forEach((event) => {
+    const key = String((event && event.date) || '').trim();
+    if (!key) return;
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(event);
+  });
+  out.forEach((items) => {
+    items.sort((a, b) => String((a && a.time) || '').localeCompare(String((b && b.time) || '')));
+  });
+  return out;
+}
+
+function renderStatusClockAndBars() {
+  const clockNode = e('status-clock');
+  const barsNode = e('status-progress-bars');
+  if (!clockNode || !barsNode) return;
+  const parts = formatStatusClockParts(new Date());
+  clockNode.innerHTML = `
+    <div class="status-clock-time">${escapeHtml(parts.time)}</div>
+    <div class="status-clock-meridiem">${escapeHtml(parts.meridiem)}</div>
+    <div class="status-clock-date muted">${escapeHtml(parts.date)}</div>
+  `;
+  const segmentCount = 24;
+  barsNode.innerHTML = getStatusProgressItems(new Date()).map((item) => {
+    const dayCount = Math.round(clampRatio(item.dayRatio) * segmentCount);
+    const nightCount = Math.round(clampRatio(item.nightRatio) * segmentCount);
+    return `
+      <div class="status-progress-item">
+        <div class="status-progress-head">
+          <span class="status-progress-label">${escapeHtml(item.label)}</span>
+          <span class="status-progress-value">${escapeHtml(formatStatusPercent(item.percent))}</span>
+        </div>
+        <div class="status-progress-lanes">
+          <div class="status-progress-lane status-progress-lane-day">
+            ${Array.from({ length: segmentCount }, (_unused, index) => `<span class="status-progress-segment${index < dayCount ? ' active' : ''}"></span>`).join('')}
+          </div>
+          <div class="status-progress-lane status-progress-lane-night">
+            ${Array.from({ length: segmentCount }, (_unused, index) => `<span class="status-progress-segment${index < nightCount ? ' active' : ''}"></span>`).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderStatusCalendarPanel() {
+  const header = e('status-calendar-label');
+  const grid = e('status-calendar-grid');
+  const upcoming = e('status-upcoming-list');
+  if (!header || !grid || !upcoming) return;
+  const cursor = getDashboardCalendarDate();
+  const cursorMonth = cursor.getMonth();
+  const eventsByDate = getDashboardEventsByDate();
+  header.textContent = formatStatusMonthLabel(cursor);
+
+  const weekdayOffset = (cursor.getDay() + 6) % 7;
+  const gridStart = new Date(cursor);
+  gridStart.setDate(cursor.getDate() - weekdayOffset);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const weekdayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
+    .map((label) => `<div class="status-calendar-weekday muted">${label}</div>`)
+    .join('');
+
+  const dayCells = Array.from({ length: 42 }, (_unused, index) => {
+    const day = new Date(gridStart);
+    day.setDate(gridStart.getDate() + index);
+    day.setHours(0, 0, 0, 0);
+    const iso = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+    const events = eventsByDate.get(iso) || [];
+    const isCurrentMonth = day.getMonth() === cursorMonth;
+    const isToday = day.getTime() === today.getTime();
+    return `
+      <button type="button" class="status-calendar-day${isCurrentMonth ? '' : ' is-outside'}${isToday ? ' is-today' : ''}${events.length ? ' has-event' : ''}" data-status-date="${iso}">
+        <span class="status-calendar-day-number">${day.getDate()}</span>
+        <span class="status-calendar-day-markers">${events.slice(0, 3).map(() => '<span></span>').join('')}</span>
+      </button>
+    `;
+  }).join('');
+
+  grid.innerHTML = `
+    <div class="status-calendar-weekdays">${weekdayLabels}</div>
+    <div class="status-calendar-days">${dayCells}</div>
+  `;
+
+  const upcomingItems = getDashboardUpcomingEvents();
+  upcoming.innerHTML = upcomingItems.length
+    ? upcomingItems.map((event) => `
+      <div class="status-upcoming-item">
+        <button type="button" class="status-upcoming-main" data-status-date="${escapeHtml(String((event && event.date) || '').trim())}">
+          <span class="status-upcoming-title">${escapeHtml(String((event && event.title) || 'Event'))}</span>
+          <span class="status-upcoming-meta muted">${escapeHtml(formatStatusEventMeta(event))}</span>
+        </button>
+        <button type="button" class="status-upcoming-delete" data-status-delete-event="${escapeHtml(String((event && event.id) || '').trim())}" aria-label="Delete event">×</button>
+      </div>
+    `).join('')
+    : '<div class="status-empty muted">No events.</div>';
+}
+
+function renderStatusNotifications() {
+  const node = e('status-notifications-list');
+  if (!node) return;
+  const items = Array.isArray(state.dashboard.notifications) ? state.dashboard.notifications : [];
+  node.innerHTML = items.length
+    ? items.map((item) => `
+      <button type="button" class="status-notification-item${item && item.unread ? ' unread' : ''}" data-status-notification-id="${escapeHtml(String((item && item.id) || '').trim())}">
+        <div class="status-notification-head">
+          <span class="status-notification-source">${escapeHtml(String((item && item.source) || ''))}</span>
+          <span class="status-notification-time muted">${Number((item && item.ts) || 0) > 0 ? escapeHtml(formatAgo(Number(item.ts || 0))) : ''}</span>
+        </div>
+        <div class="status-notification-title">${escapeHtml(String((item && item.title) || 'Untitled'))}</div>
+        <div class="status-notification-preview muted">${escapeHtml(String((item && item.preview) || ''))}</div>
+      </button>
+    `).join('')
+    : '<div class="status-empty muted">No notifications.</div>';
+}
+
+function renderStatusFeed() {
+  const filtersNode = e('status-rss-filters');
+  const listNode = e('status-rss-list');
+  const metaNode = e('status-rss-meta');
+  if (!filtersNode || !listNode || !metaNode) return;
+  const topics = Array.isArray(state.dashboard.rssTopics) && state.dashboard.rssTopics.length
+    ? state.dashboard.rssTopics
+    : ['all'];
+  const selected = String(state.dashboard.rssSelectedTopic || 'all').trim().toLowerCase() || 'all';
+  filtersNode.innerHTML = topics.map((topic) => `
+    <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(topic)}</button>
+  `).join('');
+  const refreshedAt = Number(state.dashboard.rssLastRefreshedAt || 0);
+  metaNode.textContent = refreshedAt > 0 ? `Updated ${formatAgo(refreshedAt)}` : 'Waiting for feed.';
+  const items = Array.isArray(state.dashboard.rssItems) ? state.dashboard.rssItems : [];
+  listNode.innerHTML = items.length
+    ? items.map((item) => `
+      <button type="button" class="status-rss-item" data-status-rss-url="${escapeHtml(String((item && item.url) || '').trim())}" data-status-rss-title="${escapeHtml(String((item && item.title) || '').trim())}">
+        <div class="status-rss-item-head">
+          <span class="status-rss-source">${escapeHtml(String((item && item.source_name) || (item && item.source_domain) || 'feed'))}</span>
+          <span class="status-rss-time muted">${Number((item && item.published_at) || 0) > 0 ? escapeHtml(formatAgo(Number(item.published_at || 0))) : ''}</span>
+        </div>
+        <div class="status-rss-title">${escapeHtml(String((item && item.title) || 'Untitled'))}</div>
+        <div class="status-rss-summary muted">${escapeHtml(String((item && item.summary) || ''))}</div>
+      </button>
+    `).join('')
+    : '<div class="status-empty muted">No feed items.</div>';
+}
+
+function renderStatusSurface() {
+  renderStatusClockAndBars();
+  renderStatusCalendarPanel();
+  renderStatusNotifications();
+  renderStatusFeed();
+}
+
+async function refreshStatusData(options = {}) {
+  if (!api.dashboardGet || state.dashboard.refreshPending) return;
+  state.dashboard.refreshPending = true;
+  try {
+    if (options.forceFeeds && api.dashboardRefreshFeeds) {
+      await api.dashboardRefreshFeeds(String(state.dashboard.rssSelectedTopic || 'all').trim(), 80);
+    }
+    const stateRes = await api.dashboardGet();
+    if (stateRes && stateRes.ok && stateRes.state) {
+      const dashboardState = stateRes.state || {};
+      state.dashboard.events = Array.isArray(dashboardState.events) ? dashboardState.events : [];
+      state.dashboard.rssSources = Array.isArray(dashboardState.rss && dashboardState.rss.sources) ? dashboardState.rss.sources : [];
+      state.dashboard.rssTopics = Array.isArray(dashboardState.rss && dashboardState.rss.topics) ? dashboardState.rss.topics : ['all'];
+      state.dashboard.rssSelectedTopic = String(((dashboardState.filters || {}).selected_topic) || 'all').trim().toLowerCase() || 'all';
+      state.dashboard.rssLastRefreshedAt = Number(((dashboardState.rss || {}).last_refreshed_at) || 0);
+      state.dashboard.rssItems = Array.isArray(stateRes.feed_items) ? stateRes.feed_items : [];
+      if (!String(state.dashboard.calendarCursor || '').trim()) ensureDashboardCalendarCursor();
+      state.dashboard.loaded = true;
+    }
+    if (options.notifications !== false && api.dashboardListNotifications) {
+      const notificationsRes = await api.dashboardListNotifications(30);
+      state.dashboard.notifications = (notificationsRes && notificationsRes.ok && Array.isArray(notificationsRes.items))
+        ? notificationsRes.items
+        : [];
+    }
+  } finally {
+    state.dashboard.refreshPending = false;
+  }
+  renderStatusSurface();
+}
+
+async function openStatusFeedItem(url, title = '') {
+  const targetUrl = String(url || '').trim();
+  if (!targetUrl || !state.activeSrId) return;
+  const res = await api.srAddTab(state.activeSrId, {
+    url: targetUrl,
+    title: String(title || targetUrl).trim() || targetUrl,
+  });
+  if (!res || !res.ok) {
+    showPassiveNotification((res && res.message) || 'Unable to open feed item.');
+    return;
+  }
+  state.references = res.references || state.references;
+  const activeTabId = String(((res.reference && res.reference.active_tab_id) || '')).trim();
+  state.activeSurface = makeActiveSurface('web', activeTabId ? { tabId: activeTabId } : {});
+  rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+  renderReferences();
+  renderWorkspaceTabs();
+  renderContextFiles();
+  renderDiffPanel();
+  await syncActiveSurface();
+}
+
+async function openStatusMailNotification(payload = {}) {
+  const viewId = GLOBAL_MAIL_VIEW_ID;
+  const threadId = String((payload && payload.thread_id) || '').trim();
+  await openMailPage();
+  setMailNavState(viewId, {
+    account_id: String((payload && payload.account_id) || '').trim(),
+    mailbox_path: '',
+    smart_view: String((payload && payload.smart_view) || '').trim(),
+  });
+  state.mailSearchResultsByRef.delete(resolveMailStateId(viewId));
+  if (threadId) {
+    const previewRes = await api.mailPreviewSource(threadId);
+    if (previewRes && previewRes.ok && previewRes.thread) {
+      setMailPreviewState(viewId, { thread_id: threadId, thread: previewRes.thread });
+    }
+  }
+  await runMailSearch(viewId, getMailSearchState(viewId).query || '');
+  await renderGlobalMailPage();
+}
+
+async function openStatusHyperwebNotification(payload = {}) {
+  const mode = String((payload && payload.mode) || '').trim().toLowerCase();
+  await setAppView('hyperweb');
+  if (mode === 'dm' || mode === 'room') {
+    state.hyperwebChatMode = mode === 'room' ? 'room' : 'dm';
+    state.hyperwebChatPeerId = state.hyperwebChatMode === 'dm'
+      ? String((payload && payload.peer_id) || '').trim()
+      : '';
+    state.hyperwebChatRoomId = state.hyperwebChatMode === 'room'
+      ? String((payload && payload.room_id) || '').trim()
+      : '';
+    await setHyperwebSurfaceTab('chat', { skipRefresh: true });
+    await refreshHyperwebChatData();
+    return;
+  }
+  await setHyperwebSurfaceTab('feed');
+}
+
+function openStatusEventModal(date = '') {
+  const overlay = e('status-event-overlay');
+  const titleInput = e('status-event-title-input');
+  const dateInput = e('status-event-date-input');
+  const timeInput = e('status-event-time-input');
+  const statusNode = e('status-event-modal-status');
+  if (!overlay || !titleInput || !dateInput || !timeInput || !statusNode) return;
+  const defaultDate = String(date || '').trim() || (() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  })();
+  state.dashboard.modal = {
+    title: '',
+    date: defaultDate,
+    time: '',
+    status: '',
+  };
+  titleInput.value = '';
+  dateInput.value = defaultDate;
+  timeInput.value = '';
+  statusNode.textContent = '';
+  overlay.classList.remove('hidden');
+  titleInput.focus();
+}
+
+function closeStatusEventModal() {
+  const overlay = e('status-event-overlay');
+  const statusNode = e('status-event-modal-status');
+  if (overlay) overlay.classList.add('hidden');
+  if (statusNode) statusNode.textContent = '';
+}
+
+async function saveStatusEventFromModal() {
+  if (!api.dashboardSaveEvent) return;
+  const titleInput = e('status-event-title-input');
+  const dateInput = e('status-event-date-input');
+  const timeInput = e('status-event-time-input');
+  const statusNode = e('status-event-modal-status');
+  const title = String((titleInput && titleInput.value) || '').trim();
+  const date = String((dateInput && dateInput.value) || '').trim();
+  const time = String((timeInput && timeInput.value) || '').trim();
+  if (!title || !date) {
+    if (statusNode) statusNode.textContent = 'Title and date are required.';
+    return;
+  }
+  const res = await api.dashboardSaveEvent({ title, date, time });
+  if (!res || !res.ok) {
+    if (statusNode) statusNode.textContent = (res && res.message) || 'Unable to save event.';
+    return;
+  }
+  state.dashboard.events = Array.isArray(res.events) ? res.events : state.dashboard.events;
+  closeStatusEventModal();
+  renderStatusCalendarPanel();
+}
+
+async function deleteStatusEvent(eventId = '') {
+  const id = String(eventId || '').trim();
+  if (!id || !api.dashboardDeleteEvent) return;
+  const res = await api.dashboardDeleteEvent(id);
+  if (!res || !res.ok) {
+    showPassiveNotification((res && res.message) || 'Unable to delete event.');
+    return;
+  }
+  state.dashboard.events = Array.isArray(res.events) ? res.events : [];
+  renderStatusCalendarPanel();
+}
+
+async function setStatusFeedTopic(topic = 'all') {
+  const next = String(topic || 'all').trim().toLowerCase() || 'all';
+  if (api.dashboardSetFilter) {
+    const res = await api.dashboardSetFilter(next);
+    if (res && res.ok) state.dashboard.rssSelectedTopic = String(res.selected_topic || next).trim().toLowerCase() || 'all';
+  } else {
+    state.dashboard.rssSelectedTopic = next;
+  }
+  if (api.dashboardListFeedItems) {
+    const res = await api.dashboardListFeedItems(state.dashboard.rssSelectedTopic, 80);
+    if (res && res.ok) {
+      state.dashboard.rssItems = Array.isArray(res.items) ? res.items : [];
+      state.dashboard.rssLastRefreshedAt = Number(res.last_refreshed_at || state.dashboard.rssLastRefreshedAt || 0);
+      state.dashboard.rssTopics = Array.isArray(res.topics) ? res.topics : state.dashboard.rssTopics;
+    }
+  }
+  renderStatusFeed();
+}
+
+function bindStatusSurfaceEvents() {
+  e('status-calendar-prev-btn')?.addEventListener('click', () => {
+    const next = getDashboardCalendarDate();
+    next.setMonth(next.getMonth() - 1);
+    setDashboardCalendarDate(next);
+    renderStatusCalendarPanel();
+  });
+  e('status-calendar-next-btn')?.addEventListener('click', () => {
+    const next = getDashboardCalendarDate();
+    next.setMonth(next.getMonth() + 1);
+    setDashboardCalendarDate(next);
+    renderStatusCalendarPanel();
+  });
+  e('status-calendar-grid')?.addEventListener('click', (event) => {
+    const button = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('button[data-status-date]')
+      : null;
+    if (!button) return;
+    const date = String(button.getAttribute('data-status-date') || '').trim();
+    if (!date) return;
+    const [year, month] = date.split('-').map((item) => Number(item || 0));
+    if (year && month) setDashboardCalendarDate(new Date(year, month - 1, 1));
+    renderStatusCalendarPanel();
+    openStatusEventModal(date);
+  });
+  e('status-upcoming-list')?.addEventListener('click', async (event) => {
+    const deleteButton = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('button[data-status-delete-event]')
+      : null;
+    if (deleteButton) {
+      const eventId = String(deleteButton.getAttribute('data-status-delete-event') || '').trim();
+      if (eventId) await deleteStatusEvent(eventId);
+      return;
+    }
+    const openButton = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('button[data-status-date]')
+      : null;
+    if (!openButton) return;
+    const date = String(openButton.getAttribute('data-status-date') || '').trim();
+    if (date) openStatusEventModal(date);
+  });
+  e('status-notifications-list')?.addEventListener('click', async (event) => {
+    const button = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('button[data-status-notification-id]')
+      : null;
+    if (!button) return;
+    const id = String(button.getAttribute('data-status-notification-id') || '').trim();
+    const item = (Array.isArray(state.dashboard.notifications) ? state.dashboard.notifications : []).find((entry) => String((entry && entry.id) || '') === id);
+    if (!item) return;
+    if (String((item && item.source) || '').trim() === 'mail') {
+      await openStatusMailNotification(item.payload || {});
+      return;
+    }
+    await openStatusHyperwebNotification(item.payload || {});
+  });
+  e('status-rss-filters')?.addEventListener('click', async (event) => {
+    const button = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('button[data-status-topic]')
+      : null;
+    if (!button) return;
+    const topic = String(button.getAttribute('data-status-topic') || '').trim();
+    if (topic) await setStatusFeedTopic(topic);
+  });
+  e('status-rss-list')?.addEventListener('click', async (event) => {
+    const button = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('button[data-status-rss-url]')
+      : null;
+    if (!button) return;
+    const url = String(button.getAttribute('data-status-rss-url') || '').trim();
+    const title = String(button.getAttribute('data-status-rss-title') || '').trim();
+    if (url) await openStatusFeedItem(url, title);
+  });
+}
+
+function ensureStatusTimers() {
+  if (!statusClockTimer) {
+    statusClockTimer = window.setInterval(() => {
+      if (state.appView === 'workspace' && state.activeSurface.kind === 'status') {
+        renderStatusClockAndBars();
+      }
+    }, 1000);
+  }
+  if (!statusRefreshTimer) {
+    statusRefreshTimer = window.setInterval(() => {
+      if (state.appView === 'workspace' && state.activeSurface.kind === 'status') {
+        refreshStatusData({ notifications: true }).catch(() => {});
+      }
+    }, 60 * 1000);
+  }
+}
+
+async function showStatusSurface() {
+  resetHtmlArtifactCodeViews();
+  stopHtmlArtifactRuntime();
+  await api.hide();
+  hideNonWebSurfaces();
+  e('browser-placeholder')?.classList.add('hidden');
+  e('status-panel')?.classList.remove('hidden');
+  if (!state.dashboard.loaded) {
+    await refreshStatusData({ notifications: true });
+  } else {
+    renderStatusSurface();
+    void refreshStatusData({ notifications: true });
+  }
+  await syncUrlBarForActiveSurface();
+  await api.markerSetContext({ srId: state.activeSrId, artifactId: null });
+}
+
 async function showWebSurface(tab) {
   if (!tab) return;
   resetHtmlArtifactCodeViews();
@@ -4550,6 +5240,7 @@ async function showArtifactSurface(artifactId) {
 
   await api.hide();
   e('browser-placeholder')?.classList.add('hidden');
+  e('status-panel')?.classList.add('hidden');
   e('files-panel')?.classList.add('hidden');
   e('skills-panel')?.classList.add('hidden');
   e('mail-panel')?.classList.add('hidden');
@@ -4803,6 +5494,7 @@ async function showFilesSurface(tabId) {
 
   await api.hide();
   e('browser-placeholder')?.classList.add('hidden');
+  e('status-panel')?.classList.add('hidden');
   e('artifact-editor')?.classList.add('hidden');
   e('skills-panel')?.classList.add('hidden');
   e('mail-panel')?.classList.add('hidden');
@@ -4966,6 +5658,7 @@ async function showSkillsSurface(tabId) {
 
   await api.hide();
   e('browser-placeholder')?.classList.add('hidden');
+  e('status-panel')?.classList.add('hidden');
   e('artifact-editor')?.classList.add('hidden');
   e('files-panel')?.classList.add('hidden');
   e('mail-panel')?.classList.add('hidden');
@@ -6444,6 +7137,7 @@ async function showMailSurface(tabId) {
 
   await api.hide();
   e('browser-placeholder')?.classList.add('hidden');
+  e('status-panel')?.classList.add('hidden');
   e('artifact-editor')?.classList.add('hidden');
   e('files-panel')?.classList.add('hidden');
   e('skills-panel')?.classList.add('hidden');
@@ -6491,8 +7185,11 @@ async function syncActiveSurface() {
   const rememberedFilesTabId = String(state.activeFilesByRef.get(String(ref.id || '')) || '').trim();
   const rememberedSkillsTabId = String(state.activeSkillsByRef.get(String(ref.id || '')) || '').trim();
   const rememberedMailTabId = String(state.activeMailByRef.get(String(ref.id || '')) || '').trim();
+  const rememberedSpecialSurface = String(state.activeSpecialSurfaceByRef.get(String(ref.id || '')) || '').trim().toLowerCase();
   if (state.activeSurface.kind === 'web') {
-    if (rememberedArtifactId) {
+    if (rememberedSpecialSurface === 'status') {
+      state.activeSurface = makeActiveSurface('status');
+    } else if (rememberedArtifactId) {
       state.activeSurface = makeActiveSurface('artifact', { artifactId: rememberedArtifactId });
     } else if (rememberedFilesTabId) {
       state.activeSurface = makeActiveSurface('files', { filesTabId: rememberedFilesTabId });
@@ -6501,6 +7198,12 @@ async function syncActiveSurface() {
     } else if (rememberedMailTabId) {
       state.activeSurface = makeActiveSurface('mail', { mailTabId: rememberedMailTabId });
     }
+  }
+
+  if (state.activeSurface.kind === 'status') {
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+    await showStatusSurface();
+    return;
   }
 
   if (state.activeSurface.kind === 'artifact') {
@@ -6588,10 +7291,9 @@ async function syncActiveSurface() {
     return;
   }
 
-  await api.hide();
-  hideNonWebSurfaces();
-  e('browser-placeholder')?.classList.remove('hidden');
-  await syncUrlBarForActiveSurface();
+  state.activeSurface = makeActiveSurface('status');
+  rememberSurfaceForReference(state.activeSrId, state.activeSurface);
+  await showStatusSurface();
 }
 
 function renderContextFiles() {
@@ -12604,6 +13306,17 @@ function bindControls() {
     await clearChatAndAutoForkCurrentReference();
   });
 
+  bindStatusSurfaceEvents();
+  e('status-event-save-btn')?.addEventListener('click', async () => {
+    await saveStatusEventFromModal();
+  });
+  e('status-event-cancel-btn')?.addEventListener('click', () => {
+    closeStatusEventModal();
+  });
+  e('status-event-overlay')?.addEventListener('click', (event) => {
+    if (event.target && event.target.id === 'status-event-overlay') closeStatusEventModal();
+  });
+
   const updateBounds = async () => {
     if (state.activeSurface.kind !== 'web') return;
     const bounds = await computeBrowserBounds();
@@ -12711,6 +13424,8 @@ async function initialize() {
 
   if (state.references.length > 0) {
     state.activeSrId = String((state.references[0] && state.references[0].id) || '').trim();
+    state.activeSurface = restoreSurfaceForReference(getReferenceById(state.activeSrId));
+    rememberSurfaceForReference(state.activeSrId, state.activeSurface);
   }
 
   renderReferences();
@@ -12735,6 +13450,7 @@ async function initialize() {
   await refreshTopbarBadges();
   await loadChatThread();
   await loadProgramEditorForActiveReference();
+  ensureStatusTimers();
   await syncActiveSurface();
   await refreshUncommittedActionCue();
   setChatBusy(false);

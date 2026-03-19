@@ -102,6 +102,47 @@
           <p>Open a web tab or artifact to begin.</p>
         </div>
 
+        <section id="status-panel" class="status-panel hidden">
+          <div class="status-grid">
+            <section class="status-section status-left">
+              <div class="status-block status-clock-block">
+                <div id="status-clock" class="status-clock"></div>
+              </div>
+              <div class="status-block status-progress-block">
+                <div id="status-progress-bars" class="status-progress-bars"></div>
+              </div>
+            </section>
+
+            <section class="status-section status-middle">
+              <div class="status-block status-calendar-block">
+                <div class="status-block-head">
+                  <button id="status-calendar-prev-btn" type="button" aria-label="Previous month">‹</button>
+                  <div id="status-calendar-label" class="status-block-title">Month</div>
+                  <button id="status-calendar-next-btn" type="button" aria-label="Next month">›</button>
+                </div>
+                <div id="status-calendar-grid" class="status-calendar-grid"></div>
+                <div id="status-upcoming-list" class="status-upcoming-list"></div>
+              </div>
+              <div class="status-block status-notifications-block">
+                <div class="status-block-head">
+                  <div class="status-block-title">Notifications</div>
+                </div>
+                <div id="status-notifications-list" class="status-scroll-list"></div>
+              </div>
+            </section>
+
+            <section class="status-section status-right">
+              <div class="status-block status-rss-block">
+                <div class="status-block-head status-rss-head">
+                  <div id="status-rss-filters" class="status-rss-filters"></div>
+                  <div id="status-rss-meta" class="muted small"></div>
+                </div>
+                <div id="status-rss-list" class="status-scroll-list status-rss-list"></div>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section id="artifact-editor" class="artifact-editor hidden">
           <div class="artifact-header">
             <strong id="artifact-title">Artifact</strong>
@@ -1136,6 +1177,26 @@
       <div class="modal-footer">
         <button id="provider-key-modal-cancel-btn">Cancel</button>
         <button id="provider-key-modal-save-btn">Save Key</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="status-event-overlay" class="modal-overlay hidden">
+    <div class="modal-card action-modal status-event-modal-card">
+      <h2>Event</h2>
+      <label class="settings-field">Title
+        <input id="status-event-title-input" type="text" placeholder="Brief event" />
+      </label>
+      <label class="settings-field">Date
+        <input id="status-event-date-input" type="date" />
+      </label>
+      <label class="settings-field">Time
+        <input id="status-event-time-input" type="time" />
+      </label>
+      <div id="status-event-modal-status" class="muted small"></div>
+      <div class="modal-footer">
+        <button id="status-event-cancel-btn">Cancel</button>
+        <button id="status-event-save-btn">Save</button>
       </div>
     </div>
   </div>

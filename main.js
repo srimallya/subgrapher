@@ -48,6 +48,7 @@ const { parseEmailFile } = require('./runtime/mail_local');
 const { computeMailConversationKey, parseRawEmailText } = require('./runtime/mail_parser');
 const { refreshGoogleAccessToken, startGoogleMailOAuthFlow } = require('./runtime/mail_google_oauth');
 const { createMailStore } = require('./runtime/mail_store');
+const { createDashboardStore } = require('./runtime/dashboard_store');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -276,6 +277,7 @@ let orchestratorUsersStore = null;
 let orchestratorPreferencesStore = null;
 let mailStore = null;
 let mailSyncManager = null;
+let dashboardStore = null;
 const pathBMetrics = {
   pathb_reuse_count: 0,
   pathb_create_count: 0,
@@ -5875,6 +5877,127 @@ function getOrchestratorJobsStore() {
     });
   }
   return orchestratorJobsStore;
+}
+
+function getDashboardStore() {
+  if (!dashboardStore) {
+    dashboardStore = createDashboardStore({
+      userDataPath: app.getPath('userData'),
+    });
+  }
+  return dashboardStore;
+}
+
+async function listDashboardNotifications(options = {}) {
+  const limit = Math.max(1, Math.min(60, Number(options.limit || 30)));
+  const items = [];
+  const seen = new Set();
+  const settings = readSettings();
+
+  if (settings.mail_sync_enabled) {
+    const unreadRes = await getMailStore().searchThreads({
+      query: '',
+      limit: 12,
+      smart_view: 'unread',
+    }).catch(() => null);
+    const recentRes = await getMailStore().searchThreads({
+      query: '',
+      limit: 12,
+      smart_view: 'inbox',
+    }).catch(() => null);
+    const mailRows = [
+      ...(unreadRes && unreadRes.ok && Array.isArray(unreadRes.items) ? unreadRes.items : []),
+      ...(recentRes && recentRes.ok && Array.isArray(recentRes.items) ? recentRes.items : []),
+    ];
+    mailRows.forEach((row) => {
+      const threadId = String((row && row.id) || '').trim();
+      if (!threadId || seen.has(`mail:${threadId}`)) return;
+      seen.add(`mail:${threadId}`);
+      items.push({
+        id: `mail:${threadId}`,
+        source: 'mail',
+        type: 'mail_thread',
+        title: String((row && row.subject) || 'Untitled thread').trim() || 'Untitled thread',
+        preview: String((row && row.snippet) || '').trim(),
+        ts: Number((row && row.last_message_at) || 0),
+        unread: Number((row && row.unread_count) || 0) > 0,
+        payload: {
+          thread_id: threadId,
+          account_id: String((row && row.account_id) || '').trim(),
+          smart_view: Number((row && row.unread_count) || 0) > 0 ? 'unread' : 'inbox',
+        },
+      });
+    });
+  }
+
+  resolveHyperwebDmConversationSummaries().slice(0, 12).forEach((conversation) => {
+    const peerId = String((conversation && conversation.peer_id) || '').trim();
+    if (!peerId || seen.has(`hyperweb-dm:${peerId}`)) return;
+    seen.add(`hyperweb-dm:${peerId}`);
+    items.push({
+      id: `hyperweb-dm:${peerId}`,
+      source: 'hyperweb',
+      type: 'hyperweb_dm',
+      title: String((conversation && conversation.display_name) || peerId).trim() || peerId,
+      preview: String((conversation && conversation.last_message_text) || '').trim(),
+      ts: Number((conversation && conversation.last_message_ts) || 0),
+      unread: Number((conversation && conversation.unread_count) || 0) > 0,
+      payload: {
+        mode: 'dm',
+        peer_id: peerId,
+      },
+    });
+  });
+
+  const feed = buildHyperwebFeed({});
+  const postItems = [];
+  (Array.isArray(feed && feed.posts) ? feed.posts : []).slice(0, 20).forEach((post) => {
+    if (!post || post.status === 'hidden') return;
+    postItems.push({
+      id: `hyperweb-post:${String(post.post_id || '')}`,
+      source: 'hyperweb',
+      type: 'hyperweb_feed',
+      title: String(post.author_alias || post.author_fingerprint || 'Hyperweb').trim() || 'Hyperweb',
+      preview: String(post.body || '').replace(/\s+/g, ' ').trim(),
+      ts: Number(post.created_at || 0),
+      unread: false,
+      payload: {
+        surface: 'feed',
+        post_id: String(post.post_id || '').trim(),
+      },
+    });
+    (Array.isArray(post.replies) ? post.replies : []).forEach((reply) => {
+      if (!reply || reply.status === 'hidden') return;
+      postItems.push({
+        id: `hyperweb-reply:${String(reply.reply_id || '')}`,
+        source: 'hyperweb',
+        type: 'hyperweb_feed',
+        title: String(reply.author_alias || reply.author_fingerprint || 'Hyperweb').trim() || 'Hyperweb',
+        preview: String(reply.body || '').replace(/\s+/g, ' ').trim(),
+        ts: Number(reply.created_at || 0),
+        unread: false,
+        payload: {
+          surface: 'feed',
+          post_id: String(post.post_id || '').trim(),
+          reply_id: String(reply.reply_id || '').trim(),
+        },
+      });
+    });
+  });
+  postItems
+    .sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
+    .slice(0, 12)
+    .forEach((item) => {
+      if (!item.id || seen.has(item.id)) return;
+      seen.add(item.id);
+      items.push(item);
+    });
+
+  items.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  return {
+    ok: true,
+    items: items.slice(0, limit),
+  };
 }
 
 function resolveRuntimeProviderAndModel(input = {}, settings = readSettings()) {
@@ -21071,6 +21194,54 @@ ipcMain.handle('browser:mailStatus', async () => {
       ? 'Mail sync is disabled.'
       : `${accounts.length} mailbox account(s) configured.`,
   };
+});
+
+ipcMain.handle('browser:dashboardGet', async () => {
+  const store = getDashboardStore();
+  if (store.shouldRefreshFeeds()) {
+    await store.refreshFeeds({ force: true, limit: 80 }).catch(() => null);
+  }
+  const stateRes = store.getState();
+  const selectedTopic = String((((stateRes || {}).state || {}).filters || {}).selected_topic || 'all').trim().toLowerCase() || 'all';
+  const feedRes = store.listFeedItems({ topic: selectedTopic, limit: 80 });
+  return {
+    ok: true,
+    state: stateRes && stateRes.ok ? stateRes.state : { events: [], filters: { selected_topic: 'all' }, rss: { sources: [], topics: ['all'], last_refreshed_at: 0 } },
+    feed_items: Array.isArray(feedRes && feedRes.items) ? feedRes.items : [],
+  };
+});
+
+ipcMain.handle('browser:dashboardSaveEvent', async (_event, payload) => {
+  return getDashboardStore().saveEvent(payload || {});
+});
+
+ipcMain.handle('browser:dashboardDeleteEvent', async (_event, payload) => {
+  return getDashboardStore().deleteEvent(String((payload && payload.event_id) || '').trim());
+});
+
+ipcMain.handle('browser:dashboardSetFilter', async (_event, payload) => {
+  return getDashboardStore().setSelectedTopic(String((payload && payload.topic) || 'all').trim());
+});
+
+ipcMain.handle('browser:dashboardListFeedItems', async (_event, payload) => {
+  return getDashboardStore().listFeedItems({
+    topic: String((payload && payload.topic) || 'all').trim(),
+    limit: Number((payload && payload.limit) || 80),
+  });
+});
+
+ipcMain.handle('browser:dashboardRefreshFeeds', async (_event, payload) => {
+  return getDashboardStore().refreshFeeds({
+    force: true,
+    topic: String((payload && payload.topic) || 'all').trim(),
+    limit: Number((payload && payload.limit) || 80),
+  });
+});
+
+ipcMain.handle('browser:dashboardListNotifications', async (_event, payload) => {
+  return listDashboardNotifications({
+    limit: Number((payload && payload.limit) || 30),
+  });
 });
 
 ipcMain.handle('browser:mailSearchLocalThreads', async (_event, payload) => {

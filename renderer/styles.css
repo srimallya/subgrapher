@@ -964,6 +964,11 @@ summary:focus-visible {
   font-weight: 600;
 }
 
+.workspace-tab.workspace-tab-pinned {
+  width: 130px;
+  flex: 0 0 130px;
+}
+
 .workspace-tab[data-kind="artifact"],
 .workspace-tab[data-kind="files"],
 .workspace-tab[data-kind="skills"],
@@ -1052,6 +1057,7 @@ summary:focus-visible {
 }
 
 .artifact-editor,
+.status-panel,
 .files-panel,
 .skills-panel,
 .mail-panel {
@@ -1059,6 +1065,325 @@ summary:focus-visible {
   inset: 0;
   display: flex;
   flex-direction: column;
+}
+
+.status-panel {
+  padding: 14px;
+  background: #1d1d1d;
+}
+
+.status-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) 360px;
+  gap: 12px;
+}
+
+.status-section {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.status-block {
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #202020;
+}
+
+.status-left .status-clock-block {
+  padding: 16px 18px;
+}
+
+.status-left .status-progress-block {
+  flex: 1;
+  padding: 14px 12px;
+}
+
+.status-clock {
+  display: grid;
+  gap: 4px;
+}
+
+.status-clock-time,
+.status-clock-meridiem {
+  font-family: var(--font-mono);
+}
+
+.status-clock-time {
+  font-size: 34px;
+  line-height: 1;
+}
+
+.status-clock-meridiem {
+  font-size: 14px;
+  letter-spacing: 0.08em;
+}
+
+.status-clock-date {
+  font-size: 12px;
+}
+
+.status-progress-bars {
+  height: 100%;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.status-progress-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.status-progress-head {
+  display: grid;
+  gap: 2px;
+}
+
+.status-progress-label,
+.status-progress-value {
+  font-size: 12px;
+}
+
+.status-progress-lanes {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.status-progress-lane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 4px;
+}
+
+.status-progress-segment {
+  display: block;
+  flex: 1 1 0;
+  min-height: 6px;
+  border-radius: 999px;
+  background: #353535;
+}
+
+.status-progress-lane-day .status-progress-segment.active {
+  background: #b86a3a;
+}
+
+.status-progress-lane-night .status-progress-segment.active {
+  background: #7b6c60;
+}
+
+.status-middle .status-calendar-block,
+.status-right .status-rss-block,
+.status-middle .status-notifications-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.status-middle .status-calendar-block {
+  padding: 12px;
+}
+
+.status-middle .status-notifications-block,
+.status-right .status-rss-block {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+}
+
+.status-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.status-block-head button {
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.status-block-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.status-calendar-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.status-calendar-weekdays,
+.status-calendar-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.status-calendar-weekday {
+  text-align: center;
+  font-size: 11px;
+}
+
+.status-calendar-day {
+  min-height: 58px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #242424;
+}
+
+.status-calendar-day.is-outside {
+  color: #7e7a73;
+}
+
+.status-calendar-day.is-today {
+  border-color: #6a513e;
+  background: #2a241f;
+}
+
+.status-calendar-day.has-event .status-calendar-day-number {
+  color: #f0d4c3;
+}
+
+.status-calendar-day-number {
+  font-size: 12px;
+}
+
+.status-calendar-day-markers {
+  display: flex;
+  gap: 3px;
+}
+
+.status-calendar-day-markers span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.status-upcoming-list {
+  margin-top: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.status-upcoming-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid #2d2d2d;
+  padding-top: 8px;
+}
+
+.status-upcoming-main,
+.status-upcoming-delete {
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+.status-upcoming-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.status-upcoming-title,
+.status-notification-title,
+.status-rss-title {
+  font-size: 13px;
+}
+
+.status-upcoming-meta,
+.status-notification-preview,
+.status-rss-summary {
+  font-size: 12px;
+}
+
+.status-scroll-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.status-notification-item,
+.status-rss-item {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #242424;
+  padding: 10px;
+  text-align: left;
+}
+
+.status-notification-item.unread {
+  border-color: #5a4a3a;
+  background: #28221d;
+}
+
+.status-notification-head,
+.status-rss-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.status-notification-source,
+.status-rss-source {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.status-rss-head {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.status-rss-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.status-rss-filters button {
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.status-rss-filters button.active {
+  background: #2d261f;
+  border-color: #6a513e;
+}
+
+.status-empty {
+  padding: 8px 0;
+  font-size: 12px;
 }
 
 .artifact-header,
@@ -2520,6 +2845,10 @@ summary:focus-visible {
   width: min(560px, 95vw);
 }
 
+.status-event-modal-card {
+  width: min(360px, 92vw);
+}
+
 .context-preview-close {
   min-width: 34px;
 }
@@ -3103,6 +3432,16 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 @media (max-width: 980px) {
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-right .status-rss-block,
+  .status-middle .status-notifications-block,
+  .status-middle .status-calendar-block {
+    min-height: 320px;
+  }
+
   .mail-layout {
     flex-direction: column;
   }
