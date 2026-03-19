@@ -61,6 +61,97 @@ function htmlToText(html) {
     .trim();
 }
 
+function decodeHtmlEntities(value = '') {
+  return String(value || '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .replace(/&#(\d+);/g, (_match, code) => {
+      const num = Number(code || 0);
+      return Number.isFinite(num) ? String.fromCharCode(num) : '';
+    });
+}
+
+function extractHtmlTitle(html = '') {
+  const raw = String(html || '');
+  const ogMatch = raw.match(/<meta\b[^>]*(?:property|name)=["']og:title["'][^>]*content=["']([^"']+)["'][^>]*>/i);
+  if (ogMatch && ogMatch[1]) return decodeHtmlEntities(String(ogMatch[1] || '').trim());
+  const titleMatch = raw.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  if (titleMatch && titleMatch[1]) return decodeHtmlEntities(String(titleMatch[1] || '').replace(/\s+/g, ' ').trim());
+  const h1Match = raw.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  if (h1Match && h1Match[1]) {
+    return decodeHtmlEntities(String(h1Match[1] || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  }
+  return '';
+}
+
+async function fetchWebPagePreview(url, options = {}) {
+  const target = normalizeUrl(url);
+  if (!target) return { ok: false, fetch_status: 'invalid_url', message: 'A valid URL is required.' };
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+    ? Math.max(2_000, Math.min(30_000, Math.round(Number(options.timeoutMs))))
+    : 12_000;
+  const markdownFirst = options.markdownFirst !== false;
+  const maxChars = Number.isFinite(Number(options.maxChars))
+    ? Math.max(500, Math.min(60_000, Math.round(Number(options.maxChars))))
+    : 20_000;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timer = null;
+  if (controller) {
+    timer = setTimeout(() => {
+      try {
+        controller.abort();
+      } catch (_) {
+        // noop
+      }
+    }, timeoutMs);
+  }
+  try {
+    const res = await fetch(target, {
+      method: 'GET',
+      headers: {
+        'user-agent': 'Subgrapher-Lumino-Crawler/1.0',
+        accept: markdownFirst ? 'text/markdown, text/html;q=0.9, */*;q=0.1' : 'text/html, */*;q=0.1',
+      },
+      signal: controller ? controller.signal : undefined,
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        fetch_status: `http_${res.status}`,
+        message: `HTTP ${res.status}`,
+        url: target,
+      };
+    }
+    const body = await res.text();
+    const contentType = String(res.headers.get('content-type') || '').toLowerCase();
+    const markdown = contentType.includes('text/markdown') ? body : '';
+    const text = (markdown || htmlToText(body)).slice(0, maxChars);
+    const title = markdown ? '' : extractHtmlTitle(body);
+    return {
+      ok: true,
+      fetch_status: 'fetched',
+      url: target,
+      title,
+      markdown: markdown ? markdown.slice(0, maxChars) : '',
+      text,
+      content_type: contentType,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      fetch_status: controller && controller.signal && controller.signal.aborted ? 'timeout' : 'fetch_error',
+      message: String((err && err.message) || 'Unable to fetch page.'),
+      url: target,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 class LuminoCrawler extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -305,4 +396,7 @@ class LuminoCrawler extends EventEmitter {
 
 module.exports = {
   LuminoCrawler,
+  htmlToText,
+  extractHtmlTitle,
+  fetchWebPagePreview,
 };

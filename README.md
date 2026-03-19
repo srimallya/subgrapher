@@ -8,8 +8,8 @@ Subgrapher also works as:
 
 - a local-first AI workspace
 - a mail client
-- a decentralized knowledge and message sharing platform
 - a personal organizer for time and events
+- a decentralized knowledge and message sharing platform
 - a remote interface for reasoning over your work through Telegram with local models
 
 The project exists because I wanted a better way to share research with other people. It is open source and still in progress.
