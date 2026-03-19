@@ -9,6 +9,7 @@ Legacy pygame/viz tabs are removed from active runtime behavior.
 Image analysis is unified: active provider native vision is attempted first, then LM Studio fallback is used when needed.
 Hyperweb now runs as a pure P2P subsystem over Hyperswarm topics with durable trusted-peer inbox delivery for private traffic.
 Workspace surfaces currently include:
+- `status`
 - `web`
 - `artifact`
 - `files`
@@ -23,6 +24,18 @@ Where:
 - `type = "markdown" | "html"`
 
 ## Runtime UX
+### Status surface
+- A dedicated `status` workspace surface provides a compact overview layer for the active session.
+- The surface includes:
+  - a live clock tied to the local user time
+  - elapsed progress bars for day, week, month, and year
+  - a lightweight task list where checked items are removed
+  - a calendar with upcoming events and add/delete flows
+  - a notifications list that routes into Mail or Hyperweb targets
+  - a topic-filtered feed with search and open-in-reference behavior
+- Feed items open as new web tabs in the active reference.
+- Notifications are read as operational shortcuts, not passive display-only items.
+
 ### Markdown artifacts
 - Code/text editor with debounced autosave.
 - Existing markdown image preview behavior is preserved.
