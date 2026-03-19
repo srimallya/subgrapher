@@ -1406,7 +1406,8 @@ body.workspace-status-mode .nav-bar-main input {
 }
 
 .status-upcoming-meta,
-.status-notification-preview {
+.status-notification-preview,
+.status-rss-excerpt {
   font-size: 12px;
 }
 
@@ -1450,6 +1451,13 @@ body.workspace-status-mode .nav-bar-main input {
 
 .status-notification-preview {
   -webkit-line-clamp: 2;
+}
+
+.status-rss-excerpt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .status-notification-head,
@@ -3006,6 +3014,22 @@ body.workspace-status-mode .nav-bar-main input {
 
 .status-event-modal-card {
   width: min(520px, 92vw);
+}
+
+.status-feed-modal-card {
+  width: min(760px, 94vw);
+}
+
+.status-feed-modal-body {
+  margin-top: 10px;
+  max-height: 58vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #1d1d1d;
+  padding: 12px;
+  white-space: pre-wrap;
+  line-height: 1.5;
 }
 
 .context-preview-close {

@@ -5883,6 +5883,14 @@ function getDashboardStore() {
   if (!dashboardStore) {
     dashboardStore = createDashboardStore({
       userDataPath: app.getPath('userData'),
+      getEmbeddingConfig: () => {
+        const settings = readSettings();
+        const ragEmbedding = resolveRagEmbeddingSettings(settings);
+        return {
+          ...((ragEmbedding && ragEmbedding.config) || {}),
+          model: String((ragEmbedding && ragEmbedding.model) || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
+        };
+      },
     });
   }
   return dashboardStore;
@@ -21203,7 +21211,7 @@ ipcMain.handle('browser:dashboardGet', async () => {
   }
   const stateRes = store.getState();
   const selectedTopic = String((((stateRes || {}).state || {}).filters || {}).selected_topic || 'all').trim().toLowerCase() || 'all';
-  const feedRes = store.listFeedItems({ topic: selectedTopic, limit: 80 });
+  const feedRes = await store.listFeedItems({ topic: selectedTopic, limit: 80 });
   return {
     ok: true,
     state: stateRes && stateRes.ok ? stateRes.state : { events: [], tasks: [], filters: { selected_topic: 'all' }, rss: { sources: [], topics: ['all'], last_refreshed_at: 0 } },
@@ -21235,6 +21243,7 @@ ipcMain.handle('browser:dashboardListFeedItems', async (_event, payload) => {
   return getDashboardStore().listFeedItems({
     topic: String((payload && payload.topic) || 'all').trim(),
     limit: Number((payload && payload.limit) || 80),
+    query: String((payload && payload.query) || '').trim(),
   });
 });
 
@@ -21243,7 +21252,12 @@ ipcMain.handle('browser:dashboardRefreshFeeds', async (_event, payload) => {
     force: true,
     topic: String((payload && payload.topic) || 'all').trim(),
     limit: Number((payload && payload.limit) || 80),
+    query: String((payload && payload.query) || '').trim(),
   });
+});
+
+ipcMain.handle('browser:dashboardGetFeedItem', async (_event, payload) => {
+  return getDashboardStore().getFeedItem(String((payload && payload.item_id) || '').trim());
 });
 
 ipcMain.handle('browser:dashboardListNotifications', async (_event, payload) => {

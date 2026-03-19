@@ -2,8 +2,21 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const { embedTexts } = require('./embedding_runtime');
+const { fetchWebPagePreview } = require('./lumino_crawler');
+
 const FEED_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+const FEED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_TOPIC = 'all';
+const OTHER_TOPIC = 'other';
+const TOPIC_KEYS = ['politics', 'world', 'econ', 'tech', OTHER_TOPIC];
+const ENRICH_CONCURRENCY = 6;
+const MAX_PER_SOURCE = 24;
+const MAX_REFRESH_ITEMS = 240;
+const MAX_CONTENT_CHARS = 12_000;
+const MAX_EMBED_INPUT_CHARS = 2_500;
+const KEYWORD_WEIGHT = 3;
+const SEMANTIC_MIN_SCORE = 0.18;
 
 const STARTER_FEEDS = [
   { id: 'reuters-politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/Reuters/PoliticsNews', topic: 'politics' },
@@ -15,8 +28,16 @@ const STARTER_FEEDS = [
   { id: 'ft-companies', name: 'Financial Times Companies', url: 'https://www.ft.com/companies?format=rss', topic: 'econ' },
   { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech' },
   { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', topic: 'tech' },
-  { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: 'general' },
+  { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: OTHER_TOPIC },
 ];
+
+const TOPIC_PROTOTYPE_TEXT = {
+  politics: 'government election congress parliament senate law policy diplomacy campaign administration white house ministry political party leadership constitution sanctions public office legislation voting',
+  world: 'international global conflict war border united nations diplomacy foreign affairs migration humanitarian earthquake crisis country region global summit international relations worldwide',
+  econ: 'economy markets finance business companies banking inflation stocks bonds trade tariffs startups earnings jobs industry commerce central bank recession investment',
+  tech: 'technology software hardware ai cybersecurity internet mobile gadgets chips semiconductors cloud startups research digital platform apps computing devices engineering open source',
+  other: 'general breaking news culture science health sports weather entertainment daily life society education environment community features analysis',
+};
 
 function nowTs() {
   return Date.now();
@@ -37,8 +58,14 @@ function hashText(value = '') {
 function normalizeTopic(value = '') {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return DEFAULT_TOPIC;
-  const allowed = new Set([DEFAULT_TOPIC, 'general', 'tech', 'econ', 'world', 'politics']);
+  if (raw === 'general') return OTHER_TOPIC;
+  const allowed = new Set([DEFAULT_TOPIC, ...TOPIC_KEYS]);
   return allowed.has(raw) ? raw : DEFAULT_TOPIC;
+}
+
+function normalizeClassifiedTopic(value = '') {
+  const topic = normalizeTopic(value);
+  return topic === DEFAULT_TOPIC ? OTHER_TOPIC : topic;
 }
 
 function normalizeRepeat(value = '') {
@@ -78,6 +105,10 @@ function stripXmlTags(value = '') {
     .trim();
 }
 
+function normalizeWhitespace(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
 function extractTagText(block = '', tagName = '') {
   const pattern = new RegExp(`<${escapeRegex(tagName)}\\b[^>]*>([\\s\\S]*?)<\\/${escapeRegex(tagName)}>`, 'i');
   const match = String(block || '').match(pattern);
@@ -96,9 +127,24 @@ function normalizeUrl(value = '') {
   const raw = String(value || '').trim();
   if (!raw) return '';
   try {
-    return new URL(raw).toString();
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    return parsed.toString();
   } catch (_) {
     return raw;
+  }
+}
+
+function canonicalizeUrl(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    parsed.hostname = parsed.hostname.toLowerCase();
+    return parsed.toString();
+  } catch (_) {
+    return raw.toLowerCase();
   }
 }
 
@@ -113,6 +159,139 @@ function getDomain(value = '') {
 function parseFeedDate(value = '') {
   const parsed = Date.parse(String(value || '').trim());
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function buildContentExcerpt(value = '', maxChars = 220) {
+  const text = normalizeWhitespace(value);
+  if (!text) return '';
+  return text.length > maxChars ? `${text.slice(0, maxChars - 1).trim()}…` : text;
+}
+
+function toNumberArray(input) {
+  if (!Array.isArray(input) && !ArrayBuffer.isView(input)) return [];
+  const out = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const value = Number(input[i]);
+    if (!Number.isFinite(value)) return [];
+    out.push(value);
+  }
+  return out;
+}
+
+function cosineSimilarity(vecA = [], vecB = []) {
+  if (!Array.isArray(vecA) || !Array.isArray(vecB) || !vecA.length || !vecB.length) return 0;
+  const len = Math.min(vecA.length, vecB.length);
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < len; i += 1) {
+    const a = Number(vecA[i] || 0);
+    const b = Number(vecB[i] || 0);
+    dot += a * b;
+    magA += a * a;
+    magB += b * b;
+  }
+  if (!magA || !magB) return 0;
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+function computeKeywordScore(item = {}, query = '') {
+  const terms = normalizeWhitespace(query).toLowerCase().split(' ').filter(Boolean);
+  if (!terms.length) return 0;
+  const title = String(item.display_title || '').toLowerCase();
+  const source = `${String(item.source_name || '').toLowerCase()} ${String(item.source_domain || '').toLowerCase()}`;
+  const url = String(item.url || '').toLowerCase();
+  const excerpt = String(item.content_excerpt || '').toLowerCase();
+  const content = String(item.content_text || '').toLowerCase();
+  let score = 0;
+  terms.forEach((term) => {
+    if (!term) return;
+    if (title.includes(term)) score += 4;
+    if (source.includes(term)) score += 2;
+    if (url.includes(term)) score += 1;
+    if (excerpt.includes(term)) score += 3;
+    if (content.includes(term)) score += 2;
+  });
+  return score;
+}
+
+function buildEmbeddingText(item = {}) {
+  const text = [
+    String(item.display_title || item.crawler_title || item.title || ''),
+    String(item.content_text || item.content_excerpt || item.summary || ''),
+    String(item.source_name || ''),
+  ].filter(Boolean).join('\n');
+  return text.slice(0, MAX_EMBED_INPUT_CHARS);
+}
+
+function buildSearchText(item = {}) {
+  return normalizeWhitespace([
+    String(item.display_title || item.crawler_title || item.title || ''),
+    String(item.content_excerpt || ''),
+    String(item.content_text || ''),
+    String(item.summary || ''),
+    String(item.source_name || ''),
+    String(item.source_domain || ''),
+    String(item.url || ''),
+  ].filter(Boolean).join(' '));
+}
+
+function getItemLookupKeys(item = {}) {
+  const keys = [];
+  const canonical = canonicalizeUrl(item.url || '');
+  const id = String(item.id || '').trim();
+  if (canonical) keys.push(`url:${canonical}`);
+  if (id) keys.push(`id:${id}`);
+  return keys;
+}
+
+function pruneFeedItems(items = []) {
+  const cutoff = nowTs() - FEED_RETENTION_MS;
+  return (Array.isArray(items) ? items : [])
+    .map((item) => normalizeStoredFeedItem(item))
+    .filter((item) => item && (Number(item.published_at || 0) >= cutoff || Number(item.fetched_at || 0) >= cutoff));
+}
+
+function normalizeStoredFeedItem(input = {}) {
+  const src = (input && typeof input === 'object') ? input : {};
+  const canonicalUrl = normalizeUrl(src.url || '');
+  const displayTitle = String(
+    src.display_title
+    || src.crawler_title
+    || src.title
+    || canonicalUrl
+    || 'Untitled'
+  ).trim() || 'Untitled';
+  const contentText = String(src.content_text || src.summary || '').replace(/\u0000/g, '').trim().slice(0, MAX_CONTENT_CHARS);
+  const contentMarkdown = String(src.content_markdown || '').trim().slice(0, MAX_CONTENT_CHARS);
+  return {
+    id: String(src.id || hashText(`${canonicalUrl}|${displayTitle}|${src.published_at || 0}`)).trim(),
+    url: canonicalUrl,
+    title: String(src.title || displayTitle).trim() || displayTitle,
+    crawler_title: String(src.crawler_title || '').trim(),
+    display_title: displayTitle,
+    summary: String(src.summary || '').trim(),
+    content_text: contentText,
+    content_excerpt: String(src.content_excerpt || buildContentExcerpt(contentText || src.summary || '')).trim(),
+    content_markdown: contentMarkdown,
+    source_id: String(src.source_id || '').trim(),
+    source_name: String(src.source_name || '').trim(),
+    source_domain: String(src.source_domain || getDomain(canonicalUrl)).trim(),
+    topic: normalizeClassifiedTopic(src.topic || src.source_topic || OTHER_TOPIC),
+    topic_source: String(src.topic_source || 'legacy').trim() || 'legacy',
+    source_topic: normalizeClassifiedTopic(src.source_topic || src.topic || OTHER_TOPIC),
+    published_at: Number(src.published_at || 0) || 0,
+    fetched_at: Number(src.fetched_at || 0) || 0,
+    content_fetched_at: Number(src.content_fetched_at || 0) || 0,
+    search_text: String(buildSearchText({
+      ...src,
+      display_title: displayTitle,
+      content_text: contentText,
+    })).trim(),
+    embedding: toNumberArray(src.embedding),
+    fetch_status: String(src.fetch_status || (contentText ? 'cached' : 'rss_only')).trim() || 'rss_only',
+    has_full_content: !!(src.has_full_content || (Number(src.content_fetched_at || 0) > 0 && contentText)),
+  };
 }
 
 function parseFeedXml(xmlText = '', source = {}) {
@@ -145,9 +324,13 @@ function parseFeedXml(xmlText = '', source = {}) {
       source_id: String(source.id || '').trim(),
       source_name: String(source.name || '').trim(),
       source_domain: getDomain(url || source.url || ''),
-      topic: normalizeTopic(source.topic),
+      source_topic: normalizeClassifiedTopic(source.topic),
+      topic: normalizeClassifiedTopic(source.topic),
+      topic_source: 'source',
       published_at: publishedAt || fetchedAt,
       fetched_at: fetchedAt,
+      content_fetched_at: 0,
+      fetch_status: 'rss_only',
     };
   }).filter(Boolean);
 }
@@ -170,6 +353,26 @@ async function fetchTextWithTimeout(url, timeoutMs = 12000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function mapWithConcurrency(items, concurrency, task) {
+  const list = Array.isArray(items) ? items : [];
+  const limit = Math.max(1, Number(concurrency) || 1);
+  const out = new Array(list.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < list.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      out[currentIndex] = await task(list[currentIndex], currentIndex);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < Math.min(limit, list.length); i += 1) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return out;
 }
 
 function normalizeEvent(input = {}, existing = null) {
@@ -228,12 +431,13 @@ function normalizeTask(input = {}, existing = null) {
 function createDashboardStore(options = {}) {
   const userDataPath = String(options.userDataPath || '').trim();
   const filePath = path.join(userDataPath || process.cwd(), 'dashboard_state.json');
+  const getEmbeddingConfig = typeof options.getEmbeddingConfig === 'function' ? options.getEmbeddingConfig : (() => ({}));
 
   function readState() {
     try {
       if (!fs.existsSync(filePath)) {
         return {
-          version: 1,
+          version: 2,
           events: [],
           tasks: [],
           filters: { selected_topic: DEFAULT_TOPIC },
@@ -242,20 +446,20 @@ function createDashboardStore(options = {}) {
       }
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       return {
-        version: 1,
+        version: 2,
         events: Array.isArray(parsed && parsed.events) ? parsed.events : [],
         tasks: Array.isArray(parsed && parsed.tasks) ? parsed.tasks : [],
         filters: {
           selected_topic: normalizeTopic(parsed && parsed.filters ? parsed.filters.selected_topic : DEFAULT_TOPIC),
         },
         rss: {
-          items: Array.isArray(parsed && parsed.rss && parsed.rss.items) ? parsed.rss.items : [],
+          items: pruneFeedItems(parsed && parsed.rss && parsed.rss.items),
           last_refreshed_at: Number((parsed && parsed.rss && parsed.rss.last_refreshed_at) || 0),
         },
       };
     } catch (_) {
       return {
-        version: 1,
+        version: 2,
         events: [],
         tasks: [],
         filters: { selected_topic: DEFAULT_TOPIC },
@@ -266,14 +470,14 @@ function createDashboardStore(options = {}) {
 
   function writeState(state) {
     const next = {
-      version: 1,
+      version: 2,
       events: Array.isArray(state && state.events) ? state.events : [],
       tasks: Array.isArray(state && state.tasks) ? state.tasks : [],
       filters: {
         selected_topic: normalizeTopic(state && state.filters ? state.filters.selected_topic : DEFAULT_TOPIC),
       },
       rss: {
-        items: Array.isArray(state && state.rss && state.rss.items) ? state.rss.items : [],
+        items: pruneFeedItems(state && state.rss && state.rss.items),
         last_refreshed_at: Number((state && state.rss && state.rss.last_refreshed_at) || 0),
       },
     };
@@ -281,8 +485,7 @@ function createDashboardStore(options = {}) {
   }
 
   function getTopics() {
-    const available = new Set(STARTER_FEEDS.map((feed) => normalizeTopic(feed.topic)).filter((topic) => topic !== DEFAULT_TOPIC));
-    return [DEFAULT_TOPIC, 'politics', 'world', 'econ', 'tech', 'general'].filter((topic) => topic === DEFAULT_TOPIC || available.has(topic));
+    return [DEFAULT_TOPIC, ...TOPIC_KEYS];
   }
 
   function getState() {
@@ -307,6 +510,7 @@ function createDashboardStore(options = {}) {
           last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
           sources: clone(STARTER_FEEDS).map((feed) => ({
             ...feed,
+            topic: normalizeClassifiedTopic(feed.topic),
             domain: getDomain(feed.url),
           })),
           topics: getTopics(),
@@ -322,17 +526,147 @@ function createDashboardStore(options = {}) {
     return !last || !items.length || (nowTs() - last) >= FEED_REFRESH_INTERVAL_MS;
   }
 
-  function listFeedItems(options = {}) {
+  function getLookupMap(items = []) {
+    const map = new Map();
+    (Array.isArray(items) ? items : []).forEach((item) => {
+      getItemLookupKeys(item).forEach((key) => {
+        map.set(key, item);
+      });
+    });
+    return map;
+  }
+
+  async function classifyItems(items = []) {
+    const list = (Array.isArray(items) ? items : []).map((item) => normalizeStoredFeedItem(item));
+    if (!list.length) return list;
+    const articleTexts = list.map((item) => buildEmbeddingText(item));
+    const prototypeTexts = TOPIC_KEYS.map((topic) => TOPIC_PROTOTYPE_TEXT[topic]);
+    const config = getEmbeddingConfig() || {};
+    const embeddingRes = await embedTexts(prototypeTexts.concat(articleTexts), config);
+    const vectors = Array.isArray(embeddingRes && embeddingRes.embeddings) ? embeddingRes.embeddings : [];
+    const prototypeVectors = TOPIC_KEYS.map((topic, idx) => ({
+      topic,
+      vector: toNumberArray(vectors[idx]),
+    }));
+    return list.map((item, idx) => {
+      const vector = toNumberArray(vectors[prototypeTexts.length + idx]);
+      let bestTopic = normalizeClassifiedTopic(item.source_topic || item.topic || OTHER_TOPIC);
+      let bestScore = -1;
+      prototypeVectors.forEach((entry) => {
+        const score = cosineSimilarity(vector, entry.vector);
+        if (score > bestScore) {
+          bestScore = score;
+          bestTopic = entry.topic;
+        }
+      });
+      const classifiedTopic = bestScore >= SEMANTIC_MIN_SCORE ? bestTopic : OTHER_TOPIC;
+      return normalizeStoredFeedItem({
+        ...item,
+        embedding: vector,
+        topic: classifiedTopic,
+        topic_source: vector.length ? 'embedding' : 'source_fallback',
+      });
+    });
+  }
+
+  async function enrichFeedCandidate(candidate = {}, existing = null) {
+    const base = normalizeStoredFeedItem({
+      ...existing,
+      ...candidate,
+      display_title: candidate.title || (existing && existing.display_title) || candidate.url,
+      content_text: (existing && existing.content_text) || candidate.summary || '',
+      content_excerpt: (existing && existing.content_excerpt) || buildContentExcerpt(candidate.summary || ''),
+      source_topic: candidate.source_topic || (existing && existing.source_topic) || candidate.topic || OTHER_TOPIC,
+      topic: candidate.topic || (existing && existing.topic) || candidate.source_topic || OTHER_TOPIC,
+      topic_source: (existing && existing.topic_source) || 'source',
+      fetch_status: (existing && existing.fetch_status) || candidate.fetch_status || 'rss_only',
+    });
+    const targetUrl = String(base.url || '').trim();
+    if (!targetUrl) return base;
+    const preview = await fetchWebPagePreview(targetUrl, { markdownFirst: true, maxChars: MAX_CONTENT_CHARS, timeoutMs: 12_000 });
+    if (!preview || !preview.ok) {
+      if (existing) {
+        return normalizeStoredFeedItem({
+          ...existing,
+          ...base,
+          display_title: existing.display_title || base.display_title,
+          crawler_title: existing.crawler_title || base.crawler_title,
+          content_text: existing.content_text || base.content_text,
+          content_excerpt: existing.content_excerpt || base.content_excerpt,
+          content_markdown: existing.content_markdown || base.content_markdown,
+          content_fetched_at: existing.content_fetched_at || base.content_fetched_at,
+          fetch_status: existing.fetch_status || String((preview && preview.fetch_status) || 'cached').trim() || 'cached',
+          has_full_content: !!(existing.has_full_content || base.has_full_content),
+        });
+      }
+      return normalizeStoredFeedItem({
+        ...base,
+        fetch_status: String((preview && preview.fetch_status) || 'rss_only').trim() || 'rss_only',
+      });
+    }
+    const fallbackTitle = String(
+      (existing && (existing.display_title || existing.crawler_title || existing.title))
+      || candidate.title
+      || base.display_title
+      || base.title
+      || targetUrl
+    ).trim() || targetUrl;
+    const crawlerTitle = normalizeWhitespace(preview.title || '');
+    const contentText = String(preview.text || '').trim().slice(0, MAX_CONTENT_CHARS);
+    const contentMarkdown = String(preview.markdown || '').trim().slice(0, MAX_CONTENT_CHARS);
+    return normalizeStoredFeedItem({
+      ...base,
+      crawler_title: crawlerTitle,
+      display_title: crawlerTitle || fallbackTitle,
+      content_text: contentText || base.content_text,
+      content_excerpt: buildContentExcerpt(contentText || base.content_text || base.summary || ''),
+      content_markdown: contentMarkdown,
+      content_fetched_at: nowTs(),
+      fetch_status: 'fetched',
+      has_full_content: !!contentText,
+    });
+  }
+
+  async function listFeedItems(options = {}) {
     const topic = normalizeTopic(options.topic || DEFAULT_TOPIC);
     const limit = Math.max(1, Math.min(200, Number(options.limit || 80)));
+    const query = String(options.query || '').trim();
     const state = readState();
-    const items = (Array.isArray(state.rss && state.rss.items) ? state.rss.items : [])
-      .filter((item) => topic === DEFAULT_TOPIC || normalizeTopic(item && item.topic) === topic)
-      .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0))
-      .slice(0, limit);
+    const sourceItems = pruneFeedItems(state.rss && state.rss.items);
+    let items = sourceItems
+      .filter((item) => topic === DEFAULT_TOPIC || normalizeClassifiedTopic(item && item.topic) === topic);
+    if (query) {
+      const config = getEmbeddingConfig() || {};
+      const queryEmbeddingRes = await embedTexts([query], config);
+      const queryVector = toNumberArray(queryEmbeddingRes && queryEmbeddingRes.embeddings && queryEmbeddingRes.embeddings[0]);
+      items = items
+        .map((item) => {
+          const keywordScore = computeKeywordScore(item, query);
+          const semanticScore = cosineSimilarity(queryVector, toNumberArray(item.embedding));
+          const score = (keywordScore * KEYWORD_WEIGHT) + semanticScore;
+          return {
+            item,
+            score,
+            keywordScore,
+            semanticScore,
+          };
+        })
+        .filter((entry) => entry.keywordScore > 0 || entry.semanticScore >= SEMANTIC_MIN_SCORE)
+        .sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          return Number((b.item && b.item.published_at) || 0) - Number((a.item && a.item.published_at) || 0);
+        })
+        .slice(0, limit)
+        .map((entry) => entry.item);
+    } else {
+      items = items
+        .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0))
+        .slice(0, limit);
+    }
     return {
       ok: true,
       topic,
+      query,
       items: clone(items),
       last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
       topics: getTopics(),
@@ -342,14 +676,16 @@ function createDashboardStore(options = {}) {
   async function refreshFeeds(options = {}) {
     const force = !!options.force;
     if (!force && !shouldRefreshFeeds()) {
-      return listFeedItems({ topic: options.topic, limit: options.limit });
+      return listFeedItems({ topic: options.topic, limit: options.limit, query: options.query });
     }
     const state = readState();
-    const itemMap = new Map();
+    const existingItems = pruneFeedItems(state.rss && state.rss.items);
+    const existingMap = getLookupMap(existingItems);
+    const discoveredMap = new Map();
     const errors = [];
     const results = await Promise.allSettled(STARTER_FEEDS.map(async (source) => {
       const xml = await fetchTextWithTimeout(source.url);
-      return parseFeedXml(xml, source).slice(0, 24);
+      return parseFeedXml(xml, source).slice(0, MAX_PER_SOURCE);
     }));
     results.forEach((result, index) => {
       const source = STARTER_FEEDS[index];
@@ -358,29 +694,70 @@ function createDashboardStore(options = {}) {
         return;
       }
       result.value.forEach((item) => {
-        const key = String((item && item.url) || '').trim().toLowerCase() || String((item && item.id) || '').trim();
-        if (!key) return;
-        const existing = itemMap.get(key);
-        if (!existing || Number((item && item.published_at) || 0) > Number((existing && existing.published_at) || 0)) {
-          itemMap.set(key, item);
+        const canonical = canonicalizeUrl(item.url || '');
+        const key = canonical ? `url:${canonical}` : `id:${String(item.id || '').trim()}`;
+        const existing = discoveredMap.get(key);
+        if (!existing || Number(item.published_at || 0) > Number(existing.published_at || 0)) {
+          discoveredMap.set(key, item);
         }
       });
     });
-    const nextItems = Array.from(itemMap.values())
+    const discovered = Array.from(discoveredMap.values())
       .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0))
-      .slice(0, 240);
+      .slice(0, MAX_REFRESH_ITEMS);
+    const enriched = await mapWithConcurrency(discovered, ENRICH_CONCURRENCY, async (candidate) => {
+      const keys = getItemLookupKeys(candidate);
+      let existing = null;
+      for (let i = 0; i < keys.length; i += 1) {
+        if (existingMap.has(keys[i])) {
+          existing = existingMap.get(keys[i]);
+          break;
+        }
+      }
+      return enrichFeedCandidate(candidate, existing);
+    });
+    const classified = await classifyItems(enriched);
+    const mergedMap = new Map();
+    existingItems.forEach((item) => {
+      getItemLookupKeys(item).forEach((key) => {
+        if (!mergedMap.has(key)) mergedMap.set(key, item);
+      });
+    });
+    classified.forEach((item) => {
+      getItemLookupKeys(item).forEach((key) => {
+        mergedMap.set(key, item);
+      });
+    });
+    const unique = new Map();
+    mergedMap.forEach((item) => {
+      const normalized = normalizeStoredFeedItem(item);
+      const key = canonicalizeUrl(normalized.url || '') || `id:${normalized.id}`;
+      const existing = unique.get(key);
+      if (!existing || Number(normalized.published_at || 0) > Number(existing.published_at || 0)) {
+        unique.set(key, normalized);
+      }
+    });
     state.rss = {
-      items: nextItems.length
-        ? nextItems
-        : (Array.isArray(state.rss && state.rss.items) ? state.rss.items : []),
+      items: pruneFeedItems(Array.from(unique.values()))
+        .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0)),
       last_refreshed_at: nowTs(),
     };
     writeState(state);
-    const listing = listFeedItems({ topic: options.topic, limit: options.limit });
+    const listing = await listFeedItems({ topic: options.topic, limit: options.limit, query: options.query });
     return {
       ...listing,
       message: errors.length ? errors.join(' | ') : '',
     };
+  }
+
+  function getFeedItem(itemId = '') {
+    const id = String(itemId || '').trim();
+    if (!id) return { ok: false, message: 'item_id is required.' };
+    const state = readState();
+    const item = pruneFeedItems(state.rss && state.rss.items)
+      .find((entry) => String((entry && entry.id) || '').trim() === id);
+    if (!item) return { ok: false, message: 'Feed item not found.' };
+    return { ok: true, item: clone(item) };
   }
 
   function setSelectedTopic(topic = DEFAULT_TOPIC) {
@@ -450,6 +827,7 @@ function createDashboardStore(options = {}) {
     shouldRefreshFeeds,
     listFeedItems,
     refreshFeeds,
+    getFeedItem,
     setSelectedTopic,
     saveEvent,
     deleteEvent,

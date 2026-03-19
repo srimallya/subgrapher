@@ -192,8 +192,22 @@ const state = {
       selectedDate: '',
       status: '',
     },
+    feedModal: {
+      itemId: '',
+      title: '',
+      url: '',
+      source: '',
+      topic: '',
+      publishedAt: 0,
+      content: '',
+      status: '',
+      fetchStatus: '',
+      loading: false,
+      openReady: false,
+    },
     loaded: false,
     refreshPending: false,
+    feedRequestSeq: 0,
   },
 };
 
@@ -3484,6 +3498,7 @@ function hasBlockingOverlay() {
     || isModalOpen('share-reference-overlay')
     || isModalOpen('provider-key-overlay')
     || isModalOpen('status-event-overlay')
+    || isModalOpen('status-feed-overlay')
   );
 }
 
@@ -5057,7 +5072,7 @@ function renderStatusFeed() {
     world: 'world',
     econ: 'econ',
     tech: 'tech',
-    general: 'other',
+    other: 'other',
   };
   filtersNode.innerHTML = topics.map((topic) => `
     <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(topicLabels[topic] || topic)}</button>
@@ -5066,33 +5081,25 @@ function renderStatusFeed() {
   if (searchInput.value !== query) searchInput.value = query;
   const refreshedAt = Number(state.dashboard.rssLastRefreshedAt || 0);
   const items = Array.isArray(state.dashboard.rssItems) ? state.dashboard.rssItems : [];
-  const normalizedQuery = query.toLowerCase();
-  const visibleItems = normalizedQuery
-    ? items.filter((item) => {
-      const haystack = [
-        String((item && item.title) || ''),
-        String((item && item.summary) || ''),
-        String((item && item.source_name) || ''),
-        String((item && item.source_domain) || ''),
-        String((item && item.url) || ''),
-      ].join(' ').toLowerCase();
-      return haystack.includes(normalizedQuery);
-    })
-    : items;
   metaNode.textContent = refreshedAt > 0
-    ? `Updated ${formatAgo(refreshedAt)} · ${visibleItems.length} item${visibleItems.length === 1 ? '' : 's'}`
-    : `${visibleItems.length} item${visibleItems.length === 1 ? '' : 's'}`;
-  listNode.innerHTML = visibleItems.length
-    ? visibleItems.map((item) => `
-      <button type="button" class="status-rss-item" data-status-rss-url="${escapeHtml(String((item && item.url) || '').trim())}" data-status-rss-title="${escapeHtml(String((item && item.title) || '').trim())}">
+    ? `Updated ${formatAgo(refreshedAt)} · ${items.length} item${items.length === 1 ? '' : 's'}`
+    : `${items.length} item${items.length === 1 ? '' : 's'}`;
+  listNode.innerHTML = items.length
+    ? items.map((item) => `
+      <button
+        type="button"
+        class="status-rss-item"
+        data-status-rss-id="${escapeHtml(String((item && item.id) || '').trim())}"
+      >
         <div class="status-rss-item-head">
           <span class="status-rss-source">${escapeHtml(String((item && item.source_name) || (item && item.source_domain) || 'feed'))}</span>
           <span class="status-rss-time muted">${Number((item && item.published_at) || 0) > 0 ? escapeHtml(formatAgo(Number(item.published_at || 0))) : ''}</span>
         </div>
-        <div class="status-rss-title">${escapeHtml(String((item && item.title) || 'Untitled'))}</div>
+        <div class="status-rss-title">${escapeHtml(String((item && (item.display_title || item.title)) || 'Untitled'))}</div>
+        ${String((item && item.content_excerpt) || '').trim() ? `<div class="status-rss-excerpt muted">${escapeHtml(String(item.content_excerpt || '').trim())}</div>` : ''}
       </button>
     `).join('')
-    : `<div class="status-empty muted">${normalizedQuery ? 'No matches.' : 'No feed items.'}</div>`;
+    : `<div class="status-empty muted">${query ? 'No matches.' : 'No feed items.'}</div>`;
 }
 
 function renderStatusSurface() {
@@ -5104,12 +5111,32 @@ function renderStatusSurface() {
   renderStatusEventModalDayList(String((state.dashboard.modal && state.dashboard.modal.selectedDate) || '').trim());
 }
 
+async function loadStatusFeedItems(options = {}) {
+  const topic = String(state.dashboard.rssSelectedTopic || 'all').trim();
+  const query = String(state.dashboard.rssSearchQuery || '').trim();
+  const seq = Number(state.dashboard.feedRequestSeq || 0) + 1;
+  state.dashboard.feedRequestSeq = seq;
+  let res = null;
+  if (options.refresh && api.dashboardRefreshFeeds) {
+    res = await api.dashboardRefreshFeeds(topic, 80, query);
+  } else if (api.dashboardListFeedItems) {
+    res = await api.dashboardListFeedItems(topic, 80, query);
+  }
+  if (Number(state.dashboard.feedRequestSeq || 0) !== seq) return;
+  if (res && res.ok) {
+    state.dashboard.rssItems = Array.isArray(res.items) ? res.items : [];
+    state.dashboard.rssLastRefreshedAt = Number(res.last_refreshed_at || state.dashboard.rssLastRefreshedAt || 0);
+    state.dashboard.rssTopics = Array.isArray(res.topics) ? res.topics : state.dashboard.rssTopics;
+  }
+  renderStatusFeed();
+}
+
 async function refreshStatusData(options = {}) {
   if (!api.dashboardGet || state.dashboard.refreshPending) return;
   state.dashboard.refreshPending = true;
   try {
     if (options.forceFeeds && api.dashboardRefreshFeeds) {
-      await api.dashboardRefreshFeeds(String(state.dashboard.rssSelectedTopic || 'all').trim(), 80);
+      await api.dashboardRefreshFeeds(String(state.dashboard.rssSelectedTopic || 'all').trim(), 80, String(state.dashboard.rssSearchQuery || '').trim());
     }
     const stateRes = await api.dashboardGet();
     if (stateRes && stateRes.ok && stateRes.state) {
@@ -5141,6 +5168,11 @@ async function refreshStatusData(options = {}) {
   } finally {
     state.dashboard.refreshPending = false;
   }
+  if (String(state.dashboard.rssSearchQuery || '').trim()) {
+    await loadStatusFeedItems({ refresh: false });
+    renderStatusSurface();
+    return;
+  }
   renderStatusSurface();
 }
 
@@ -5163,7 +5195,113 @@ async function openStatusFeedItem(url, title = '') {
   renderWorkspaceTabs();
   renderContextFiles();
   renderDiffPanel();
+  closeStatusFeedPreviewModal();
   await syncActiveSurface();
+}
+
+function closeStatusFeedPreviewModal() {
+  const overlay = e('status-feed-overlay');
+  const titleNode = e('status-feed-modal-title');
+  const metaNode = e('status-feed-modal-meta');
+  const bodyNode = e('status-feed-modal-body');
+  const statusNode = e('status-feed-modal-status');
+  const openBtn = e('status-feed-open-btn');
+  if (overlay) overlay.classList.add('hidden');
+  if (titleNode) titleNode.textContent = 'Article';
+  if (metaNode) metaNode.textContent = '';
+  if (bodyNode) bodyNode.textContent = '';
+  if (statusNode) statusNode.textContent = '';
+  if (openBtn) {
+    openBtn.dataset.url = '';
+    openBtn.dataset.title = '';
+    openBtn.disabled = true;
+  }
+  state.dashboard.feedModal = {
+    itemId: '',
+    title: '',
+    url: '',
+    source: '',
+    topic: '',
+    publishedAt: 0,
+    content: '',
+    status: '',
+    fetchStatus: '',
+    loading: false,
+    openReady: false,
+  };
+}
+
+function buildStatusFeedModalMeta(item = {}) {
+  const parts = [];
+  const source = String((item && item.source_name) || (item && item.source_domain) || '').trim();
+  const topic = String((item && item.topic) || '').trim();
+  const publishedAt = Number((item && item.published_at) || 0);
+  if (source) parts.push(source);
+  if (topic) parts.push(topic);
+  if (publishedAt > 0) parts.push(formatAgo(publishedAt));
+  return parts.join(' · ');
+}
+
+function buildStatusFeedModalBody(item = {}) {
+  const content = String((item && item.content_text) || '').trim();
+  if (content) return content;
+  const excerpt = String((item && item.content_excerpt) || '').trim();
+  if (excerpt) return excerpt;
+  return 'No fetched article content was available for this link.';
+}
+
+async function openStatusFeedPreviewModal(itemId = '') {
+  const id = String(itemId || '').trim();
+  const overlay = e('status-feed-overlay');
+  const titleNode = e('status-feed-modal-title');
+  const metaNode = e('status-feed-modal-meta');
+  const bodyNode = e('status-feed-modal-body');
+  const statusNode = e('status-feed-modal-status');
+  const openBtn = e('status-feed-open-btn');
+  if (!id || !overlay || !titleNode || !metaNode || !bodyNode || !statusNode || !openBtn || !api.dashboardGetFeedItem) return;
+  overlay.classList.remove('hidden');
+  titleNode.textContent = 'Loading article…';
+  metaNode.textContent = '';
+  bodyNode.textContent = '';
+  statusNode.textContent = '';
+  openBtn.dataset.url = '';
+  openBtn.dataset.title = '';
+  openBtn.disabled = true;
+  state.dashboard.feedModal.loading = true;
+  const res = await api.dashboardGetFeedItem(id);
+  if (!res || !res.ok || !res.item) {
+    titleNode.textContent = 'Article';
+    bodyNode.textContent = '';
+    statusNode.textContent = (res && res.message) || 'Unable to load article.';
+    state.dashboard.feedModal.loading = false;
+    return;
+  }
+  const item = res.item || {};
+  const title = String((item && (item.display_title || item.title)) || 'Article').trim() || 'Article';
+  const url = String((item && item.url) || '').trim();
+  const content = buildStatusFeedModalBody(item);
+  titleNode.textContent = title;
+  metaNode.textContent = buildStatusFeedModalMeta(item);
+  bodyNode.textContent = content;
+  statusNode.textContent = String((item && item.fetch_status) || '').trim() === 'fetched'
+    ? ''
+    : 'Showing saved summary because full fetched content was unavailable.';
+  openBtn.dataset.url = url;
+  openBtn.dataset.title = title;
+  openBtn.disabled = !url;
+  state.dashboard.feedModal = {
+    itemId: id,
+    title,
+    url,
+    source: String((item && item.source_name) || '').trim(),
+    topic: String((item && item.topic) || '').trim(),
+    publishedAt: Number((item && item.published_at) || 0),
+    content,
+    status: statusNode.textContent,
+    fetchStatus: String((item && item.fetch_status) || '').trim(),
+    loading: false,
+    openReady: !!url,
+  };
 }
 
 async function openStatusMailNotification(payload = {}) {
@@ -5293,22 +5431,7 @@ async function setStatusFeedTopic(topic = 'all') {
   } else {
     state.dashboard.rssSelectedTopic = next;
   }
-  if (api.dashboardRefreshFeeds) {
-    const res = await api.dashboardRefreshFeeds(state.dashboard.rssSelectedTopic, 80);
-    if (res && res.ok) {
-      state.dashboard.rssItems = Array.isArray(res.items) ? res.items : [];
-      state.dashboard.rssLastRefreshedAt = Number(res.last_refreshed_at || state.dashboard.rssLastRefreshedAt || 0);
-      state.dashboard.rssTopics = Array.isArray(res.topics) ? res.topics : state.dashboard.rssTopics;
-    }
-  } else if (api.dashboardListFeedItems) {
-    const res = await api.dashboardListFeedItems(state.dashboard.rssSelectedTopic, 80);
-    if (res && res.ok) {
-      state.dashboard.rssItems = Array.isArray(res.items) ? res.items : [];
-      state.dashboard.rssLastRefreshedAt = Number(res.last_refreshed_at || state.dashboard.rssLastRefreshedAt || 0);
-      state.dashboard.rssTopics = Array.isArray(res.topics) ? res.topics : state.dashboard.rssTopics;
-    }
-  }
-  renderStatusFeed();
+  await loadStatusFeedItems({ refresh: true });
 }
 
 async function saveStatusTaskFromInput() {
@@ -5420,16 +5543,15 @@ function bindStatusSurfaceEvents() {
   });
   e('status-rss-search-input')?.addEventListener('input', (event) => {
     state.dashboard.rssSearchQuery = String((event && event.target && event.target.value) || '').trimStart();
-    renderStatusFeed();
+    void loadStatusFeedItems({ refresh: false });
   });
   e('status-rss-list')?.addEventListener('click', async (event) => {
     const button = event.target && typeof event.target.closest === 'function'
-      ? event.target.closest('button[data-status-rss-url]')
+      ? event.target.closest('button[data-status-rss-id]')
       : null;
     if (!button) return;
-    const url = String(button.getAttribute('data-status-rss-url') || '').trim();
-    const title = String(button.getAttribute('data-status-rss-title') || '').trim();
-    if (url) await openStatusFeedItem(url, title);
+    const itemId = String(button.getAttribute('data-status-rss-id') || '').trim();
+    if (itemId) await openStatusFeedPreviewModal(itemId);
   });
 }
 
@@ -13256,6 +13378,19 @@ function bindControls() {
     }
     showPassiveNotification('Opened in default app.', 1200);
   });
+  e('status-feed-close-btn')?.addEventListener('click', () => {
+    closeStatusFeedPreviewModal();
+  });
+  e('status-feed-overlay')?.addEventListener('click', (event) => {
+    if (event.target && event.target.id === 'status-feed-overlay') closeStatusFeedPreviewModal();
+  });
+  e('status-feed-open-btn')?.addEventListener('click', async () => {
+    const button = e('status-feed-open-btn');
+    const url = String((button && button.dataset && button.dataset.url) || '').trim();
+    const title = String((button && button.dataset && button.dataset.title) || '').trim();
+    if (!url) return;
+    await openStatusFeedItem(url, title);
+  });
 
   if (!document.__contextPreviewEscBound) {
     document.addEventListener('keydown', (event) => {
@@ -13266,6 +13401,16 @@ function bindControls() {
       closeContextPreviewModal();
     }, true);
     document.__contextPreviewEscBound = true;
+  }
+  if (!document.__statusFeedEscBound) {
+    document.addEventListener('keydown', (event) => {
+      if (!event || event.defaultPrevented || event.key !== 'Escape') return;
+      if (!isModalOpen('status-feed-overlay')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeStatusFeedPreviewModal();
+    }, true);
+    document.__statusFeedEscBound = true;
   }
 
   e('shares-room-editor')?.addEventListener('input', (event) => {
