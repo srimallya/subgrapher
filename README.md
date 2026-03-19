@@ -1,7 +1,5 @@
 # Subgrapher
 
-![Status tab](screengrabs/08-status-tab.jpg)
-
 Subgrapher is a desktop app for building, browsing, and sharing knowledge as semantic references.
 
 A semantic reference is the core unit in the app. Inside a reference you can browse the web, write notes, attach folders, attach mail threads, generate HTML visualizations, and let an AI agent reason over that context. References can be forked, shared publicly, or shared privately with trusted peers.
@@ -11,6 +9,7 @@ Subgrapher also works as:
 - a local-first AI workspace
 - a mail client
 - a decentralized knowledge and message sharing platform
+- a personal organizer for time and events
 - a remote interface for reasoning over your work through Telegram with local models
 
 The project exists because I wanted a better way to share research with other people. It is open source and still in progress.
