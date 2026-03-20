@@ -1,6 +1,8 @@
 # Subgrapher App Spec (Unified Artifact Runtime)
 
 ## Summary
+Current app version: `1.4.4`
+
 Subgrapher uses one artifact runtime for authored outputs:
 - `markdown` artifacts for text/image docs
 - `html` artifacts for interactive visualizations and games
@@ -222,15 +224,24 @@ Migration is idempotent and safe to run repeatedly.
   - semantic cosine score
 - Persistent vector storage:
   - SQLite index per reference under `semantic_references/<ref>/rag/index.sqlite`
-  - `documents` + `embeddings` tables with schema version marker
+  - `documents`, `embeddings`, `graph_nodes`, `graph_edges`, and `graph_scores` tables with schema version marker
+- Temporal graph sidecar:
+  - anchor-scoped to the active Path-C reference
+  - built from the full scoped local-evidence source set, not `reference_graph`
+  - stores source-level nodes, shared-term source-to-source edges, and precomputed temporal centrality scores
+  - rebuilt on manual reindex and whenever scoped reference evidence changes
 - Embedding runtime:
   - primary: LM Studio `/v1/embeddings`
   - fallback: local hash embedding (`hybrid:local-hash-embedding-v1`)
+- Agent local-evidence tools:
+  - `search_local_evidence` remains the primary retrieval path
+  - `expand_local_evidence_graph` provides optional one-hop graph expansion with `global`, `recent_30d`, and `recent_7d` signals
 - Settings/runtime controls:
   - `rag_enabled`
   - `rag_embedding_model` (default: `text-embedding-nomic-embed-text-v1.5`)
   - `rag_top_k`
   - status + manual reindex action in Settings
+  - RAG status now reports graph readiness plus graph node/edge counts
 
 ## IPC / Renderer Contract
 Removed from renderer preload usage:

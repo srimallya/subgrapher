@@ -363,6 +363,7 @@ const AGENT_TOOLS = [
       '  read_artifact(artifact_id) -> {id, title, content, kind}',
       '  list_highlights() -> list[{id, source, text, ...}]',
       '  search_reference_graph(query) -> {nodes, edges}',
+      '  search_local_evidence(query) -> {results, citations}',
       '  list_context_files() -> list[{id, name, size_bytes, summary, mime_type, relative_path, source_type, extract_strategy, is_image}]',
       '  read_context_file(file_id) -> {name, content, mode, mime_type, summary, extract_strategy, vision}',
       '  list_attached_mail_threads() -> list[{id, subject, participants, snippet, last_message_at, message_count}]',
@@ -649,6 +650,30 @@ const AGENT_TOOLS = [
     },
   },
   {
+    name: 'expand_local_evidence_graph',
+    allowed_callers: ['direct'],
+    description: 'Expand one hop from local-evidence source seeds using the temporal graph sidecar. Use this only after search_local_evidence when evidence is thin, fragmented, or clearly multi-hop.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Local evidence query text.' },
+        seed_source_keys: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional explicit source_key seeds. If omitted, seeds come from the top local evidence results.',
+        },
+        top_k: { type: 'number', description: 'Maximum expansions to return (default 6, max 12).' },
+        include_kinds: {
+          type: 'array',
+          items: { type: 'string', enum: ['artifact', 'highlight', 'context_file'] },
+          description: 'Optional evidence kinds to include.',
+        },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'search_attached_mail_threads',
     allowed_callers: ['direct', 'run_python'],
     description: 'Search the mail threads already attached to the active reference. Use this before reading a specific attached thread.',
@@ -847,6 +872,7 @@ const LOCAL_EVIDENCE_TOOL_NAMES = new Set([
   'analyze_context_file',
   'search_reference_graph',
   'search_local_evidence',
+  'expand_local_evidence_graph',
 ]);
 
 const WEB_TOOL_NAMES = new Set(['web_search', 'fetch_webpage']);
@@ -1177,7 +1203,7 @@ function buildRecoveryPrompt(missingPhase) {
     return [
       'Continue the task.',
       'Required phase missing: workspace local evidence read.',
-      'Call exactly one local evidence tool now (list_artifacts, read_artifact, list_highlights, list_context_files, read_context_file, analyze_context_file, search_reference_graph, list_attached_mail_threads, search_attached_mail_threads, or read_attached_mail_thread).',
+      'Call exactly one local evidence tool now (list_artifacts, read_artifact, list_highlights, list_context_files, read_context_file, analyze_context_file, search_reference_graph, search_local_evidence, expand_local_evidence_graph, list_attached_mail_threads, search_attached_mail_threads, or read_attached_mail_thread).',
       'Do not call finish yet.',
     ].join(' ');
   }

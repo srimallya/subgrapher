@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const Y = require('yjs');
 
@@ -12,6 +12,7 @@ const { chatWithProvider, callProviderWithTools } = require('./runtime/provider_
 const { scoreReferencesHybrid, buildReferenceSearchText } = require('./runtime/pathc_similarity');
 const {
   searchLocalEvidence,
+  expandLocalEvidenceGraph,
   getLocalEvidenceRagStatus,
   reindexLocalEvidenceReference,
 } = require('./runtime/local_evidence_search');
@@ -1901,6 +1902,11 @@ async function buildRagStatusSnapshot(payload = {}) {
       embedding_runtime: String((status && status.embedding_runtime) || ''),
       doc_count: Number((status && status.doc_count) || 0),
       embedding_count: Number((status && status.embedding_count) || 0),
+      graph_state: String((status && status.graph_state) || ''),
+      graph_ready: !!(status && status.graph_ready),
+      graph_node_count: Number((status && status.graph_node_count) || 0),
+      graph_edge_count: Number((status && status.graph_edge_count) || 0),
+      graph_scored_at: Number((status && status.graph_scored_at) || 0),
       updated_at: Number((status && status.updated_at) || 0),
       message: String((status && status.message) || ''),
     });
@@ -1939,6 +1945,7 @@ async function queueReferenceRagReindex(srId = '') {
     embeddingRuntime: ragEmbedding.runtime,
     embeddingModel: ragEmbedding.model,
     embeddingConfig: ragEmbedding.config,
+    temporalGraphScorer: computeTemporalGraphScoresWithPython,
   });
 }
 
@@ -3245,6 +3252,105 @@ function getPythonRuntimeResolver() {
     projectRoot: __dirname,
   });
   return pythonRuntimeResolver;
+}
+
+async function computeTemporalGraphScoresWithPython(input = {}) {
+  const runtime = await getPythonRuntimeResolver().resolve('tool');
+  if (!runtime || !runtime.ok || !String(runtime.python_bin || '').trim()) {
+    return {
+      ok: false,
+      message: String((runtime && runtime.message) || 'Python runtime unavailable.'),
+      scores: [],
+    };
+  }
+  const scriptPath = path.join(__dirname, 'runtime', 'temporal_graph_scores.py');
+  const payload = JSON.stringify((input && typeof input === 'object') ? input : {});
+
+  return new Promise((resolve) => {
+    const proc = spawn(String(runtime.python_bin || '').trim(), ['-I', scriptPath], {
+      cwd: app.getPath('userData'),
+      env: {
+        PATH: process.env.PATH || '',
+        PYTHONNOUSERSITE: '1',
+        PYTHONUNBUFFERED: '1',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        proc.kill('SIGKILL');
+      } catch (_) {
+        // noop
+      }
+      resolve({
+        ok: false,
+        message: 'Temporal graph scoring timed out.',
+        scores: [],
+      });
+    }, 30_000);
+
+    proc.stdout.on('data', (chunk) => {
+      stdout += String(chunk || '');
+      if (stdout.length > 4_000_000) {
+        stdout = stdout.slice(-4_000_000);
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      stderr += String(chunk || '');
+      if (stderr.length > 200_000) {
+        stderr = stderr.slice(-200_000);
+      }
+    });
+
+    proc.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        ok: false,
+        message: String((err && err.message) || 'Temporal graph scorer failed to start.'),
+        scores: [],
+      });
+    });
+
+    proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (Number(code) !== 0) {
+        resolve({
+          ok: false,
+          message: String(stderr || `Temporal graph scorer exited with code ${Number(code) || 0}.`).trim(),
+          scores: [],
+        });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(String(stdout || '').trim() || '{}');
+        resolve({
+          ok: parsed && parsed.ok !== false,
+          message: String((parsed && parsed.message) || '').trim(),
+          scores: Array.isArray(parsed && parsed.scores) ? parsed.scores : [],
+        });
+      } catch (err) {
+        resolve({
+          ok: false,
+          message: `Temporal graph scorer returned invalid JSON.${stderr ? ` ${String(stderr).trim()}` : ''}`.trim(),
+          scores: [],
+        });
+      }
+    });
+
+    proc.stdin.end(payload);
+  });
 }
 
 async function getPythonSandboxManagerForRole(runtimeRole = 'tool') {
@@ -15649,6 +15755,7 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
         : []),
       'Research and citation policy:',
       '- For local research, call search_local_evidence before final synthesis.',
+      '- Use expand_local_evidence_graph only after search_local_evidence when local evidence is thin, fragmented, or clearly multi-hop.',
       '- For specific questions about uploaded docs/PDFs, call analyze_context_file on the relevant context_file_id before concluding.',
       '- For research outputs, use footnote citation format in content: [1], [2], ... and include a "## Sources" section.',
       '- In chat responses, format source URLs as markdown links.',
@@ -16446,6 +16553,7 @@ function formatToolStatusStart(toolName, args = {}) {
   if (name === 'list_artifacts') return 'Listing artifacts...';
   if (name === 'list_highlights') return 'Reading highlights...';
   if (name === 'search_local_evidence') return `Ranking local evidence for "${trimStatusText(payload.query || '', 90)}"...`;
+  if (name === 'expand_local_evidence_graph') return `Expanding local evidence graph for "${trimStatusText(payload.query || '', 90)}"...`;
   if (name === 'open_web_tab') return `Opening web tab: ${summarizeUrlForStatus(payload.url)}`;
   if (name === 'add_web_highlight') return `Adding web highlight for ${summarizeUrlForStatus(payload.url)}`;
   if (name === 'add_artifact_highlight') {
@@ -17085,11 +17193,13 @@ async function executeLuminoChat(input, options = {}) {
           const searchRes = await searchLocalEvidence(query, getToolScopedRefs(), {
             topK,
             includeKinds,
+            anchorReferenceId: srId,
             userDataPath: app.getPath('userData'),
             ragEnabled: !!activeSettings.rag_enabled,
             embeddingRuntime: ragEmbedding.runtime,
             embeddingModel: ragEmbedding.model,
             embeddingConfig: ragEmbedding.config,
+            temporalGraphScorer: computeTemporalGraphScoresWithPython,
           });
           const results = Array.isArray(searchRes && searchRes.results) ? searchRes.results : [];
           const citations = Array.isArray(searchRes && searchRes.citations) ? searchRes.citations : [];
@@ -17105,7 +17215,53 @@ async function executeLuminoChat(input, options = {}) {
               embedding_runtime: String((searchRes && searchRes.embedding_runtime) || ''),
               embedding_model: String((searchRes && searchRes.embedding_model) || ''),
               index_state: String((searchRes && searchRes.index_state) || ''),
+              graph_state: String((searchRes && searchRes.graph_state) || ''),
               fallback_used: !!(searchRes && searchRes.fallback_used),
+            },
+          };
+        }
+
+        if (name === 'expand_local_evidence_graph') {
+          const query = String(args.query || '').trim();
+          if (!query) {
+            return { ok: false, message: 'query is required.', tool_output: { ok: false, message: 'query is required.' } };
+          }
+          const topK = Math.max(1, Math.min(Number(Number.isFinite(Number(args.top_k)) ? args.top_k : 6), 12));
+          const includeKinds = Array.isArray(args.include_kinds)
+            ? args.include_kinds.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
+            : [];
+          const seedSourceKeys = Array.isArray(args.seed_source_keys)
+            ? args.seed_source_keys.map((item) => String(item || '').trim()).filter(Boolean)
+            : [];
+          const activeSettings = readSettings();
+          const ragEmbedding = resolveRagEmbeddingSettings(activeSettings);
+          const expandRes = await expandLocalEvidenceGraph(query, getToolScopedRefs(), {
+            topK,
+            includeKinds,
+            seed_source_keys: seedSourceKeys,
+            anchorReferenceId: srId,
+            userDataPath: app.getPath('userData'),
+            ragEnabled: !!activeSettings.rag_enabled,
+            embeddingRuntime: ragEmbedding.runtime,
+            embeddingModel: ragEmbedding.model,
+            embeddingConfig: ragEmbedding.config,
+            temporalGraphScorer: computeTemporalGraphScoresWithPython,
+          });
+          const expandedResults = Array.isArray(expandRes && expandRes.expanded_results) ? expandRes.expanded_results : [];
+          return {
+            ok: !!(expandRes && expandRes.ok),
+            message: expandRes && expandRes.ok
+              ? `Expanded ${expandedResults.length} graph-connected source(s) for "${query}".`
+              : String((expandRes && expandRes.message) || 'Local evidence graph expansion failed.'),
+            tool_output: {
+              ok: !!(expandRes && expandRes.ok),
+              query,
+              graph_state: String((expandRes && expandRes.graph_state) || ''),
+              seed_results: Array.isArray(expandRes && expandRes.seed_results) ? expandRes.seed_results : [],
+              expanded_results: expandedResults,
+              graph_signals: (expandRes && expandRes.graph_signals && typeof expandRes.graph_signals === 'object')
+                ? expandRes.graph_signals
+                : {},
             },
           };
         }

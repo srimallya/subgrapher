@@ -3,7 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { embedTexts, hashEmbedText, HASH_FALLBACK_MODEL } = require('./embedding_runtime');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DEFAULT_BATCH_SIZE = 24;
 const dbTaskByPath = new Map();
 
@@ -92,6 +92,15 @@ function toDocRows(referenceId = '', docs = []) {
     .filter(Boolean);
 }
 
+function safeParseJsonArray(raw, fallback = []) {
+  try {
+    const parsed = JSON.parse(String(raw || ''));
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
 function readMeta(db) {
   const out = {};
   const result = db.exec('SELECT key, value FROM meta');
@@ -123,15 +132,22 @@ async function getSqlModule() {
   return sqlModulePromise;
 }
 
+function dropAllTables(db) {
+  db.run('DROP TABLE IF EXISTS graph_scores');
+  db.run('DROP TABLE IF EXISTS graph_edges');
+  db.run('DROP TABLE IF EXISTS graph_nodes');
+  db.run('DROP TABLE IF EXISTS embeddings');
+  db.run('DROP TABLE IF EXISTS documents');
+  db.run('DELETE FROM meta');
+}
+
 function ensureSchema(db) {
   db.run('PRAGMA foreign_keys = ON');
   db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
   const meta = readMeta(db);
   const existingVersion = Number(meta.schema_version || 0);
   if (existingVersion && existingVersion !== SCHEMA_VERSION) {
-    db.run('DROP TABLE IF EXISTS embeddings');
-    db.run('DROP TABLE IF EXISTS documents');
-    db.run('DELETE FROM meta');
+    dropAllTables(db);
   }
   db.run(`
     CREATE TABLE IF NOT EXISTS documents (
@@ -161,8 +177,49 @@ function ensureSchema(db) {
       FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
     );
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS graph_nodes (
+      source_key TEXT PRIMARY KEY,
+      kind TEXT,
+      source_locator TEXT,
+      artifact_id TEXT,
+      context_file_id TEXT,
+      url TEXT,
+      reference_id TEXT,
+      reference_title TEXT,
+      snippet TEXT,
+      marker_backed INTEGER NOT NULL DEFAULT 0,
+      source_updated_at INTEGER NOT NULL DEFAULT 0,
+      scope_reference_ids_json TEXT NOT NULL DEFAULT '[]',
+      terms_json TEXT NOT NULL DEFAULT '[]',
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS graph_edges (
+      src_key TEXT NOT NULL,
+      dst_key TEXT NOT NULL,
+      ts INTEGER NOT NULL DEFAULT 0,
+      weight REAL NOT NULL DEFAULT 0,
+      shared_terms_json TEXT NOT NULL DEFAULT '[]',
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (src_key, dst_key)
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS graph_scores (
+      source_key TEXT PRIMARY KEY,
+      global_score REAL NOT NULL DEFAULT 0,
+      recent_30d_score REAL NOT NULL DEFAULT 0,
+      recent_7d_score REAL NOT NULL DEFAULT 0,
+      top_neighbors_json TEXT NOT NULL DEFAULT '[]',
+      computed_at INTEGER NOT NULL DEFAULT 0
+    );
+  `);
   db.run('CREATE INDEX IF NOT EXISTS idx_documents_reference ON documents(reference_id)');
   db.run('CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_id)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(src_key)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)');
   upsertMeta(db, 'schema_version', String(SCHEMA_VERSION));
 }
 
@@ -343,6 +400,222 @@ function loadVectors(db, modelId = '', docIds = []) {
   return out;
 }
 
+function clearGraphTables(db) {
+  db.run('DELETE FROM graph_scores');
+  db.run('DELETE FROM graph_edges');
+  db.run('DELETE FROM graph_nodes');
+}
+
+function normalizeGraphNode(node = {}) {
+  return {
+    source_key: String(node.source_key || '').trim(),
+    kind: String(node.kind || '').trim(),
+    source_locator: String(node.source_locator || '').trim(),
+    artifact_id: String(node.artifact_id || '').trim(),
+    context_file_id: String(node.context_file_id || '').trim(),
+    url: String(node.url || '').trim(),
+    reference_id: String(node.reference_id || '').trim(),
+    reference_title: String(node.reference_title || '').trim(),
+    snippet: String(node.snippet || '').trim(),
+    marker_backed: !!node.marker_backed,
+    source_updated_at: Math.max(0, Math.round(Number(node.source_updated_at) || 0)),
+    scope_reference_ids: Array.isArray(node.scope_reference_ids)
+      ? node.scope_reference_ids.map((item) => String(item || '').trim()).filter(Boolean)
+      : [],
+    terms: Array.isArray(node.terms)
+      ? node.terms.map((item) => String(item || '').trim()).filter(Boolean)
+      : [],
+  };
+}
+
+function normalizeGraphEdge(edge = {}) {
+  const srcKey = String(edge.src_key || edge.src || '').trim();
+  const dstKey = String(edge.dst_key || edge.dst || '').trim();
+  if (!srcKey || !dstKey) return null;
+  const sorted = [srcKey, dstKey].sort((a, b) => a.localeCompare(b));
+  return {
+    src_key: sorted[0],
+    dst_key: sorted[1],
+    ts: Math.max(0, Math.round(Number(edge.ts) || 0)),
+    weight: Number(edge.weight) || 0,
+    shared_terms: Array.isArray(edge.shared_terms)
+      ? edge.shared_terms.map((item) => String(item || '').trim()).filter(Boolean)
+      : [],
+  };
+}
+
+function normalizeGraphScore(score = {}) {
+  return {
+    source_key: String(score.source_key || '').trim(),
+    global_score: Number(score.global_score) || 0,
+    recent_30d_score: Number(score.recent_30d_score) || 0,
+    recent_7d_score: Number(score.recent_7d_score) || 0,
+    top_neighbors: Array.isArray(score.top_neighbors)
+      ? score.top_neighbors
+        .map((item) => ({
+          source_key: String(item && item.source_key || '').trim(),
+          weight: Number(item && item.weight) || 0,
+        }))
+        .filter((item) => item.source_key)
+      : [],
+    computed_at: Math.max(0, Math.round(Number(score.computed_at) || 0)),
+  };
+}
+
+function upsertGraphData(db, graph = {}) {
+  clearGraphTables(db);
+  const ts = nowTs();
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes.map(normalizeGraphNode).filter((item) => item.source_key) : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges.map(normalizeGraphEdge).filter(Boolean) : [];
+  const scores = Array.isArray(graph.scores) ? graph.scores.map(normalizeGraphScore).filter((item) => item.source_key) : [];
+
+  const nodeStmt = db.prepare(`
+    INSERT INTO graph_nodes (
+      source_key, kind, source_locator, artifact_id, context_file_id, url, reference_id,
+      reference_title, snippet, marker_backed, source_updated_at, scope_reference_ids_json, terms_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  nodes.forEach((node) => {
+    nodeStmt.bind([
+      node.source_key,
+      node.kind,
+      node.source_locator,
+      node.artifact_id,
+      node.context_file_id,
+      node.url,
+      node.reference_id,
+      node.reference_title,
+      node.snippet,
+      node.marker_backed ? 1 : 0,
+      node.source_updated_at,
+      JSON.stringify(node.scope_reference_ids),
+      JSON.stringify(node.terms),
+      ts,
+    ]);
+    nodeStmt.step();
+    nodeStmt.reset();
+  });
+  nodeStmt.free();
+
+  const edgeStmt = db.prepare(`
+    INSERT INTO graph_edges (
+      src_key, dst_key, ts, weight, shared_terms_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  edges.forEach((edge) => {
+    edgeStmt.bind([
+      edge.src_key,
+      edge.dst_key,
+      edge.ts,
+      edge.weight,
+      JSON.stringify(edge.shared_terms),
+      ts,
+    ]);
+    edgeStmt.step();
+    edgeStmt.reset();
+  });
+  edgeStmt.free();
+
+  const scoreStmt = db.prepare(`
+    INSERT INTO graph_scores (
+      source_key, global_score, recent_30d_score, recent_7d_score, top_neighbors_json, computed_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  scores.forEach((score) => {
+    scoreStmt.bind([
+      score.source_key,
+      score.global_score,
+      score.recent_30d_score,
+      score.recent_7d_score,
+      JSON.stringify(score.top_neighbors),
+      score.computed_at,
+    ]);
+    scoreStmt.step();
+    scoreStmt.reset();
+  });
+  scoreStmt.free();
+
+  return {
+    node_count: nodes.length,
+    edge_count: edges.length,
+    score_count: scores.length,
+  };
+}
+
+function queryGraphNodes(db) {
+  const out = [];
+  const stmt = db.prepare(`
+    SELECT
+      source_key, kind, source_locator, artifact_id, context_file_id, url, reference_id,
+      reference_title, snippet, marker_backed, source_updated_at, scope_reference_ids_json, terms_json
+    FROM graph_nodes
+    ORDER BY source_key
+  `);
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    out.push({
+      source_key: String(row.source_key || '').trim(),
+      kind: String(row.kind || '').trim(),
+      source_locator: String(row.source_locator || '').trim(),
+      artifact_id: String(row.artifact_id || '').trim(),
+      context_file_id: String(row.context_file_id || '').trim(),
+      url: String(row.url || '').trim(),
+      reference_id: String(row.reference_id || '').trim(),
+      reference_title: String(row.reference_title || '').trim(),
+      snippet: String(row.snippet || '').trim(),
+      marker_backed: !!row.marker_backed,
+      source_updated_at: Number(row.source_updated_at || 0),
+      scope_reference_ids: safeParseJsonArray(row.scope_reference_ids_json, []),
+      terms: safeParseJsonArray(row.terms_json, []),
+    });
+  }
+  stmt.free();
+  return out;
+}
+
+function queryGraphEdges(db) {
+  const out = [];
+  const stmt = db.prepare(`
+    SELECT src_key, dst_key, ts, weight, shared_terms_json
+    FROM graph_edges
+    ORDER BY src_key, dst_key
+  `);
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    out.push({
+      src_key: String(row.src_key || '').trim(),
+      dst_key: String(row.dst_key || '').trim(),
+      ts: Number(row.ts || 0),
+      weight: Number(row.weight || 0),
+      shared_terms: safeParseJsonArray(row.shared_terms_json, []),
+    });
+  }
+  stmt.free();
+  return out;
+}
+
+function queryGraphScores(db) {
+  const out = [];
+  const stmt = db.prepare(`
+    SELECT source_key, global_score, recent_30d_score, recent_7d_score, top_neighbors_json, computed_at
+    FROM graph_scores
+    ORDER BY source_key
+  `);
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    out.push({
+      source_key: String(row.source_key || '').trim(),
+      global_score: Number(row.global_score || 0),
+      recent_30d_score: Number(row.recent_30d_score || 0),
+      recent_7d_score: Number(row.recent_7d_score || 0),
+      top_neighbors: safeParseJsonArray(row.top_neighbors_json, []),
+      computed_at: Number(row.computed_at || 0),
+    });
+  }
+  stmt.free();
+  return out;
+}
+
 async function buildVectorsForDocs(docs = [], options = {}) {
   const list = Array.isArray(docs) ? docs : [];
   const targetModel = String(options.modelId || '').trim() || HASH_FALLBACK_MODEL;
@@ -457,7 +730,8 @@ async function ensureReferenceRagIndex(options = {}) {
       }
 
       const embedded = queryEmbeddedDocIds(db, targetModel, docIds);
-      const missingDocs = docs.filter((doc) => !embedded.has(doc.doc_id) || changedDocs.some((changed) => changed.doc_id === doc.doc_id));
+      const changedSet = new Set(changedDocs.map((doc) => doc.doc_id));
+      const missingDocs = docs.filter((doc) => !embedded.has(doc.doc_id) || changedSet.has(doc.doc_id));
 
       let modelUsed = targetModel;
       let runtimeUsed = String(cfg.embeddingRuntime || '').trim() || 'none';
@@ -537,6 +811,73 @@ async function ensureReferenceRagIndex(options = {}) {
   });
 }
 
+async function writeReferenceGraphSidecar(options = {}) {
+  const cfg = (options && typeof options === 'object') ? options : {};
+  const userDataPath = String(cfg.userDataPath || '').trim();
+  const referenceId = String(cfg.referenceId || '').trim();
+  const dbPath = getRagIndexPath(userDataPath, referenceId);
+  if (!dbPath || !referenceId) {
+    return {
+      ok: false,
+      graph_state: 'disabled',
+      message: 'RAG index path is unavailable.',
+      db_path: dbPath,
+    };
+  }
+
+  return withDbLock(dbPath, async () => {
+    let db = null;
+    try {
+      db = await openDatabase(dbPath);
+      ensureSchema(db);
+      const graphState = String(cfg.graphState || 'empty').trim() || 'empty';
+      const graphVersion = String(cfg.graphVersion || '').trim();
+      const graphMessage = String(cfg.graphMessage || '').trim();
+      const computedAt = Math.max(0, Math.round(Number(cfg.graphScoredAt) || 0));
+      const counts = upsertGraphData(db, {
+        nodes: cfg.nodes,
+        edges: cfg.edges,
+        scores: cfg.scores,
+      });
+      upsertMeta(db, 'graph_version', graphVersion);
+      upsertMeta(db, 'graph_state', graphState);
+      upsertMeta(db, 'graph_node_count', String(counts.node_count));
+      upsertMeta(db, 'graph_edge_count', String(counts.edge_count));
+      upsertMeta(db, 'graph_scored_at', String(computedAt));
+      upsertMeta(db, 'graph_message', graphMessage);
+      saveDatabase(db, dbPath);
+      return {
+        ok: true,
+        db_path: dbPath,
+        reference_id: referenceId,
+        graph_state: graphState,
+        graph_version: graphVersion,
+        graph_node_count: counts.node_count,
+        graph_edge_count: counts.edge_count,
+        graph_score_count: counts.score_count,
+        graph_scored_at: computedAt,
+        message: graphMessage,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        db_path: dbPath,
+        reference_id: referenceId,
+        graph_state: 'error',
+        message: String((err && err.message) || 'Unable to write graph sidecar.'),
+      };
+    } finally {
+      if (db) {
+        try {
+          db.close();
+        } catch (_) {
+          // noop
+        }
+      }
+    }
+  });
+}
+
 async function readReferenceRagStatus(options = {}) {
   const cfg = (options && typeof options === 'object') ? options : {};
   const userDataPath = String(cfg.userDataPath || '').trim();
@@ -557,6 +898,12 @@ async function readReferenceRagStatus(options = {}) {
       embedding_runtime: 'none',
       updated_at: 0,
       reference_version: '',
+      graph_version: '',
+      graph_state: 'missing',
+      graph_ready: false,
+      graph_node_count: 0,
+      graph_edge_count: 0,
+      graph_scored_at: 0,
     };
   }
 
@@ -578,6 +925,7 @@ async function readReferenceRagStatus(options = {}) {
       }
       embStmt.free();
     }
+    const graphState = String(meta.graph_state || (Number(meta.graph_node_count || 0) > 0 ? 'ready' : 'missing')).trim() || 'missing';
     return {
       ok: true,
       state: docCount > 0 ? 'ready' : 'empty',
@@ -589,6 +937,13 @@ async function readReferenceRagStatus(options = {}) {
       embedding_runtime: String(meta.embedding_runtime || 'none').trim() || 'none',
       updated_at: Number(meta.updated_at || 0),
       reference_version: String(meta.reference_version || ''),
+      graph_version: String(meta.graph_version || ''),
+      graph_state: graphState,
+      graph_ready: graphState === 'ready',
+      graph_node_count: Number(meta.graph_node_count || 0),
+      graph_edge_count: Number(meta.graph_edge_count || 0),
+      graph_scored_at: Number(meta.graph_scored_at || 0),
+      message: String(meta.graph_message || ''),
     };
   } catch (err) {
     return {
@@ -597,6 +952,75 @@ async function readReferenceRagStatus(options = {}) {
       reference_id: referenceId,
       db_path: dbPath,
       message: String((err && err.message) || 'Unable to read RAG index status.'),
+    };
+  } finally {
+    if (db) {
+      try {
+        db.close();
+      } catch (_) {
+        // noop
+      }
+    }
+  }
+}
+
+async function readReferenceGraphSidecar(options = {}) {
+  const cfg = (options && typeof options === 'object') ? options : {};
+  const userDataPath = String(cfg.userDataPath || '').trim();
+  const referenceId = String(cfg.referenceId || '').trim();
+  const dbPath = getRagIndexPath(userDataPath, referenceId);
+  if (!dbPath || !referenceId) {
+    return {
+      ok: false,
+      graph_state: 'disabled',
+      message: 'RAG index path is unavailable.',
+      db_path: dbPath,
+      nodes: [],
+      edges: [],
+      scores: [],
+    };
+  }
+  if (!fs.existsSync(dbPath)) {
+    return {
+      ok: true,
+      graph_state: 'missing',
+      db_path: dbPath,
+      reference_id: referenceId,
+      nodes: [],
+      edges: [],
+      scores: [],
+    };
+  }
+
+  let db = null;
+  try {
+    db = await openDatabase(dbPath);
+    ensureSchema(db);
+    const meta = readMeta(db);
+    return {
+      ok: true,
+      db_path: dbPath,
+      reference_id: referenceId,
+      graph_state: String(meta.graph_state || 'missing').trim() || 'missing',
+      graph_version: String(meta.graph_version || ''),
+      graph_node_count: Number(meta.graph_node_count || 0),
+      graph_edge_count: Number(meta.graph_edge_count || 0),
+      graph_scored_at: Number(meta.graph_scored_at || 0),
+      message: String(meta.graph_message || ''),
+      nodes: queryGraphNodes(db),
+      edges: queryGraphEdges(db),
+      scores: queryGraphScores(db),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      db_path: dbPath,
+      reference_id: referenceId,
+      graph_state: 'error',
+      message: String((err && err.message) || 'Unable to read graph sidecar.'),
+      nodes: [],
+      edges: [],
+      scores: [],
     };
   } finally {
     if (db) {
@@ -625,8 +1049,11 @@ async function deleteReferenceRagIndex(options = {}) {
 
 module.exports = {
   HASH_FALLBACK_MODEL,
+  SCHEMA_VERSION,
   getRagIndexPath,
   ensureReferenceRagIndex,
+  writeReferenceGraphSidecar,
+  readReferenceGraphSidecar,
   readReferenceRagStatus,
   deleteReferenceRagIndex,
 };
