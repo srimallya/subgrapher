@@ -23206,12 +23206,12 @@ ipcMain.handle('browser:hyperwebImportReference', async (_event, payload) => {
   const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
   const item = (payload && payload.item && typeof payload.item === 'object') ? payload.item : {};
-  const isSnapshot = (
-    String(item.source_type || '').toLowerCase() === 'public_snapshot'
-    || !!String(item.snapshot_id || '').trim()
-  );
-  if (isSnapshot) {
-    return importPublicReferenceAsPrivateCopy(item);
+  const hasReferencePayload = !!(item.reference_payload && typeof item.reference_payload === 'object');
+  if (hasReferencePayload) {
+    return importPublicReferenceAsPrivateCopy({
+      ...item,
+      source_type: 'public_snapshot',
+    });
   }
   const importRes = await hyperwebManager.importSuggestion(item || {});
   if (!importRes || !importRes.ok || !importRes.imported) {
