@@ -448,6 +448,10 @@ class HyperwebManager extends EventEmitter {
         updated_at: Number(normalized.updated_at || nowTs()),
         tab_count: tabs.length,
         artifact_count: artifacts.length,
+        summary_text: normalizeText(item && item.summary_text),
+        about_markdown: normalizeText(item && item.about_markdown),
+        about_source: normalizeText(item && item.about_source),
+        about_updated_at: Number((item && item.about_updated_at) || 0),
         manifest_summary: (item && item.manifest_summary && typeof item.manifest_summary === 'object')
           ? item.manifest_summary
           : null,
@@ -517,6 +521,10 @@ class HyperwebManager extends EventEmitter {
       title: String((ref && ref.title) || 'Untitled'),
       intent: String((ref && ref.intent) || ''),
       tags: Array.isArray(ref && ref.tags) ? ref.tags : [],
+      summary_text: String((ref && ref.summary_text) || ''),
+      about_markdown: String((ref && ref.about_markdown) || ''),
+      about_source: normalizeText(ref && ref.about_source),
+      about_updated_at: Number((ref && ref.about_updated_at) || 0),
       updated_at: Number((ref && ref.updated_at) || nowTs()),
       tab_count: Array.isArray(ref && ref.tabs) ? ref.tabs.length : 0,
       artifact_count: Array.isArray(ref && ref.artifacts) ? ref.artifacts.length : 0,

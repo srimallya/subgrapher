@@ -159,7 +159,10 @@ const YOUTUBE_TRANSCRIPTS_MAX_ITEMS = 40;
 const YOUTUBE_TRANSCRIPT_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const PUBLIC_REFERENCE_SUMMARY_MAX_CHARS = 520;
 const PUBLIC_REFERENCE_SUMMARY_TIMEOUT_MS = 18_000;
+const PUBLIC_REFERENCE_ABOUT_MAX_CHARS = 2_800;
+const PUBLIC_REFERENCE_ABOUT_TIMEOUT_MS = 24_000;
 const PUBLIC_REFERENCE_MANIFEST_VERSION = 1;
+const TELEGRAM_RENDER_MAX_CAPTURE_HEIGHT = 12_000;
 const ORPHAN_CANDIDATE_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const ORPHAN_DUPLICATE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const ORPHAN_BROKEN_SHARE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
@@ -4398,11 +4401,67 @@ async function captureHtmlToPng(options = {}) {
       if (waitMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
-      const image = await win.webContents.capturePage();
+      const measureCaptureBounds = async () => {
+        try {
+          const measured = await win.webContents.executeJavaScript(`
+            (() => {
+              const doc = document.documentElement;
+              const body = document.body;
+              const widthCandidates = [
+                window.innerWidth || 0,
+                doc ? doc.scrollWidth : 0,
+                doc ? doc.offsetWidth : 0,
+                body ? body.scrollWidth : 0,
+                body ? body.offsetWidth : 0,
+              ];
+              const heightCandidates = [
+                window.innerHeight || 0,
+                doc ? doc.scrollHeight : 0,
+                doc ? doc.offsetHeight : 0,
+                body ? body.scrollHeight : 0,
+                body ? body.offsetHeight : 0,
+              ];
+              return {
+                width: Math.max(...widthCandidates),
+                height: Math.max(...heightCandidates),
+              };
+            })();
+          `);
+          return {
+            width: Math.max(width, Math.min(3840, Math.round(Number((measured && measured.width) || width) || width))),
+            height: Math.max(height, Math.min(TELEGRAM_RENDER_MAX_CAPTURE_HEIGHT, Math.round(Number((measured && measured.height) || height) || height))),
+          };
+        } catch (_) {
+          return { width, height };
+        }
+      };
+
+      let captureSize = { width, height };
+      for (let pass = 0; pass < 2; pass += 1) {
+        const measured = await measureCaptureBounds();
+        if (measured.width === captureSize.width && measured.height === captureSize.height) break;
+        captureSize = measured;
+        win.setContentSize(captureSize.width, captureSize.height);
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+
+      const image = await win.webContents.capturePage({
+        x: 0,
+        y: 0,
+        width: captureSize.width,
+        height: captureSize.height,
+      });
       const png = image.toPNG();
       fs.writeFileSync(outputPath, png);
       const bytes = Buffer.byteLength(png);
-      return { ok: true, png_path: outputPath, local_path: outputPath, width, height, bytes };
+      return {
+        ok: true,
+        png_path: outputPath,
+        local_path: outputPath,
+        width: captureSize.width,
+        height: captureSize.height,
+        bytes,
+      };
     } finally {
       if (win && !win.isDestroyed()) {
         try {
@@ -8947,9 +9006,13 @@ function sanitizePublicReference(ref) {
   const tabs = portableTabs;
   const artifacts = portableArtifacts;
   const cachedSummary = getPublicReferenceSummaryCache(ref);
+  const cachedAbout = getPublicReferenceAboutCache(ref);
   const summaryText = cachedSummary
     ? cachedSummary.summary
     : buildPublicReferenceSummary(ref);
+  const aboutMarkdown = cachedAbout
+    ? cachedAbout.markdown
+    : buildPublicReferenceAbout(ref);
   const stateHash = cachedSummary && cachedSummary.state_hash
     ? cachedSummary.state_hash
     : buildPublicReferenceStateHash(ref);
@@ -9009,7 +9072,11 @@ function sanitizePublicReference(ref) {
       program: String((portableRef && portableRef.program) || ''),
     }, manifest),
     summary_text: summaryText,
+    about_markdown: aboutMarkdown,
+    about_source: cachedAbout ? String(cachedAbout.source || '') : 'heuristic',
+    about_updated_at: cachedAbout ? Number(cachedAbout.updated_at || nowTs()) : nowTs(),
     public_summary_state_hash: stateHash,
+    public_about_state_hash: stateHash,
     source_type: 'local_public',
     source_peer_id: String(author.peer_id || ''),
     source_peer_name: String(author.peer_name || ''),
@@ -9087,6 +9154,155 @@ function getPublicReferencesForHyperweb() {
         hyperweb_payload_version: Number((payload && payload.hyperweb_payload_version) || 1),
       };
     });
+}
+
+function maybeRefreshHyperwebPublicIndex() {
+  hyperwebManager.refreshLocalPublicIndex().then(() => {
+    const status = hyperwebManager.getStatus();
+    if (status && status.connected) {
+      hyperwebManager.announcePublicIndex().catch(() => {});
+    }
+  }).catch(() => {});
+}
+
+async function resolvePublicReferencePayloadForPreview(item = {}) {
+  const source = (item && typeof item === 'object') ? item : {};
+  const importPayload = (source.import_payload && typeof source.import_payload === 'object') ? source.import_payload : {};
+  const directPayload = (source.reference_payload && typeof source.reference_payload === 'object')
+    ? source.reference_payload
+    : ((importPayload.reference_payload && typeof importPayload.reference_payload === 'object') ? importPayload.reference_payload : null);
+  if (directPayload) {
+    return {
+      ok: true,
+      payload: directPayload,
+      source: 'inline_payload',
+      snapshot_id: String((source.snapshot_id || importPayload.snapshot_id || directPayload.snapshot_id) || '').trim(),
+      peer_id: String((source.peer_id || importPayload.peer_id || directPayload.source_peer_id) || '').trim().toUpperCase(),
+    };
+  }
+
+  const snapshotId = String((source.snapshot_id || importPayload.snapshot_id) || '').trim();
+  if (snapshotId) {
+    const snapshotsState = pruneHyperwebPublicSnapshotsState(readHyperwebPublicSnapshotsState());
+    const snapshot = (Array.isArray(snapshotsState.snapshots) ? snapshotsState.snapshots : []).find((entry) => (
+      String((entry && entry.snapshot_id) || '').trim() === snapshotId
+    )) || null;
+    const snapshotPayload = (snapshot && snapshot.reference_payload && typeof snapshot.reference_payload === 'object')
+      ? snapshot.reference_payload
+      : null;
+    if (snapshotPayload) {
+      return {
+        ok: true,
+        payload: snapshotPayload,
+        source: 'local_snapshot',
+        snapshot,
+        snapshots_state: snapshotsState,
+        snapshot_id: snapshotId,
+        peer_id: String((source.peer_id || importPayload.peer_id || snapshot.author_fingerprint || snapshotPayload.source_peer_id) || '').trim().toUpperCase(),
+      };
+    }
+  }
+
+  const suggestion = {
+    ...importPayload,
+    ...source,
+    peer_id: String((importPayload.transport_peer_id || importPayload.peer_id || source.transport_peer_id || source.peer_id) || '').trim().toUpperCase(),
+    transport_peer_id: String((importPayload.transport_peer_id || source.transport_peer_id || importPayload.peer_id || source.peer_id) || '').trim().toUpperCase(),
+    reference_id: String((importPayload.reference_id || source.reference_id) || '').trim(),
+    snapshot_id: snapshotId,
+    source_type: String((importPayload.source_type || source.source_type) || 'hyperweb_candidate'),
+  };
+  const importRes = await hyperwebManager.importSuggestion(suggestion);
+  if (!importRes || !importRes.ok || !importRes.imported) {
+    return { ok: false, message: (importRes && importRes.message) || 'Unable to resolve public reference preview.' };
+  }
+  return {
+    ok: true,
+    payload: importRes.imported,
+    source: 'remote_fetch',
+    snapshot_id: snapshotId,
+    peer_id: String((suggestion.peer_id || importRes.imported.source_peer_id) || '').trim().toUpperCase(),
+  };
+}
+
+async function ensurePublicReferencePreviewForDiscovery(item = {}) {
+  const source = (item && typeof item === 'object') ? item : {};
+  const resolved = await resolvePublicReferencePayloadForPreview(source);
+  if (!resolved || !resolved.ok || !resolved.payload) {
+    return { ok: false, message: String((resolved && resolved.message) || 'Unable to resolve public reference.') };
+  }
+
+  const payload = resolved.payload;
+  const metaRes = await ensurePublicReferenceDiscoveryMetadata(payload, '', {});
+  const summaryText = normalizePublicSummaryText(
+    String((metaRes && metaRes.summary && metaRes.summary.summary) || payload.summary_text || buildPublicReferenceSummary(payload))
+  ) || 'No summary available.';
+  const aboutMarkdown = normalizePublicAboutMarkdown(
+    String((metaRes && metaRes.about && metaRes.about.about_markdown) || payload.about_markdown || '')
+  );
+  const aboutSource = String((metaRes && metaRes.about && metaRes.about.source) || payload.about_source || '').trim();
+  const updatedAt = nowTs();
+
+  payload.summary_text = summaryText;
+  payload.about_markdown = aboutMarkdown;
+  payload.about_source = aboutSource;
+  payload.about_updated_at = updatedAt;
+  payload.public_summary_state_hash = String((metaRes && metaRes.summary && metaRes.summary.state_hash) || payload.public_summary_state_hash || '').trim();
+  payload.public_about_state_hash = String((metaRes && metaRes.about && metaRes.about.state_hash) || payload.public_about_state_hash || payload.public_summary_state_hash || '').trim();
+
+  if (resolved.source === 'local_snapshot' && resolved.snapshot && resolved.snapshots_state) {
+    const snapshot = resolved.snapshot;
+    snapshot.reference_payload = {
+      ...(snapshot.reference_payload && typeof snapshot.reference_payload === 'object' ? snapshot.reference_payload : {}),
+      summary_text: summaryText,
+      about_markdown: aboutMarkdown,
+      about_source: aboutSource,
+      about_updated_at: updatedAt,
+      public_summary_state_hash: String(payload.public_summary_state_hash || '').trim(),
+      public_about_state_hash: String(payload.public_about_state_hash || '').trim(),
+    };
+    snapshot.summary_text = summaryText;
+    snapshot.updated_at = updatedAt;
+    writeHyperwebPublicSnapshotsState(resolved.snapshots_state);
+    syncPublicFeedWithSnapshots();
+    maybeRefreshHyperwebPublicIndex();
+  } else {
+    upsertCachedPublicReferencePreview({
+      snapshot_id: String((source.snapshot_id || resolved.snapshot_id || payload.snapshot_id) || '').trim(),
+      reference_id: String((source.reference_id || payload.reference_id || payload.id) || '').trim(),
+      reference_uid: String((source.reference_uid || payload.reference_uid) || '').trim(),
+      lineage_id: String((source.lineage_id || payload.lineage_id) || '').trim(),
+      peer_id: String((source.peer_id || resolved.peer_id || payload.source_peer_id) || '').trim().toUpperCase(),
+      peer_name: String((source.peer_name || payload.source_peer_name) || '').trim(),
+    }, {
+      snapshot_id: String((source.snapshot_id || resolved.snapshot_id || payload.snapshot_id) || '').trim(),
+      reference_id: String((source.reference_id || payload.reference_id || payload.id) || '').trim(),
+      reference_uid: String((source.reference_uid || payload.reference_uid) || '').trim(),
+      lineage_id: String((source.lineage_id || payload.lineage_id) || '').trim(),
+      peer_id: String((source.peer_id || resolved.peer_id || payload.source_peer_id) || '').trim().toUpperCase(),
+      peer_name: String((source.peer_name || payload.source_peer_name) || '').trim(),
+      summary_text: summaryText,
+      about_markdown: aboutMarkdown,
+      about_source: aboutSource,
+      about_updated_at: updatedAt,
+      content_hash: String(payload.content_hash || '').trim(),
+      updated_at: updatedAt,
+    });
+  }
+
+  return {
+    ok: true,
+    summary_text: summaryText,
+    about_markdown: aboutMarkdown,
+    about_source: aboutSource,
+    snapshot_id: String((source.snapshot_id || resolved.snapshot_id || payload.snapshot_id) || '').trim(),
+    reference_id: String((source.reference_id || payload.reference_id || payload.id) || '').trim(),
+    reference_uid: String((source.reference_uid || payload.reference_uid) || '').trim(),
+    lineage_id: String((source.lineage_id || payload.lineage_id) || '').trim(),
+    peer_id: String((source.peer_id || resolved.peer_id || payload.source_peer_id) || '').trim().toUpperCase(),
+    peer_name: String((source.peer_name || payload.source_peer_name) || '').trim(),
+    updated_at: updatedAt,
+  };
 }
 
 function getHyperwebSocialPath() {
@@ -9193,6 +9409,7 @@ function createDefaultHyperwebSocialState() {
     private_inbox_receipts: {},
     chat_rooms: {},
     presence_by_peer: {},
+    public_reference_preview_cache: {},
     thread_policies: {},
     message_deletes: {},
     thread_deletes: {},
@@ -10093,6 +10310,9 @@ function ensureHyperwebSocialState() {
   if (!hyperwebSocialState.private_inbox_receipts || typeof hyperwebSocialState.private_inbox_receipts !== 'object') hyperwebSocialState.private_inbox_receipts = {};
   if (!hyperwebSocialState.chat_rooms || typeof hyperwebSocialState.chat_rooms !== 'object') hyperwebSocialState.chat_rooms = {};
   if (!hyperwebSocialState.presence_by_peer || typeof hyperwebSocialState.presence_by_peer !== 'object') hyperwebSocialState.presence_by_peer = {};
+  if (!hyperwebSocialState.public_reference_preview_cache || typeof hyperwebSocialState.public_reference_preview_cache !== 'object') {
+    hyperwebSocialState.public_reference_preview_cache = {};
+  }
   if (!hyperwebSocialState.thread_policies || typeof hyperwebSocialState.thread_policies !== 'object') hyperwebSocialState.thread_policies = {};
   if (!hyperwebSocialState.message_deletes || typeof hyperwebSocialState.message_deletes !== 'object') hyperwebSocialState.message_deletes = {};
   if (!hyperwebSocialState.thread_deletes || typeof hyperwebSocialState.thread_deletes !== 'object') hyperwebSocialState.thread_deletes = {};
@@ -10617,6 +10837,16 @@ function normalizePublicSummaryText(value, maxChars = PUBLIC_REFERENCE_SUMMARY_M
   return `${text.slice(0, Math.max(1, maxChars - 3))}...`;
 }
 
+function normalizePublicAboutMarkdown(value, maxChars = PUBLIC_REFERENCE_ABOUT_MAX_CHARS) {
+  const text = String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!text) return '';
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(1, maxChars - 3)).trim()}...`;
+}
+
 function buildPublicReferenceSummary(reference) {
   const ref = reference || {};
   const tags = Array.isArray(ref.tags) ? ref.tags.slice(0, 5).join(', ') : '';
@@ -10630,6 +10860,46 @@ function buildPublicReferenceSummary(reference) {
   const summary = normalizePublicSummaryText(combined);
   if (!summary) return 'No summary available.';
   return summary;
+}
+
+function buildPublicReferenceAbout(reference) {
+  const ref = reference || {};
+  const title = String(ref.title || 'Untitled').trim() || 'Untitled';
+  const intent = String(ref.intent || '').trim();
+  const summary = buildPublicReferenceSummary(ref);
+  const tags = Array.isArray(ref.tags) ? ref.tags.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 8) : [];
+  const tabs = Array.isArray(ref.tabs) ? ref.tabs : [];
+  const artifacts = Array.isArray(ref.artifacts) ? ref.artifacts : [];
+  const contextFiles = Array.isArray(ref.context_files) ? ref.context_files : [];
+
+  const lines = [`# ${title}`, ''];
+  if (summary && summary !== 'No summary available.') lines.push(summary, '');
+  if (intent && intent !== summary) lines.push(`Intent: ${intent}`, '');
+  lines.push('## What\'s Inside');
+  if (tags.length > 0) lines.push(`- Tags: ${tags.join(', ')}`);
+  lines.push(`- Tabs: ${tabs.length}`);
+  tabs.slice(0, 5).forEach((tab) => {
+    const tabTitle = String((tab && tab.title) || (tab && tab.url) || 'Untitled').trim();
+    const tabUrl = String((tab && tab.url) || '').trim();
+    lines.push(`  - ${tabTitle}${tabUrl ? ` (${tabUrl.slice(0, 160)})` : ''}`);
+  });
+  lines.push(`- Artifacts: ${artifacts.length}`);
+  artifacts.slice(0, 4).forEach((artifact) => {
+    const artifactTitle = String((artifact && artifact.title) || 'Artifact').trim();
+    lines.push(`  - ${artifactTitle}`);
+  });
+  if (contextFiles.length > 0) {
+    lines.push(`- Context files: ${contextFiles.length}`);
+    contextFiles.slice(0, 4).forEach((file) => {
+      const fileName = String((file && file.original_name) || (file && file.relative_path) || 'context').trim();
+      lines.push(`  - ${fileName}`);
+    });
+  }
+  lines.push('', '## Why It Matters', summary && summary !== 'No summary available.'
+    ? summary
+    : (intent || 'This reference captures the main materials, tabs, and artifacts for the topic.'));
+
+  return normalizePublicAboutMarkdown(lines.join('\n'));
 }
 
 function buildPublicReferenceStateHash(reference) {
@@ -10870,17 +11140,124 @@ function getPublicReferenceSummaryCache(reference) {
   const cache = reference && reference.public_summary_cache && typeof reference.public_summary_cache === 'object'
     ? reference.public_summary_cache
     : null;
-  if (!cache) return null;
-  const summary = normalizePublicSummaryText(cache.summary || '');
+  const fallback = (!cache && reference && typeof reference === 'object' && String(reference.summary_text || '').trim())
+    ? {
+      summary: String(reference.summary_text || ''),
+      state_hash: String(reference.public_summary_state_hash || ''),
+      source: 'published',
+      provider: '',
+      model: '',
+      updated_at: Number(reference.updated_at || 0),
+    }
+    : null;
+  const effective = cache || fallback;
+  if (!effective) return null;
+  const summary = normalizePublicSummaryText(effective.summary || '');
   if (!summary) return null;
   return {
     summary,
-    state_hash: String(cache.state_hash || ''),
-    source: String(cache.source || ''),
-    provider: String(cache.provider || ''),
-    model: String(cache.model || ''),
-    updated_at: Number(cache.updated_at || 0),
+    state_hash: String(effective.state_hash || ''),
+    source: String(effective.source || ''),
+    provider: String(effective.provider || ''),
+    model: String(effective.model || ''),
+    updated_at: Number(effective.updated_at || 0),
   };
+}
+
+function getPublicReferenceAboutCache(reference) {
+  const cache = reference && reference.public_about_cache && typeof reference.public_about_cache === 'object'
+    ? reference.public_about_cache
+    : null;
+  const fallback = (!cache && reference && typeof reference === 'object' && String(reference.about_markdown || '').trim())
+    ? {
+      markdown: String(reference.about_markdown || ''),
+      state_hash: String(reference.public_about_state_hash || reference.public_summary_state_hash || ''),
+      source: String(reference.about_source || 'published'),
+      provider: '',
+      model: '',
+      updated_at: Number(reference.about_updated_at || reference.updated_at || 0),
+    }
+    : null;
+  const effective = cache || fallback;
+  if (!effective) return null;
+  const markdown = normalizePublicAboutMarkdown(effective.markdown || effective.about_markdown || '');
+  if (!markdown) return null;
+  return {
+    markdown,
+    state_hash: String(effective.state_hash || ''),
+    source: String(effective.source || ''),
+    provider: String(effective.provider || ''),
+    model: String(effective.model || ''),
+    updated_at: Number(effective.updated_at || 0),
+  };
+}
+
+function buildPublicReferencePreviewCacheKey(input = {}) {
+  const item = (input && typeof input === 'object') ? input : {};
+  const snapshotId = String(item.snapshot_id || '').trim();
+  if (snapshotId) return `snapshot:${snapshotId}`;
+  const peerId = String(item.peer_id || item.source_peer_id || '').trim().toUpperCase();
+  const referenceUid = String(item.reference_uid || '').trim();
+  const referenceId = String(item.reference_id || item.id || '').trim();
+  if (peerId && referenceUid) return `refuid:${peerId}:${referenceUid}`;
+  if (peerId && referenceId) return `ref:${peerId}:${referenceId}`;
+  return '';
+}
+
+function getCachedPublicReferencePreview(input = {}) {
+  const cacheKey = buildPublicReferencePreviewCacheKey(input);
+  if (!cacheKey) return null;
+  const state = ensureHyperwebSocialState();
+  const cache = (state.public_reference_preview_cache && state.public_reference_preview_cache[cacheKey] && typeof state.public_reference_preview_cache[cacheKey] === 'object')
+    ? state.public_reference_preview_cache[cacheKey]
+    : null;
+  if (!cache) return null;
+  const aboutMarkdown = normalizePublicAboutMarkdown(cache.about_markdown || '');
+  const summaryText = normalizePublicSummaryText(cache.summary_text || '');
+  if (!aboutMarkdown && !summaryText) return null;
+  return {
+    ...cache,
+    about_markdown: aboutMarkdown,
+    summary_text: summaryText,
+    about_source: String(cache.about_source || ''),
+    about_updated_at: Number(cache.about_updated_at || cache.updated_at || 0),
+  };
+}
+
+function upsertCachedPublicReferencePreview(input = {}, preview = {}) {
+  const cacheKey = buildPublicReferencePreviewCacheKey(input);
+  if (!cacheKey) return null;
+  const state = ensureHyperwebSocialState();
+  state.public_reference_preview_cache = (state.public_reference_preview_cache && typeof state.public_reference_preview_cache === 'object')
+    ? state.public_reference_preview_cache
+    : {};
+  const next = {
+    cache_key: cacheKey,
+    snapshot_id: String(preview.snapshot_id || input.snapshot_id || '').trim(),
+    reference_id: String(preview.reference_id || input.reference_id || input.id || '').trim(),
+    reference_uid: String(preview.reference_uid || input.reference_uid || '').trim(),
+    lineage_id: String(preview.lineage_id || input.lineage_id || '').trim(),
+    peer_id: String(preview.peer_id || input.peer_id || input.source_peer_id || '').trim().toUpperCase(),
+    peer_name: String(preview.peer_name || input.peer_name || input.source_peer_name || '').trim(),
+    summary_text: normalizePublicSummaryText(preview.summary_text || ''),
+    about_markdown: normalizePublicAboutMarkdown(preview.about_markdown || ''),
+    about_source: String(preview.about_source || '').trim(),
+    about_updated_at: Number(preview.about_updated_at || preview.updated_at || nowTs()),
+    content_hash: String(preview.content_hash || '').trim(),
+    updated_at: Number(preview.updated_at || nowTs()),
+  };
+  state.public_reference_preview_cache[cacheKey] = next;
+  const cacheEntries = Object.entries(state.public_reference_preview_cache);
+  if (cacheEntries.length > 1200) {
+    cacheEntries
+      .sort((a, b) => Number((a[1] && a[1].updated_at) || 0) - Number((b[1] && b[1].updated_at) || 0))
+      .slice(0, Math.max(0, cacheEntries.length - 1200))
+      .forEach(([key]) => {
+        delete state.public_reference_preview_cache[key];
+      });
+  }
+  scheduleDeferredHyperwebSocialStateWrite(state);
+  return next;
 }
 
 function getPublicSummaryModelConfig() {
@@ -10955,6 +11332,10 @@ function buildPublicReferenceSummaryPrompt(reference, query = '') {
   ].filter(Boolean).join('\n');
 }
 
+function buildPublicReferenceAboutPrompt(reference, query = '') {
+  return buildPublicReferenceSummaryPrompt(reference, query);
+}
+
 async function generateModelPublicReferenceSummary(reference, query = '', modelConfig = null) {
   const config = modelConfig && typeof modelConfig === 'object' ? modelConfig : getPublicSummaryModelConfig();
   if (!config.available) return '';
@@ -10979,6 +11360,35 @@ async function generateModelPublicReferenceSummary(reference, query = '', modelC
     });
     if (!res || !res.ok) return '';
     return normalizePublicSummaryText(res.text || '');
+  } catch (_) {
+    return '';
+  }
+}
+
+async function generateModelPublicReferenceAbout(reference, query = '', modelConfig = null) {
+  const config = modelConfig && typeof modelConfig === 'object' ? modelConfig : getPublicSummaryModelConfig();
+  if (!config.available) return '';
+  const systemPrompt = [
+    'You write a README-style overview for a public research reference shown in discovery results.',
+    `Return compact Markdown only (max ${PUBLIC_REFERENCE_ABOUT_MAX_CHARS} characters).`,
+    'Use short sections that help another user understand what the reference contains before importing it.',
+    'Cover the main topic, the most important contents, and the likely value of the reference.',
+  ].join('\n');
+  const userPrompt = buildPublicReferenceAboutPrompt(reference, query);
+  try {
+    const res = await chatWithProvider({
+      provider: config.provider,
+      model: config.model,
+      apiKey: config.apiKey,
+      baseUrl: config.base_url,
+      systemPrompt,
+      userPrompt,
+      timeoutMs: PUBLIC_REFERENCE_ABOUT_TIMEOUT_MS,
+    }, {
+      timeoutMs: PUBLIC_REFERENCE_ABOUT_TIMEOUT_MS,
+    });
+    if (!res || !res.ok) return '';
+    return normalizePublicAboutMarkdown(res.text || '');
   } catch (_) {
     return '';
   }
@@ -11020,6 +11430,70 @@ async function ensurePublicReferenceSummary(reference, query = '', options = {})
     };
   }
   return { summary: finalSummary, changed, state_hash: stateHash };
+}
+
+async function ensurePublicReferenceAbout(reference, query = '', options = {}) {
+  if (!reference || typeof reference !== 'object') {
+    return { about_markdown: '', changed: false, state_hash: '', source: '' };
+  }
+  const stateHash = buildPublicReferenceStateHash(reference);
+  const cache = getPublicReferenceAboutCache(reference);
+  const heuristic = buildPublicReferenceAbout(reference);
+  const modelConfig = (options && options.modelConfig && typeof options.modelConfig === 'object')
+    ? options.modelConfig
+    : getPublicSummaryModelConfig();
+
+  if (cache && cache.state_hash === stateHash) {
+    if (cache.source === 'model' || !modelConfig.available) {
+      return {
+        about_markdown: cache.markdown,
+        changed: false,
+        state_hash: stateHash,
+        source: cache.source,
+      };
+    }
+  }
+
+  const modelAbout = await generateModelPublicReferenceAbout(reference, query, modelConfig);
+  const finalAbout = normalizePublicAboutMarkdown(modelAbout || heuristic);
+  const source = modelAbout ? 'model' : 'heuristic';
+  const changed = !cache
+    || cache.state_hash !== stateHash
+    || normalizePublicAboutMarkdown(cache.markdown || '') !== finalAbout
+    || String(cache.source || '') !== source;
+
+  if (changed) {
+    reference.public_about_cache = {
+      state_hash: stateHash,
+      markdown: finalAbout,
+      source,
+      provider: modelAbout ? String(modelConfig.provider || '') : '',
+      model: modelAbout ? String(modelConfig.model || '') : '',
+      updated_at: nowTs(),
+    };
+  }
+  return {
+    about_markdown: finalAbout,
+    changed,
+    state_hash: stateHash,
+    source,
+  };
+}
+
+async function ensurePublicReferenceDiscoveryMetadata(reference, query = '', options = {}) {
+  const [summaryRes, aboutRes] = await Promise.all([
+    ensurePublicReferenceSummary(reference, query, options),
+    ensurePublicReferenceAbout(reference, query, options),
+  ]);
+  if (reference && typeof reference === 'object') {
+    if (summaryRes && summaryRes.summary) reference.summary_text = summaryRes.summary;
+    if (aboutRes && aboutRes.about_markdown) {
+      reference.about_markdown = aboutRes.about_markdown;
+      reference.about_source = String(aboutRes.source || '');
+      reference.about_updated_at = nowTs();
+    }
+  }
+  return { summary: summaryRes, about: aboutRes };
 }
 
 function scoreHybridTextMatch(text, query) {
@@ -11070,6 +11544,12 @@ async function runHyperwebReferenceSearch(query, options = {}) {
       const payload = (snapshot && snapshot.reference_payload && typeof snapshot.reference_payload === 'object')
         ? snapshot.reference_payload
         : {};
+      const cachedPreview = getCachedPublicReferencePreview({
+        snapshot_id: String((snapshot && snapshot.snapshot_id) || '').trim(),
+        reference_id: String((snapshot && snapshot.reference_id) || '').trim(),
+        reference_uid: String((snapshot && snapshot.reference_uid) || (payload && payload.reference_uid) || '').trim(),
+        peer_id: String((snapshot && snapshot.author_fingerprint) || '').trim().toUpperCase(),
+      }) || {};
       const snapshotId = String((snapshot && snapshot.snapshot_id) || '').trim();
       const manifestSummary = (snapshot && snapshot.manifest_summary && typeof snapshot.manifest_summary === 'object')
         ? snapshot.manifest_summary
@@ -11096,8 +11576,10 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         votes,
         score: Number(score || 0),
         score_breakdown: hybrid,
-        summary_text: normalizePublicSummaryText(payload.summary_text || snapshot.summary_text || buildPublicReferenceSummary(payload))
+        summary_text: normalizePublicSummaryText(payload.summary_text || snapshot.summary_text || cachedPreview.summary_text || buildPublicReferenceSummary(payload))
           || 'No summary available.',
+        about_markdown: normalizePublicAboutMarkdown(payload.about_markdown || cachedPreview.about_markdown || ''),
+        about_source: String(payload.about_source || cachedPreview.about_source || '').trim(),
         content_excerpt: normalizePublicSummaryText(blob, 520),
         manifest_summary: manifestSummary,
         content_ready: true,
@@ -11138,6 +11620,12 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         const assetReady = contentReady ? !!(manifestSummary && manifestSummary.asset_ready !== false) : false;
         const blob = buildPublicReferenceSearchBlob(payload);
         const logicalPeerId = String((routing && routing.logical_peer_id) || item.peer_id || '').trim().toUpperCase();
+        const cachedPreview = getCachedPublicReferencePreview({
+          snapshot_id: String(item.snapshot_id || '').trim(),
+          reference_id: String(item.reference_id || '').trim(),
+          reference_uid: String(item.reference_uid || payload.reference_uid || '').trim(),
+          peer_id: logicalPeerId,
+        }) || {};
         const transportPeerId = String((routing && routing.transport_peer_id) || item.transport_peer_id || item.peer_id || '').trim().toUpperCase();
         const displayPeerName = String(
           ((routing && routing.peer && routing.peer.alias) || item.peer_name || item.peer_id || 'peer')
@@ -11164,8 +11652,10 @@ async function runHyperwebReferenceSearch(query, options = {}) {
           },
           score: Number(item.score || 0),
           score_breakdown: scoreHybridTextMatch(blob, q),
-          summary_text: normalizePublicSummaryText(item.summary_text || payload.summary_text || buildPublicReferenceSummary(payload))
+          summary_text: normalizePublicSummaryText(item.summary_text || payload.summary_text || cachedPreview.summary_text || buildPublicReferenceSummary(payload))
             || 'No summary available.',
+          about_markdown: normalizePublicAboutMarkdown(item.about_markdown || payload.about_markdown || cachedPreview.about_markdown || ''),
+          about_source: String(item.about_source || payload.about_source || cachedPreview.about_source || '').trim(),
           content_excerpt: normalizePublicSummaryText(blob, 520),
           manifest_summary: manifestSummary,
           content_ready: contentReady,
@@ -11202,6 +11692,12 @@ async function runHyperwebReferenceSearch(query, options = {}) {
         const intent = String((item && item.intent) || '');
         const tags = Array.isArray(item && item.tags) ? item.tags : [];
         const updatedAt = Number((item && item.updated_at) || 0);
+        const cachedPreview = getCachedPublicReferencePreview({
+          snapshot_id: String((item && item.snapshot_id) || '').trim(),
+          reference_id: referenceId,
+          reference_uid: String((item && item.reference_uid) || '').trim(),
+          peer_id: logicalPeerId,
+        }) || {};
         const manifestSummary = (item && item.manifest_summary && typeof item.manifest_summary === 'object')
           ? item.manifest_summary
           : null;
@@ -11227,7 +11723,10 @@ async function runHyperwebReferenceSearch(query, options = {}) {
           votes: { up: 0, down: 0, total: 0, net: 0 },
           score: 0.3,
           score_breakdown: { score: 0.3, keyword: 0, semantic: 0 },
-          summary_text: 'Remote public reference. Import to fetch the full payload.',
+          summary_text: normalizePublicSummaryText((item && item.summary_text) || cachedPreview.summary_text || 'Remote public reference. Import to fetch the full payload.')
+            || 'Remote public reference. Import to fetch the full payload.',
+          about_markdown: normalizePublicAboutMarkdown((item && item.about_markdown) || cachedPreview.about_markdown || ''),
+          about_source: String(((item && item.about_source) || cachedPreview.about_source || '')).trim(),
           content_excerpt: normalizePublicSummaryText(blob, 520),
           manifest_summary: manifestSummary,
           content_ready: false,
@@ -12407,7 +12906,7 @@ function emitPendingDeliveredReceipts() {
   return emitted;
 }
 
-function publishSnapshotFromReference(srId) {
+async function publishSnapshotFromReference(srId) {
   const auth = requireHyperwebIdentity();
   if (!auth.ok) return auth;
 
@@ -12441,6 +12940,7 @@ function publishSnapshotFromReference(srId) {
     return { ok: false, message: `Monthly publish limit reached (${HYPERWEB_SNAPSHOT_MONTHLY_LIMIT}/month).` };
   }
 
+  await ensurePublicReferenceDiscoveryMetadata(ref, '', {});
   const payload = sanitizePublicReference(ref);
   const manifest = (payload.manifest && typeof payload.manifest === 'object') ? payload.manifest : buildReferenceReplicationManifest(ref);
   const contentHash = String(payload.content_hash || buildPublicSnapshotContentHash(payload, manifest));
@@ -12491,12 +12991,7 @@ function publishSnapshotFromReference(srId) {
   });
   setReferences(refs);
   syncPublicFeedWithSnapshots();
-  hyperwebManager.refreshLocalPublicIndex().then(() => {
-    const status = hyperwebManager.getStatus();
-    if (status && status.connected) {
-      hyperwebManager.announcePublicIndex().catch(() => {});
-    }
-  }).catch(() => {});
+  maybeRefreshHyperwebPublicIndex();
 
   return {
     ok: true,
@@ -19942,7 +20437,7 @@ ipcMain.handle('browser:srSetVisibility', (_event, payload) => {
   return { ok: true, reference: refs[idx], references: refs };
 });
 
-ipcMain.handle('browser:srPublishSnapshot', (_event, payload) => {
+ipcMain.handle('browser:srPublishSnapshot', async (_event, payload) => {
   const srId = String((payload && payload.srId) || '').trim();
   return publishSnapshotFromReference(srId);
 });
@@ -23200,6 +23695,11 @@ ipcMain.handle('browser:hyperwebReferenceSearch', async (_event, payload) => {
     limit,
     author_fingerprint: authorFingerprint,
   });
+});
+
+ipcMain.handle('browser:hyperwebReferenceEnsureAbout', async (_event, payload) => {
+  const item = (payload && payload.item && typeof payload.item === 'object') ? payload.item : {};
+  return ensurePublicReferencePreviewForDiscovery(item);
 });
 
 ipcMain.handle('browser:hyperwebImportReference', async (_event, payload) => {

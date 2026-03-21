@@ -272,6 +272,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       limit,
       author_fingerprint: authorFingerprint,
     }),
+    hyperwebReferenceEnsureAbout: (item = {}) => ipcRenderer.invoke('browser:hyperwebReferenceEnsureAbout', { item }),
     hyperwebImportReference: (item) => ipcRenderer.invoke('browser:hyperwebImportReference', { item }),
     hyperwebPostSearch: (query = '', limit = 40, authorFingerprint = '') => ipcRenderer.invoke('browser:hyperwebPostSearch', {
       query,

@@ -99,6 +99,7 @@ const state = {
   hyperwebChatLivePeerCount: 0,
   hyperwebChatPendingFile: null,
   hyperwebReferenceExpandedKeys: new Set(),
+  hyperwebReferenceAboutLoadingKeys: new Set(),
   hyperwebPostSearchQuery: '',
   hyperwebSplitRatio: 0.5,
   publishSnapshotTargetId: '',
@@ -714,6 +715,43 @@ function patchHyperwebReferenceResult(key, patch = {}) {
     return nextRow;
   });
   return nextRow;
+}
+
+function renderHyperwebReferenceAboutHtml(markdown = '') {
+  const text = String(markdown || '').replace(/\r\n/g, '\n').trim();
+  if (!text) return '';
+  return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+async function ensureHyperwebReferenceAboutForKey(key, item) {
+  const targetKey = String(key || '').trim();
+  if (!targetKey || !item || !api.hyperwebReferenceEnsureAbout) return;
+  if (state.hyperwebReferenceAboutLoadingKeys.has(targetKey)) return;
+  state.hyperwebReferenceAboutLoadingKeys.add(targetKey);
+  patchHyperwebReferenceResult(targetKey, { _about_loading: true });
+  renderHyperwebReferenceResults(state.hyperwebReferenceResults);
+  try {
+    const res = await api.hyperwebReferenceEnsureAbout(item.import_payload || item);
+    if (!res || !res.ok) {
+      patchHyperwebReferenceResult(targetKey, { _about_loading: false });
+      renderHyperwebReferenceResults(state.hyperwebReferenceResults);
+      setStatusText('hyperweb-ref-status', (res && res.message) ? res.message : 'Unable to generate reference overview.');
+      return;
+    }
+    patchHyperwebReferenceResult(targetKey, {
+      summary_text: String((res && res.summary_text) || (item && item.summary_text) || '').trim(),
+      about_markdown: String((res && res.about_markdown) || '').trim(),
+      about_source: String((res && res.about_source) || '').trim(),
+      snapshot_id: String((res && res.snapshot_id) || (item && item.snapshot_id) || '').trim(),
+      reference_id: String((res && res.reference_id) || (item && item.reference_id) || '').trim(),
+      reference_uid: String((res && res.reference_uid) || (item && item.reference_uid) || '').trim(),
+      lineage_id: String((res && res.lineage_id) || (item && item.lineage_id) || '').trim(),
+      _about_loading: false,
+    });
+    renderHyperwebReferenceResults(state.hyperwebReferenceResults);
+  } finally {
+    state.hyperwebReferenceAboutLoadingKeys.delete(targetKey);
+  }
 }
 
 function makeActiveSurface(kind, patch = {}) {
@@ -9807,6 +9845,10 @@ function renderHyperwebReferenceResults(list) {
     const peerId = escapeHtml(peerIdRaw);
     const intent = escapeHtml(normalizeInlineText((item && item.intent) || ''));
     const summary = escapeHtml(normalizeInlineText((item && item.summary_text) || 'No summary available.'));
+    const aboutMarkdown = String((item && item.about_markdown) || '').trim();
+    const aboutHtml = renderHyperwebReferenceAboutHtml(aboutMarkdown);
+    const aboutSource = String((item && item.about_source) || '').trim();
+    const aboutLoading = !!(item && item._about_loading);
     const excerpt = escapeHtml(normalizeInlineText((item && item.content_excerpt) || ''));
     const score = Number((item && item.score) || 0);
     const votes = (item && item.votes) || {};
@@ -9841,6 +9883,12 @@ function renderHyperwebReferenceResults(list) {
           <div class="hyperweb-ref-summary">${removed ? 'Removed by community threshold' : summary}</div>
           ${expanded ? `
             <div class="hyperweb-ref-expanded">
+              ${aboutHtml ? `
+                <div class="hyperweb-ref-about">${aboutHtml}</div>
+                ${aboutSource ? `<div class="hyperweb-ref-about-meta muted small">about source: ${escapeHtml(aboutSource)}</div>` : ''}
+              ` : (aboutLoading
+                ? '<div class="hyperweb-ref-about muted small">Generating reference overview...</div>'
+                : '<div class="hyperweb-ref-about muted small">No reference overview yet. Expand with Lumino available to generate one on demand.</div>')}
               ${tagText ? `<div class="hyperweb-ref-tags-line muted small">tags: ${tagText}</div>` : ''}
               ${excerpt ? `<div class="hyperweb-ref-excerpt-line muted small">${excerpt}</div>` : ''}
             </div>
@@ -9859,7 +9907,7 @@ function renderHyperwebReferenceResults(list) {
   }).join('');
 
   holder.querySelectorAll('button[data-hw-ref-expand]').forEach((button) => {
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
       const key = String(button.getAttribute('data-hw-ref-expand') || '').trim();
       if (!key) return;
       if (state.hyperwebReferenceExpandedKeys.has(key)) {
@@ -9868,6 +9916,13 @@ function renderHyperwebReferenceResults(list) {
         state.hyperwebReferenceExpandedKeys.add(key);
       }
       renderHyperwebReferenceResults(state.hyperwebReferenceResults);
+      if (!state.hyperwebReferenceExpandedKeys.has(key)) return;
+      const item = state.hyperwebReferenceResults.find((row) => referenceResultKey(row) === key);
+      if (!item) return;
+      const currentAbout = String((item && item.about_markdown) || '').trim();
+      const currentSource = String((item && item.about_source) || '').trim().toLowerCase();
+      if (currentAbout && currentSource === 'model') return;
+      await ensureHyperwebReferenceAboutForKey(key, item);
     });
   });
 

@@ -2230,6 +2230,17 @@ body.workspace-status-mode .nav-bar-main input {
   border-top: 1px solid var(--border);
 }
 
+.hyperweb-ref-about {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  color: #ddd8cf;
+}
+
+.hyperweb-ref-about-meta {
+  margin-top: 6px;
+}
+
 .hyperweb-ref-actions,
 .hyperweb-item-actions {
   display: flex;
