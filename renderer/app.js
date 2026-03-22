@@ -78,6 +78,8 @@ const state = {
   audibleByRef: new Map(),
   activeChatRequestId: null,
   activeChatRequestSrId: null,
+  chatWatchdogTimer: null,
+  chatWatchdogNoticeRequestId: null,
   streamingAssistant: null,
   chatUserNodeByRequest: new Map(),
   chatStatusByRequest: new Map(),
@@ -177,6 +179,7 @@ const state = {
   noteCitationPopover: {
     open: false,
     claimId: '',
+    expandedCitationId: '',
   },
   memoryReplay: {
     active: false,
@@ -1494,6 +1497,20 @@ function normalizeNotesSearchQuery(raw) {
   return normalizeInlineText(raw).toLowerCase();
 }
 
+function getActiveNoteDraftTitle() {
+  if (!state.activeNote) return '';
+  return typeof state.noteDraftTitle === 'string'
+    ? state.noteDraftTitle
+    : String((state.activeNote && state.activeNote.title) || '');
+}
+
+function getActiveNoteDraftBody() {
+  if (!state.activeNote) return '';
+  return typeof state.noteDraftBody === 'string'
+    ? state.noteDraftBody
+    : String((state.activeNote && state.activeNote.body_markdown) || '');
+}
+
 function upsertLocalNoteSummary(note = null) {
   if (!note || !note.id) return;
   const targetId = String(note.id || '').trim();
@@ -1534,14 +1551,65 @@ function getFilteredNotes() {
   });
 }
 
+const NOTE_PREVIEW_VERB_PATTERN = /\b(is|are|was|were|has|have|had|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|kill|kills|killed)\b/i;
+const NOTE_PREVIEW_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'their', 'there', 'about', 'according', 'over', 'than']);
+
+function buildProvisionalNoteClaims(markdown = '') {
+  const text = String(markdown || '');
+  if (!text.trim()) return [];
+  const out = [];
+  const re = /[^.!?\n]+[.!?]?/g;
+  let match = re.exec(text);
+  while (match) {
+    const chunk = String(match[0] || '');
+    const trimmed = chunk.trim();
+    if (trimmed) {
+      const localIndex = chunk.indexOf(trimmed);
+      const start = match.index + Math.max(0, localIndex);
+      const end = start + trimmed.length;
+      const lower = trimmed.toLowerCase();
+      const hasYear = /\b(19|20)\d{2}\b/.test(trimmed);
+      const hasNumber = /\b\d+([.,]\d+)?\b/.test(trimmed);
+      const hasVerb = NOTE_PREVIEW_VERB_PATTERN.test(trimmed);
+      const hasEntity = /\b(?:[A-Z][a-z]{2,}|[A-Z]{2,}|[A-Z][a-z]+\s+[A-Z][a-z]+|GPT-\d+)\b/.test(trimmed);
+      const hasCurrentCue = /\b(now|today|currently|ongoing|current|latest)\b/.test(lower);
+      const hasConflictCue = /\b(war|conflict|fight|fighting|attack|attacking|invasion|invade|invading|missile|airstrike|ceasefire|troops|military)\b/.test(lower);
+      const concreteTerms = lower
+        .replace(/https?:\/\/[^\s]+/g, ' ')
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((item) => item.length >= 3 && !NOTE_PREVIEW_STOPWORDS.has(item));
+      const factualLike = hasVerb && (hasYear || hasNumber || hasEntity || hasConflictCue || (hasCurrentCue && concreteTerms.length >= 2));
+      if (factualLike && end > start) {
+        out.push({
+          id: `preview_${start}_${end}`,
+          claim_text: trimmed,
+          start_offset: start,
+          end_offset: end,
+          status: 'uncertain',
+          highlight_score: 0.34,
+          top_score: 0.34,
+          provisional: true,
+        });
+      }
+    }
+    match = re.exec(text);
+  }
+  return out;
+}
+
 function getRenderableNoteClaims() {
-  return (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
+  const persistedClaims = (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
     .filter((claim) => {
       if (!claim) return false;
       const start = Number((claim && claim.start_offset) || 0);
       const end = Number((claim && claim.end_offset) || 0);
       return Number.isFinite(start) && Number.isFinite(end) && end > start;
-    })
+    });
+  const claims = persistedClaims.length > 0
+    ? persistedClaims
+    : (state.noteAnalysisPending ? buildProvisionalNoteClaims(getActiveNoteDraftBody()) : []);
+  return claims
     .slice()
     .sort((a, b) => {
       const startDiff = Number((a && a.start_offset) || 0) - Number((b && b.start_offset) || 0);
@@ -1570,6 +1638,7 @@ function clampUnit(value) {
 }
 
 function getNoteClaimConfidence(claim = {}) {
+  if (claim && claim.provisional) return 0.34;
   const status = String((claim && claim.status) || '').trim();
   const raw = Number((claim && claim.highlight_score) || (claim && claim.top_score) || 0);
   if (raw > 0) return clampUnit(raw);
@@ -1580,6 +1649,9 @@ function getNoteClaimConfidence(claim = {}) {
 }
 
 function getNoteClaimTone(claim = {}) {
+  if (claim && claim.provisional) {
+    return { label: 'Checking', className: 'uncertain', guidance: 'This sentence looks factual. Source checking is still running.' };
+  }
   const status = String((claim && claim.status) || '').trim();
   const confidence = getNoteClaimConfidence(claim);
   if (status === 'supported') {
@@ -1649,31 +1721,114 @@ function buildNoteClaimSuggestions(claim = {}) {
   return suggestions.slice(0, 3);
 }
 
+function getNoteCitationSourceKind(citation = {}) {
+  return String((citation && citation.source && citation.source.source_kind) || '').trim();
+}
+
+function getNoteCitationSearchIntent(citation = {}) {
+  const explicit = String((citation && citation.search_intent) || '').trim();
+  if (explicit) return explicit;
+  const sourceKind = getNoteCitationSourceKind(citation);
+  if (sourceKind === 'official_search') return 'official';
+  if (sourceKind === 'challenge_search') return 'challenge';
+  return 'support';
+}
+
+function getNoteCitationProvenanceLabel(citation = {}) {
+  const explicit = String((citation && citation.provenance_label) || '').trim();
+  if (explicit) return explicit;
+  const sourceKind = getNoteCitationSourceKind(citation);
+  if (sourceKind === 'explicit_url') return 'from pasted URL';
+  if (sourceKind === 'official_search') return 'from official source search';
+  if (sourceKind === 'challenge_search') return 'from challenge search';
+  return 'from web search';
+}
+
+function getNoteCitationRelevanceReason(citation = {}) {
+  const explicit = String((citation && citation.relevance_reason) || '').trim();
+  if (explicit) return explicit;
+  const intent = getNoteCitationSearchIntent(citation);
+  if (intent === 'challenge') return 'This result may help narrow or challenge the statement.';
+  if (intent === 'official') return 'This result came from an official-source search for the claim.';
+  return 'This result appears to support part of the claim.';
+}
+
+function getNoteCitationChunkText(citation = {}) {
+  return normalizeWhitespace(String((citation && citation.passage_text) || (citation && citation.excerpt) || ''));
+}
+
+function renderNoteCitationItem(citation = {}) {
+  const source = citation && citation.source ? citation.source : {};
+  const citationId = String((citation && citation.id) || '').trim();
+  const publishedAt = Number(source.published_at || 0);
+  const publishedText = publishedAt > 0 ? new Date(publishedAt).toLocaleDateString() : '';
+  const provenance = getNoteCitationProvenanceLabel(citation);
+  const relevance = getNoteCitationRelevanceReason(citation);
+  const chunkText = getNoteCitationChunkText(citation);
+  const meta = [provenance, publishedText].filter(Boolean).join(' · ');
+  return `
+    <article class="notes-citation-item">
+      <strong>${escapeHtml(String(source.title || source.url || 'Source'))}</strong>
+      ${meta ? `<div class="muted small">${escapeHtml(meta)}</div>` : ''}
+      <button
+        type="button"
+        class="notes-citation-source-btn"
+        data-note-citation-toggle="${escapeHtml(citationId)}"
+        aria-expanded="false"
+      >${escapeHtml(String(source.url || ''))}</button>
+      <div class="notes-citation-actions-row">
+        <button
+          type="button"
+          class="notes-citation-open-btn"
+          data-note-citation-open="${escapeHtml(citationId)}"
+          data-note-citation-url="${escapeHtml(String(source.url || ''))}"
+          data-note-citation-title="${escapeHtml(String(source.title || source.url || 'Source'))}"
+          data-note-citation-excerpt="${escapeHtml(chunkText.slice(0, 600))}"
+        >Open</button>
+      </div>
+      <div class="notes-citation-chunk hidden" data-note-citation-chunk="${escapeHtml(citationId)}">${escapeHtml(chunkText)}</div>
+      <div class="muted small">${escapeHtml(relevance)}</div>
+    </article>
+  `;
+}
+
+function renderNoteCitationSection(title = '', citations = []) {
+  const items = Array.isArray(citations) ? citations : [];
+  if (!title || items.length === 0) return '';
+  return `
+    <section class="notes-citation-section">
+      <div class="notes-citation-section-title">${escapeHtml(title)}</div>
+      ${items.map((citation) => renderNoteCitationItem(citation)).join('')}
+    </section>
+  `;
+}
+
 function getHelpfulLeadCitations(citations = []) {
   return (Array.isArray(citations) ? citations : [])
     .filter((citation) => {
       const score = Number((citation && citation.score) || 0);
       const lexical = Number((citation && citation.lexical_score) || 0);
       const semantic = Number((citation && citation.semantic_score) || 0);
-      const kind = String((citation && citation.source && citation.source.source_kind) || '').trim();
-      if (kind === 'challenge_search' || kind === 'official_search') {
-        return lexical >= 0.14 && semantic >= 0.18;
+      const queryConfidence = Number((citation && citation.query_confidence) || 0);
+      const intent = getNoteCitationSearchIntent(citation);
+      if (intent === 'challenge' || intent === 'official') {
+        return (lexical >= 0.14 && semantic >= 0.18) || queryConfidence >= 0.5;
       }
-      return score >= 0.34 && lexical >= 0.18 && semantic >= 0.2;
+      return (score >= 0.34 && lexical >= 0.18 && semantic >= 0.2) || queryConfidence >= 0.56;
     })
     .sort((a, b) => {
-      const kindA = String((a && a.source && a.source.source_kind) || '').trim();
-      const kindB = String((b && b.source && b.source.source_kind) || '').trim();
-      const rank = (kind) => {
-        if (kind === 'challenge_search') return 0;
-        if (kind === 'official_search') return 1;
+      const intentA = getNoteCitationSearchIntent(a);
+      const intentB = getNoteCitationSearchIntent(b);
+      const rank = (intent) => {
+        if (intent === 'challenge') return 0;
+        if (intent === 'official') return 1;
         return 2;
       };
-      const kindDiff = rank(kindA) - rank(kindB);
+      const kindDiff = rank(intentA) - rank(intentB);
       if (kindDiff !== 0) return kindDiff;
       return Number((b && b.score) || 0) - Number((a && a.score) || 0);
     })
-    .slice(0, 2);
+    .slice(0, 3);
 }
 
 function applyNoteClaimSuggestion(claimId = '', replacement = '') {
@@ -1682,7 +1837,7 @@ function applyNoteClaimSuggestion(claimId = '', replacement = '') {
   if (!claim || !input) return;
   const start = Math.max(0, Number(claim.start_offset || 0));
   const end = Math.max(start, Number(claim.end_offset || 0));
-  const current = String(state.noteDraftBody || input.value || '');
+  const current = String(getActiveNoteDraftBody() || input.value || '');
   const next = `${current.slice(0, start)}${replacement}${current.slice(end)}`;
   state.noteDraftBody = next;
   input.value = next;
@@ -1701,23 +1856,88 @@ function clearNoteAnalysisRefreshTimer() {
 }
 
 function closeNoteCitationPopover() {
-  state.noteCitationPopover = { open: false, claimId: '' };
+  state.noteCitationPopover = { open: false, claimId: '', expandedCitationId: '' };
   const popover = e('notes-citation-popover');
   const body = e('notes-citation-body');
+  const surface = e('notes-main');
   if (popover) popover.classList.add('hidden');
   if (body) body.innerHTML = '';
+  if (surface) surface.classList.remove('notes-citation-open');
 }
 
-function positionNoteCitationPopover(anchorEl = null) {
+function positionNoteCitationPopover() {
   const popover = e('notes-citation-popover');
   const surface = e('notes-main');
-  if (!popover || !surface || !anchorEl) return;
-  const anchorRect = anchorEl.getBoundingClientRect();
-  const surfaceRect = surface.getBoundingClientRect();
-  const desiredTop = Math.round(anchorRect.bottom - surfaceRect.top + 10 + surface.scrollTop);
-  const desiredRight = Math.max(16, Math.round(surfaceRect.right - anchorRect.right));
-  popover.style.top = `${Math.max(64, desiredTop)}px`;
-  popover.style.right = `${Math.max(16, desiredRight)}px`;
+  if (!popover || !surface) return;
+  popover.style.top = '';
+  popover.style.height = '';
+  surface.classList.add('notes-citation-open');
+}
+
+function toggleNoteCitationChunk(citationId = '') {
+  const targetId = String(citationId || '').trim();
+  const body = e('notes-citation-body');
+  if (!body || !targetId) return;
+  const nextExpandedId = String((state.noteCitationPopover && state.noteCitationPopover.expandedCitationId) || '').trim() === targetId
+    ? ''
+    : targetId;
+  body.querySelectorAll('[data-note-citation-chunk]').forEach((node) => {
+    const chunkId = String(node.getAttribute('data-note-citation-chunk') || '').trim();
+    node.classList.toggle('hidden', chunkId !== nextExpandedId);
+  });
+  body.querySelectorAll('[data-note-citation-toggle]').forEach((node) => {
+    const toggleId = String(node.getAttribute('data-note-citation-toggle') || '').trim();
+    node.setAttribute('aria-expanded', toggleId === nextExpandedId ? 'true' : 'false');
+  });
+  state.noteCitationPopover = {
+    ...state.noteCitationPopover,
+    expandedCitationId: nextExpandedId,
+  };
+}
+
+async function openNoteCitationInWorkspace({ url = '', title = '', excerpt = '' } = {}) {
+  const targetUrl = String(url || '').trim();
+  const targetTitle = String(title || targetUrl || 'Source').trim();
+  const targetExcerpt = normalizeWhitespace(String(excerpt || '')).slice(0, 600);
+  if (!targetUrl || !api) return;
+
+  let srId = String(state.activeSrId || '').trim();
+  let tabId = '';
+
+  if (!srId) {
+    const createRes = await api.srSaveInActive({
+      active_sr_id: null,
+      current_tab: { url: targetUrl, title: targetTitle, excerpt: targetExcerpt },
+      title: 'Untitled',
+      no_change_policy: 'duplicate_tab',
+    });
+    if (!createRes || !createRes.ok || !createRes.reference) {
+      window.alert((createRes && createRes.message) || 'Unable to open source in workspace.');
+      return;
+    }
+    state.references = createRes.references || state.references;
+    srId = String((createRes.reference && createRes.reference.id) || '').trim();
+    tabId = String((createRes.reference && createRes.reference.active_tab_id) || '').trim();
+  } else {
+    const addRes = await api.srAddTab(srId, { url: targetUrl, title: targetTitle, excerpt: targetExcerpt });
+    if (!addRes || !addRes.ok) {
+      window.alert((addRes && addRes.message) || 'Unable to open source in workspace.');
+      return;
+    }
+    state.references = addRes.references || state.references;
+    tabId = String(((addRes.reference && addRes.reference.active_tab_id) || '')).trim();
+  }
+
+  if (srId && tabId && targetExcerpt) {
+    const patchRes = await api.srPatchTab(srId, tabId, { excerpt: targetExcerpt });
+    if (patchRes && patchRes.ok) {
+      state.references = patchRes.references || state.references;
+    }
+  }
+
+  await setAppView('workspace');
+  await activateReferenceSurface(srId, { kind: 'web', tabId: tabId || null });
+  showPassiveNotification('Opened source in workspace.');
 }
 
 function computeNoteStatusText() {
@@ -1884,7 +2104,7 @@ async function renderNotePreview() {
   state.notePreviewRenderSeq = requestSeq;
   content.innerHTML = '<div class="artifact-markdown-preview-empty">Rendering note...</div>';
   bindNotePreviewInteractions();
-  const html = await renderMarkdownToHtml(String(state.noteDraftBody || (state.activeNote && state.activeNote.body_markdown) || ''));
+  const html = await renderMarkdownToHtml(String(getActiveNoteDraftBody()));
   if (requestSeq !== Number(state.notePreviewRenderSeq || 0)) return;
   if (!state.activeNote) return;
   content.innerHTML = html;
@@ -1930,11 +2150,11 @@ function renderNotesSurface() {
   }
 
   const mode = String((state.activeNote && state.activeNote.active_mode) || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
-  if (titleInput && titleInput.value !== String(state.noteDraftTitle || '')) {
-    titleInput.value = String(state.noteDraftTitle || '');
+  if (titleInput && titleInput.value !== String(getActiveNoteDraftTitle())) {
+    titleInput.value = String(getActiveNoteDraftTitle());
   }
-  if (input && input.value !== String(state.noteDraftBody || '')) {
-    input.value = String(state.noteDraftBody || '');
+  if (input && input.value !== String(getActiveNoteDraftBody())) {
+    input.value = String(getActiveNoteDraftBody());
   }
   if (editBtn) editBtn.classList.toggle('active', mode === 'edit');
   if (viewBtn) viewBtn.classList.toggle('active', mode === 'view');
@@ -1984,8 +2204,8 @@ async function saveActiveNote(options = {}) {
     clearTimeout(state.noteSaveTimer);
     state.noteSaveTimer = null;
   }
-  const title = String(state.noteDraftTitle || (state.activeNote && state.activeNote.title) || '').trim() || 'Untitled Note';
-  const body = String(state.noteDraftBody || (state.activeNote && state.activeNote.body_markdown) || '');
+  const title = String(getActiveNoteDraftTitle()).trim() || 'Untitled Note';
+  const body = String(getActiveNoteDraftBody());
   const currentTitle = String((state.activeNote && state.activeNote.title) || '').trim();
   const currentBody = String((state.activeNote && state.activeNote.body_markdown) || '');
   const currentMode = String((state.activeNote && state.activeNote.active_mode) || 'edit').trim();
@@ -2197,8 +2417,13 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
   `;
   popover.classList.remove('hidden');
   positionNoteCitationPopover(anchorEl);
-  state.noteCitationPopover = { open: true, claimId: targetClaimId };
-  const res = await notesApi.getCitations(noteId, targetClaimId);
+  state.noteCitationPopover = { open: true, claimId: targetClaimId, expandedCitationId: '' };
+  const res = await Promise.race([
+    notesApi.getCitations(noteId, targetClaimId),
+    new Promise((resolve) => {
+      window.setTimeout(() => resolve({ ok: false, timeout: true, message: 'Source scan is still running.' }), 2500);
+    }),
+  ]);
   if (!res || !res.ok) {
     bodyNode.innerHTML = `
       <section class="notes-claim-summary">
@@ -2249,42 +2474,37 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
       </section>
     ` : ''}
   `;
-  const helpfulLeads = getHelpfulLeadCitations(citations);
-  if (!citations.length) {
+  const eligibleCitations = citations.filter((citation) => {
+    const kind = getNoteCitationSourceKind(citation);
+    return !kind || ['explicit_url', 'web_search', 'official_search', 'challenge_search'].includes(kind);
+  });
+  const supportingCitations = eligibleCitations.filter((citation) => getNoteCitationSearchIntent(citation) === 'support');
+  const officialCitations = eligibleCitations.filter((citation) => getNoteCitationSearchIntent(citation) === 'official');
+  const contrarianCitations = eligibleCitations.filter((citation) => getNoteCitationSearchIntent(citation) === 'challenge');
+  const helpfulSupport = getHelpfulLeadCitations(supportingCitations);
+  const helpfulOfficials = getHelpfulLeadCitations(officialCitations);
+  const helpfulContrarian = getHelpfulLeadCitations(contrarianCitations);
+  if (!eligibleCitations.length) {
     bodyNode.innerHTML = `${headerHtml}<div class="muted">No evidence available for this passage yet.</div>`;
     return;
   }
-  if (tone.className === 'no-evidence' && helpfulLeads.length === 0) {
-    bodyNode.innerHTML = `${headerHtml}<div class="muted">No strong source match was found. Tighten the claim first, then search again.</div>`;
+  if (tone.className === 'no-evidence' && helpfulSupport.length === 0 && helpfulOfficials.length === 0 && helpfulContrarian.length === 0) {
+    bodyNode.innerHTML = `${headerHtml}<div class="muted">No strong web evidence was found. Tighten the claim first, then search again.</div>`;
     return;
   }
-  const visibleCitations = tone.className === 'no-evidence' ? helpfulLeads : citations;
-  const leadHeading = tone.className === 'no-evidence'
-    ? '<div class="muted small">Worth reading</div>'
+  const supportingSection = tone.className === 'no-evidence' ? helpfulSupport : supportingCitations.slice(0, 3);
+  const officialSection = tone.className === 'no-evidence' ? helpfulOfficials : officialCitations.slice(0, 2);
+  const contrarianSection = tone.className === 'no-evidence' ? helpfulContrarian : contrarianCitations.slice(0, 2);
+  const sectionsHtml = [
+    renderNoteCitationSection('Supporting evidence', supportingSection),
+    renderNoteCitationSection('Official source', officialSection),
+    renderNoteCitationSection('Contrarian result', contrarianSection),
+  ].filter(Boolean).join('');
+  const fallbackMessage = tone.className === 'no-evidence'
+    ? '<div class="muted">No strong web evidence was found, but these links may help you tighten the claim.</div>'
     : '';
-  bodyNode.innerHTML = `${headerHtml}${leadHeading}${visibleCitations.map((citation) => {
-    const source = citation && citation.source ? citation.source : {};
-    const support = String((citation && citation.support_label) || '').replace(/_/g, ' ').trim();
-    const publishedAt = Number(source.published_at || 0);
-    const publishedText = publishedAt > 0 ? new Date(publishedAt).toLocaleDateString() : '';
-    const metaParts = [support || 'supported', publishedText].filter(Boolean);
-    if (tone.className === 'no-evidence') {
-      const kind = String((source && source.source_kind) || '').trim();
-      if (kind === 'challenge_search') metaParts.unshift('contrarian result');
-      else if (kind === 'official_search') metaParts.unshift('official source');
-      else metaParts.unshift('weak lead');
-    }
-    const meta = metaParts.join(' · ');
-    return `
-      <article class="notes-citation-item">
-        <strong>${escapeHtml(String(source.title || source.url || 'Source'))}</strong>
-        <div class="muted small">${escapeHtml(meta)}</div>
-        <a href="${escapeHtml(String(source.url || '#'))}" data-artifact-link="${escapeHtml(String(source.url || ''))}" data-artifact-link-resolved="${escapeHtml(String(source.url || ''))}">${escapeHtml(String(source.url || ''))}</a>
-        <div>${escapeHtml(String((citation && citation.excerpt) || ''))}</div>
-      </article>
-    `;
-  }).join('')}`;
-  positionNoteCitationPopover(anchorEl);
+  bodyNode.innerHTML = `${headerHtml}${sectionsHtml || fallbackMessage}`;
+  positionNoteCitationPopover();
 }
 
 async function createReferenceFromActiveNote() {
@@ -9386,6 +9606,31 @@ function setChatBusy(busy) {
   if (sendBtn) sendBtn.disabled = isBusy;
 }
 
+function clearChatWatchdog() {
+  if (state.chatWatchdogTimer) {
+    window.clearTimeout(state.chatWatchdogTimer);
+    state.chatWatchdogTimer = null;
+  }
+}
+
+function scheduleChatWatchdog(requestId = '') {
+  const targetId = String(requestId || '').trim();
+  clearChatWatchdog();
+  if (!targetId) return;
+  state.chatWatchdogTimer = window.setTimeout(() => {
+    if (String(state.activeChatRequestId || '').trim() !== targetId) return;
+    if (state.chatWatchdogNoticeRequestId !== targetId) {
+      appendStatusTimelineLine(targetId, {
+        state: 'info',
+        source: 'agent',
+        text: 'Still working. Research requests can take longer than 30 seconds.',
+      });
+      state.chatWatchdogNoticeRequestId = targetId;
+    }
+    scheduleChatWatchdog(targetId);
+  }, 30000);
+}
+
 function clearStreamingAssistantState() {
   state.streamingAssistant = null;
 }
@@ -9439,6 +9684,7 @@ async function handleChatStreamPayload(payload) {
   const phase = String(data.phase || '').trim().toLowerCase();
   if (!requestId || !phase) return;
   if (requestId !== String(state.activeChatRequestId || '').trim()) return;
+  scheduleChatWatchdog(requestId);
 
   if (phase === 'status') {
     appendStatusTimelineLine(requestId, data);
@@ -9481,8 +9727,10 @@ async function handleChatStreamPayload(payload) {
     finalizeStatusTimeline(requestId, false);
 
     clearStreamingAssistantState();
+    state.chatWatchdogNoticeRequestId = null;
     state.activeChatRequestId = null;
     state.activeChatRequestSrId = null;
+    clearChatWatchdog();
     setChatBusy(false);
     if (!shouldPreferRuntimeFocusAfterChat() || !focusActiveHtmlRuntime('chat-final')) {
       const input = e('chat-input');
@@ -9500,8 +9748,10 @@ async function handleChatStreamPayload(payload) {
     }
     finalizeStatusTimeline(requestId, true);
     clearStreamingAssistantState();
+    state.chatWatchdogNoticeRequestId = null;
     state.activeChatRequestId = null;
     state.activeChatRequestSrId = null;
+    clearChatWatchdog();
     setChatBusy(false);
     if (!shouldPreferRuntimeFocusAfterChat() || !focusActiveHtmlRuntime('chat-error')) {
       const input = e('chat-input');
@@ -9557,6 +9807,10 @@ async function handleCrawlerStreamPayload(payload) {
 
 async function loadChatThread() {
   if (!state.activeSrId) return;
+  if (!state.activeChatRequestId) {
+    clearChatWatchdog();
+    setChatBusy(false);
+  }
   if (isMemoryReplayActive()) {
     const ref = getActiveReference();
     const snapshotMessages = Array.isArray(ref && ref.chat_thread && ref.chat_thread.messages)
@@ -9765,6 +10019,7 @@ async function sendChatMessage() {
   state.activeChatRequestId = requestId;
   state.activeChatRequestSrId = state.activeSrId;
   clearStreamingAssistantState();
+  scheduleChatWatchdog(requestId);
 
   try {
     const startRes = await api.chatStart({
@@ -9789,8 +10044,10 @@ async function sendChatMessage() {
       addChatMessage('assistant', msg);
       state.chatUserNodeByRequest.delete(requestId);
       state.chatStatusByRequest.delete(requestId);
+      state.chatWatchdogNoticeRequestId = null;
       state.activeChatRequestId = null;
       state.activeChatRequestSrId = null;
+      clearChatWatchdog();
       setChatBusy(false);
       input.focus();
     }
@@ -9798,8 +10055,10 @@ async function sendChatMessage() {
     addChatMessage('assistant', `Request failed: ${err && err.message ? err.message : 'unknown error'}`);
     state.chatUserNodeByRequest.delete(requestId);
     state.chatStatusByRequest.delete(requestId);
+    state.chatWatchdogNoticeRequestId = null;
     state.activeChatRequestId = null;
     state.activeChatRequestSrId = null;
+    clearChatWatchdog();
     setChatBusy(false);
     input.focus();
   }
@@ -9984,7 +10243,9 @@ async function clearChatAndAutoForkCurrentReference() {
     }
     state.activeChatRequestId = null;
     state.activeChatRequestSrId = null;
+    state.chatWatchdogNoticeRequestId = null;
     clearStreamingAssistantState();
+    clearChatWatchdog();
     setChatBusy(false);
   }
   const res = await api.srClearChatAndAutoFork(state.activeSrId);
@@ -13731,7 +13992,7 @@ function bindControls() {
     const end = Number(noteInput.selectionEnd);
     if (!Number.isFinite(start) || !Number.isFinite(end) || start !== end) return;
     const claim = getActiveNoteClaimAtOffset(start);
-    if (claim) {
+    if (claim && !claim.provisional) {
       void openNoteCitationPopover(String(claim.id || '').trim(), noteInput);
     } else {
       closeNoteCitationPopover();
@@ -13803,12 +14064,20 @@ function bindControls() {
       showPassiveNotification('Claim updated. Review and refine the placeholders.');
       return;
     }
-    const target = event.target instanceof Element ? event.target.closest('a[data-artifact-link], a[data-artifact-link-resolved]') : null;
-    if (!target) return;
+    const toggleButton = event.target instanceof Element ? event.target.closest('[data-note-citation-toggle]') : null;
+    if (toggleButton) {
+      event.preventDefault();
+      toggleNoteCitationChunk(String(toggleButton.getAttribute('data-note-citation-toggle') || '').trim());
+      return;
+    }
+    const openButton = event.target instanceof Element ? event.target.closest('[data-note-citation-open]') : null;
+    if (!openButton) return;
     event.preventDefault();
-    const resolved = String(target.getAttribute('data-artifact-link-resolved') || '').trim();
-    const raw = String(target.getAttribute('data-artifact-link') || '').trim();
-    void openArtifactPreviewLink(resolved || raw);
+    void openNoteCitationInWorkspace({
+      url: String(openButton.getAttribute('data-note-citation-url') || '').trim(),
+      title: String(openButton.getAttribute('data-note-citation-title') || '').trim(),
+      excerpt: String(openButton.getAttribute('data-note-citation-excerpt') || '').trim(),
+    });
   });
   document.addEventListener('click', (event) => {
     if (!state.noteCitationPopover.open) return;

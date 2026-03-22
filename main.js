@@ -51,7 +51,7 @@ const { refreshGoogleAccessToken, startGoogleMailOAuthFlow } = require('./runtim
 const { createMailStore } = require('./runtime/mail_store');
 const { createDashboardStore } = require('./runtime/dashboard_store');
 const { createNotesStore } = require('./runtime/notes_store');
-const { createNoteAnalysisEngine } = require('./runtime/note_analysis');
+const { createNoteAnalysisEngine, NOTE_EVIDENCE_MODE } = require('./runtime/note_analysis');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -1074,6 +1074,7 @@ function resolveChatTimeoutMs(input = {}, ref = null) {
     return Math.max(30_000, Math.min(CHAT_REQUEST_TIMEOUT_MAX_MS, Math.round(requested)));
   }
   const message = String(payload.message || '').trim().toLowerCase();
+  const researchHeavyRequest = isResearchIntentRequest(message) || isDetailedDeliverableRequest(message);
   const contextFiles = Array.isArray(ref && ref.context_files) ? ref.context_files : [];
   const imageCount = contextFiles.filter((file) => isImageContextFile(file)).length;
   const fileIntent = (
@@ -1084,7 +1085,7 @@ function resolveChatTimeoutMs(input = {}, ref = null) {
     || message.includes('context files')
     || message.includes('images')
   );
-  if (imageCount >= 3 || (imageCount > 0 && fileIntent)) return 180_000;
+  if (researchHeavyRequest || imageCount >= 3 || (imageCount > 0 && fileIntent)) return 180_000;
   return CHAT_REQUEST_TIMEOUT_MS;
 }
 
@@ -6329,18 +6330,6 @@ function getNotesStore() {
   return notesStore;
 }
 
-function buildNoteLocalEvidenceOptions() {
-  const settings = readSettings();
-  const ragEmbedding = resolveRagEmbeddingSettings(settings);
-  return {
-    userDataPath: app.getPath('userData'),
-    ragEnabled: !!settings.rag_enabled,
-    embeddingRuntime: ragEmbedding.runtime,
-    embeddingModel: ragEmbedding.model,
-    embeddingConfig: ragEmbedding.config,
-  };
-}
-
 function getNoteAnalysisEngine() {
   if (!noteAnalysisEngine) {
     noteAnalysisEngine = createNoteAnalysisEngine({
@@ -6350,7 +6339,6 @@ function getNoteAnalysisEngine() {
         maxChars: 18_000,
         timeoutMs: 12_000,
       }),
-      localEvidenceSearch: (query, refs = [], options = {}) => searchLocalEvidence(query, refs, options),
       temporalGraphScorer: computeTemporalGraphScoresWithPython,
       makeId,
     });
@@ -6368,10 +6356,12 @@ async function runNoteAnalysis(noteId = '') {
   }
   const note = noteRes.note;
   if (!String(note.body_markdown || '').trim()) {
+    const engine = getNoteAnalysisEngine();
     return store.saveAnalysis(targetId, {
       analysis_run_id: makeId('analysis'),
       note_revision: Number(note.analysis_revision || 0),
-      extractor_version: 'note-analyzer-v1',
+      extractor_version: String((engine && engine.ANALYZER_VERSION) || '').trim(),
+      evidence_mode: NOTE_EVIDENCE_MODE,
       started_at: nowTs(),
       completed_at: nowTs(),
       status: 'completed',
@@ -6382,10 +6372,7 @@ async function runNoteAnalysis(noteId = '') {
       citations: [],
     });
   }
-  const analysisRes = await getNoteAnalysisEngine().analyze(note, {
-    scopedRefs: getReferences(),
-    localEvidenceOptions: buildNoteLocalEvidenceOptions(),
-  });
+  const analysisRes = await getNoteAnalysisEngine().analyze(note, {});
   if (!analysisRes || analysisRes.ok === false) {
     return { ok: false, message: String((analysisRes && analysisRes.message) || 'Note analysis failed.') };
   }
@@ -6409,6 +6396,19 @@ function scheduleNoteAnalysis(noteId = '', delayMs = 1200) {
   noteAnalysisTimers.set(targetId, timer);
 }
 
+function noteNeedsFreshAnalysis(note = null, summary = null) {
+  if (!note) return false;
+  const analyzerVersion = String((getNoteAnalysisEngine() && getNoteAnalysisEngine().ANALYZER_VERSION) || '').trim();
+  return !!(
+    String(note.body_markdown || '').trim()
+    && (
+      !summary
+      || Number(summary.note_revision || 0) < Number(note.analysis_revision || 0)
+      || String(summary.extractor_version || '').trim() !== analyzerVersion
+    )
+  );
+}
+
 async function ensureFreshNoteAnalysis(noteId = '') {
   const targetId = String(noteId || '').trim();
   if (!targetId) return null;
@@ -6417,15 +6417,7 @@ async function ensureFreshNoteAnalysis(noteId = '') {
   if (!noteRes || !noteRes.ok || !noteRes.note) return noteRes;
   const note = noteRes.note;
   const summary = noteRes.analysis_summary || null;
-  const analyzerVersion = String((getNoteAnalysisEngine() && getNoteAnalysisEngine().ANALYZER_VERSION) || '').trim();
-  const needsRefresh = !!(
-    String(note.body_markdown || '').trim()
-    && (
-      !summary
-      || Number(summary.note_revision || 0) < Number(note.analysis_revision || 0)
-      || String(summary.extractor_version || '').trim() !== analyzerVersion
-    )
-  );
+  const needsRefresh = noteNeedsFreshAnalysis(note, summary);
   if (!needsRefresh) return noteRes;
   await runNoteAnalysis(targetId);
   return store.getNote(targetId);
@@ -6730,42 +6722,45 @@ async function runOrchestratorWebSearch(params = {}) {
     }
   }
 
-  const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1`;
-  const fetchRes = await fetchJsonWithTimeout(ddgUrl, {}, Math.max(5_000, Number(params.timeout_ms || 10_000)));
   const rows = [];
-  if (fetchRes && fetchRes.ok && fetchRes.json) {
-    const body = fetchRes.json || {};
-    if (body.AbstractText && body.AbstractURL) {
-      rows.push({
-        title: String(body.Heading || query).trim().slice(0, 240),
-        url: String(body.AbstractURL || '').trim(),
-        snippet: String(body.AbstractText || '').trim().slice(0, 500),
+  try {
+    const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1`;
+    const fetchRes = await fetchJsonWithTimeout(ddgUrl, {}, Math.max(5_000, Number(params.timeout_ms || 10_000)));
+    if (fetchRes && fetchRes.ok && fetchRes.json) {
+      const body = fetchRes.json || {};
+      if (body.AbstractText && body.AbstractURL) {
+        rows.push({
+          title: String(body.Heading || query).trim().slice(0, 240),
+          url: String(body.AbstractURL || '').trim(),
+          snippet: String(body.AbstractText || '').trim().slice(0, 500),
+        });
+      }
+      const topics = Array.isArray(body.RelatedTopics) ? body.RelatedTopics : [];
+      topics.slice(0, Math.max(maxResults * 3, 18)).forEach((topic) => {
+        if (topic && topic.FirstURL && topic.Text) {
+          rows.push({
+            title: String(topic.Text || '').trim().slice(0, 240),
+            url: String(topic.FirstURL || '').trim(),
+            snippet: String(topic.Text || '').trim().slice(0, 500),
+          });
+          return;
+        }
+        const nested = Array.isArray(topic && topic.Topics) ? topic.Topics : [];
+        nested.forEach((item) => {
+          if (item && item.FirstURL && item.Text) {
+            rows.push({
+              title: String(item.Text || '').trim().slice(0, 240),
+              url: String(item.FirstURL || '').trim(),
+              snippet: String(item.Text || '').trim().slice(0, 500),
+            });
+          }
+        });
       });
     }
-    const topics = Array.isArray(body.RelatedTopics) ? body.RelatedTopics : [];
-    topics.slice(0, Math.max(maxResults * 3, 18)).forEach((topic) => {
-      if (topic && topic.FirstURL && topic.Text) {
-        rows.push({
-          title: String(topic.Text || '').trim().slice(0, 240),
-          url: String(topic.FirstURL || '').trim(),
-          snippet: String(topic.Text || '').trim().slice(0, 500),
-        });
-        return;
-      }
-      const nested = Array.isArray(topic && topic.Topics) ? topic.Topics : [];
-      nested.forEach((item) => {
-        if (item && item.FirstURL && item.Text) {
-          rows.push({
-            title: String(item.Text || '').trim().slice(0, 240),
-            url: String(item.FirstURL || '').trim(),
-            snippet: String(item.Text || '').trim().slice(0, 500),
-          });
-        }
-      });
-    });
+  } catch (_) {
+    // Continue to HTML and Bing fallbacks when the DDG instant API is unavailable.
   }
 
-  // Strong fallback: parse DuckDuckGo HTML SERP when instant answer returns too few links.
   const normalizedInstant = dedupeWebResults(rows);
   if (normalizedInstant.length < Math.min(5, maxResults)) {
     try {
@@ -6802,6 +6797,7 @@ async function runOrchestratorWebSearch(params = {}) {
       // Keep graceful fallback.
     }
   }
+
   if (normalized.length === 0) {
     return {
       ok: true,
@@ -16428,6 +16424,13 @@ const DETAILED_DELIVERABLE_KEYWORDS = [
   'report', 'essay', 'article', 'writeup', 'write-up', 'detailed', 'in-depth',
   'comprehensive', 'artifact', 'long-form', 'draft',
 ];
+const DELIVERABLE_ACTION_PATTERNS = [
+  /\b(write|draft|create|make|prepare|save|put|turn)\b[\s\S]{0,48}\b(report|essay|article|writeup|write-up|artifact|draft)\b/i,
+  /\b(report|essay|article|writeup|write-up|artifact|draft)\b[\s\S]{0,48}\b(write|draft|create|make|prepare|save)\b/i,
+  /\bwrite\s+it\s+(?:into|as)\s+an?\s+artifact\b/i,
+  /\bsave\s+it\s+(?:into|as)\s+an?\s+artifact\b/i,
+  /\bput\s+it\s+in(?:to)?\s+an?\s+artifact\b/i,
+];
 const RESEARCH_INTENT_KEYWORDS = [
   'research',
   'search',
@@ -16468,8 +16471,12 @@ const EXPLICIT_NEW_ARTIFACT_PATTERNS = [
 ];
 
 function isDetailedDeliverableRequest(userMessage) {
-  const lower = String(userMessage || '').toLowerCase();
-  return DETAILED_DELIVERABLE_KEYWORDS.some((kw) => lower.includes(kw));
+  const raw = String(userMessage || '').trim();
+  if (!raw) return false;
+  if (DELIVERABLE_ACTION_PATTERNS.some((pattern) => pattern.test(raw))) return true;
+  const lower = raw.toLowerCase();
+  if (/\b(detailed|in-depth|comprehensive|long-form)\b/.test(lower)) return true;
+  return /\bartifact\b/.test(lower) && /\b(write|save|create|make|update|improve|fix|revise)\b/.test(lower);
 }
 
 function isResearchIntentRequest(userMessage) {
@@ -17811,12 +17818,12 @@ async function executeLuminoChat(input, options = {}) {
     activeArtifactContext,
   });
   const isPathBDelegation = !!payload.path_b_delegate;
-  const isDetailed = isPathBDelegation ? false : isDetailedDeliverableRequest(message);
+  const isDetailed = false;
   const isResearchIntent = isPathBDelegation ? false : isResearchIntentRequest(message);
   const researchPolicy = {
     isDetailed,
     requiresWebResearch: isResearchIntent,
-    requireDeliverableBeforeFinish: isDetailed,
+    requireDeliverableBeforeFinish: false,
     localEvidenceAvailable: hasLocalEvidenceForResearch(activeRef),
     requiresCitations: isResearchIntent,
     citationMode: 'hybrid',
@@ -20283,7 +20290,11 @@ ipcMain.handle('notes:create', async (_event, payload) => {
 
 ipcMain.handle('notes:get', async (_event, payload) => {
   const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
-  return ensureFreshNoteAnalysis(noteId);
+  const res = await getNotesStore().getNote(noteId);
+  if (res && res.ok && res.note && noteNeedsFreshAnalysis(res.note, res.analysis_summary || null)) {
+    scheduleNoteAnalysis(noteId, 100);
+  }
+  return res;
 });
 
 ipcMain.handle('notes:update', async (_event, payload) => {
@@ -22864,8 +22875,14 @@ ipcMain.handle('browser:chatStart', async (_event, payload) => {
       });
     } catch (err) {
       const aborted = abortController.signal.aborted;
+      const abortReason = aborted ? abortController.signal.reason : null;
       const messageText = aborted
-        ? 'Request canceled.'
+        ? String(
+          (abortReason && abortReason.message)
+          || abortReason
+          || (err && err.message)
+          || 'Request canceled.',
+        )
         : String((err && err.message) || 'Lumino request failed.');
       sendBrowserEvent('browser:chatStream', {
         request_id: requestId,

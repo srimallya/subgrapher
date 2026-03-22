@@ -108,11 +108,15 @@ test('notes store supports CRUD and analysis persistence', async () => {
   assert.equal(analysisRes.ok, true);
   assert.equal(analysisRes.claims.length, 1);
   assert.equal(analysisRes.claims[0].status, 'supported');
+  assert.equal(analysisRes.analysis_summary.evidence_mode, 'web_only');
 
   const citationsRes = await store.getCitations(noteId, 'claim_1');
   assert.equal(citationsRes.ok, true);
   assert.equal(citationsRes.citations.length, 1);
   assert.equal(citationsRes.citations[0].source.title, 'OpenAI Announcement');
+  assert.equal(citationsRes.citations[0].search_intent, 'support');
+  assert.equal(citationsRes.citations[0].provenance_label, 'from web search');
+  assert.match(citationsRes.citations[0].relevance_reason, /support/i);
 
   const deleteRes = await store.deleteNote(noteId);
   assert.equal(deleteRes.ok, true);
@@ -152,4 +156,105 @@ test('stale analysis revisions are rejected', async () => {
     citations: [],
   });
   assert.equal(freshRes.ok, true);
+});
+
+test('notes citations filter out local evidence rows and keep web provenance', async () => {
+  const userDataPath = makeTempDir();
+  const store = createNotesStore({ userDataPath });
+  const createRes = await store.createNote({
+    title: 'Web Only',
+    body_markdown: 'OpenAI released GPT-5 in 2025.',
+  });
+  const noteId = String(createRes.note.id || '').trim();
+
+  const saveAnalysisRes = await store.saveAnalysis(noteId, {
+    analysis_run_id: 'analysis_web_only',
+    note_revision: createRes.note.analysis_revision,
+    extractor_version: 'note-analyzer-v3',
+    claims: [{
+      id: 'claim_web_only',
+      claim_index: 0,
+      start_offset: 0,
+      end_offset: 31,
+      claim_text: 'OpenAI released GPT-5 in 2025.',
+      normalized_claim_text: 'openai released gpt 5 in 2025',
+      subject_text: 'OpenAI',
+      predicate_text: 'released',
+      object_text: 'GPT-5',
+      time_text: '2025',
+      modality: 'statement',
+      factuality: 'factual',
+      status: 'uncertain',
+      top_score: 0.58,
+      highlight_score: 0.58,
+    }],
+    sources: [{
+      id: 'src_web',
+      source_kind: 'web_search',
+      source_query: 'OpenAI released GPT-5 2025',
+      url: 'https://example.com/web',
+      canonical_url: 'https://example.com/web',
+      title: 'Web Source',
+    }, {
+      id: 'src_local',
+      source_kind: 'local_evidence',
+      source_query: 'OpenAI released GPT-5 2025',
+      url: 'https://example.com/local',
+      canonical_url: 'https://example.com/local',
+      title: 'Local Source',
+    }],
+    passages: [{
+      id: 'passage_web',
+      source_id: 'src_web',
+      passage_index: 0,
+      passage_text: 'OpenAI released GPT-5 in 2025.',
+      passage_start: 0,
+      passage_end: 31,
+    }, {
+      id: 'passage_local',
+      source_id: 'src_local',
+      passage_index: 1,
+      passage_text: 'Local memo says OpenAI released GPT-5 in 2025.',
+      passage_start: 0,
+      passage_end: 47,
+    }],
+    citations: [{
+      id: 'citation_web',
+      claim_id: 'claim_web_only',
+      source_id: 'src_web',
+      passage_id: 'passage_web',
+      citation_index: 0,
+      support_label: 'uncertain',
+      score: 0.58,
+      semantic_score: 0.61,
+      lexical_score: 0.55,
+      time_score: 1,
+      corroboration_score: 0.2,
+      temporal_score: 0.1,
+      excerpt: 'OpenAI released GPT-5 in 2025.',
+    }, {
+      id: 'citation_local',
+      claim_id: 'claim_web_only',
+      source_id: 'src_local',
+      passage_id: 'passage_local',
+      citation_index: 1,
+      support_label: 'uncertain',
+      score: 0.9,
+      semantic_score: 0.9,
+      lexical_score: 0.9,
+      time_score: 1,
+      corroboration_score: 0.2,
+      temporal_score: 0.1,
+      excerpt: 'Local memo says OpenAI released GPT-5 in 2025.',
+    }],
+  });
+  assert.equal(saveAnalysisRes.ok, true);
+
+  const citationsRes = await store.getCitations(noteId, 'claim_web_only');
+  assert.equal(citationsRes.ok, true);
+  assert.equal(citationsRes.evidence_mode, 'web_only');
+  assert.equal(citationsRes.citations.length, 1);
+  assert.equal(citationsRes.citations[0].source.title, 'Web Source');
+  assert.equal(citationsRes.citations[0].search_intent, 'support');
+  assert.equal(citationsRes.citations[0].provenance_label, 'from web search');
 });

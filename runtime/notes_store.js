@@ -3,6 +3,8 @@ const path = require('path');
 
 const SCHEMA_VERSION = 1;
 const dbTaskByPath = new Map();
+const NOTE_EVIDENCE_MODE = 'web_only';
+const WEB_ONLY_SOURCE_KINDS = new Set(['explicit_url', 'web_search', 'official_search', 'challenge_search']);
 
 let sqlModulePromise = null;
 
@@ -260,6 +262,46 @@ function noteSummaryFromRow(row = {}) {
   };
 }
 
+function isWebOnlySourceKind(sourceKind = '') {
+  return WEB_ONLY_SOURCE_KINDS.has(String(sourceKind || '').trim());
+}
+
+function getSearchIntentForSourceKind(sourceKind = '') {
+  const kind = String(sourceKind || '').trim();
+  if (kind === 'official_search') return 'official';
+  if (kind === 'challenge_search') return 'challenge';
+  return 'support';
+}
+
+function getProvenanceLabelForSourceKind(sourceKind = '') {
+  const kind = String(sourceKind || '').trim();
+  if (kind === 'explicit_url') return 'from pasted URL';
+  if (kind === 'official_search') return 'from official source search';
+  if (kind === 'challenge_search') return 'from challenge search';
+  return 'from web search';
+}
+
+function getRelevanceReasonForCitation(citation = {}) {
+  const sourceKind = String((citation && citation.source && citation.source.source_kind) || '').trim();
+  const intent = getSearchIntentForSourceKind(sourceKind);
+  const supportLabel = String((citation && citation.support_label) || '').trim();
+  if (sourceKind === 'explicit_url') return 'This source came from a URL already present in the note.';
+  if (intent === 'official') return 'This result came from an official-source search for the claim.';
+  if (intent === 'challenge') return 'This result may challenge or narrow part of the claim.';
+  if (supportLabel === 'supported') return 'This source appears to support the claim directly.';
+  if (supportLabel === 'contested') return 'This source overlaps with the claim, but competing evidence also exists.';
+  if (supportLabel === 'uncertain') return 'This source overlaps with the claim, but the match is still weak.';
+  return 'This result shares terms with the claim but is not a strong evidence match yet.';
+}
+
+function decorateAnalysisSummary(summary = null) {
+  if (!summary) return null;
+  return {
+    ...summary,
+    evidence_mode: NOTE_EVIDENCE_MODE,
+  };
+}
+
 function readAllRows(stmt) {
   const rows = [];
   while (stmt.step()) rows.push(stmt.getAsObject());
@@ -416,7 +458,14 @@ function queryCitationsForClaim(db, claimId = '') {
       source_kind: String(row.source_kind || ''),
     },
     passage_text: String(row.passage_text || ''),
-  }));
+  }))
+    .filter((citation) => isWebOnlySourceKind(citation && citation.source && citation.source.source_kind))
+    .map((citation) => ({
+      ...citation,
+      search_intent: getSearchIntentForSourceKind(citation.source && citation.source.source_kind),
+      provenance_label: getProvenanceLabelForSourceKind(citation.source && citation.source.source_kind),
+      relevance_reason: getRelevanceReasonForCitation(citation),
+    }));
 }
 
 function deleteAnalysisRows(db, noteId = '') {
@@ -488,7 +537,7 @@ function createNotesStore(options = {}) {
         return {
           ok: true,
           note,
-          analysis_summary: queryLatestAnalysisSummary(db, noteId),
+          analysis_summary: decorateAnalysisSummary(queryLatestAnalysisSummary(db, noteId)),
         };
       });
     },
@@ -679,7 +728,7 @@ function createNotesStore(options = {}) {
         return {
           ok: true,
           note: nextNote,
-          analysis_summary: queryLatestAnalysisSummary(db, note.id),
+          analysis_summary: decorateAnalysisSummary(queryLatestAnalysisSummary(db, note.id)),
         };
       });
     },
@@ -693,7 +742,7 @@ function createNotesStore(options = {}) {
         return {
           ok: true,
           note,
-          analysis_summary: summary,
+          analysis_summary: decorateAnalysisSummary(summary),
           claims,
         };
       });
@@ -711,8 +760,9 @@ function createNotesStore(options = {}) {
         return {
           ok: true,
           note,
+          evidence_mode: NOTE_EVIDENCE_MODE,
           claim,
-          citations: queryCitationsForClaim(db, claim.id).slice(0, 3),
+          citations: queryCitationsForClaim(db, claim.id).slice(0, 6),
         };
       });
     },

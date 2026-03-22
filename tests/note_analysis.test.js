@@ -21,7 +21,6 @@ function makeTemporalScorer() {
 test('note analysis extracts URLs, finds factual claims, and ranks evidence', async () => {
   const searchQueries = [];
   const fetchedUrls = [];
-  const localQueries = [];
 
   const engine = createNoteAnalysisEngine({
     webSearch: async ({ query }) => {
@@ -40,17 +39,6 @@ test('note analysis extracts URLs, finds factual claims, and ranks evidence', as
         ok: true,
         title: 'OpenAI announcement',
         markdown: 'OpenAI released GPT-5 in 2025 according to the company announcement. Microsoft later adopted the model in enterprise deployments.',
-      };
-    },
-    localEvidenceSearch: async (query) => {
-      localQueries.push(query);
-      return {
-        ok: true,
-        results: [{
-          reference_title: 'Local memo',
-          url: 'https://local.example/memo',
-          snippet: 'Internal memo repeats that OpenAI released GPT-5 in 2025.',
-        }],
       };
     },
     temporalGraphScorer: makeTemporalScorer(),
@@ -76,6 +64,7 @@ test('note analysis extracts URLs, finds factual claims, and ranks evidence', as
   });
 
   assert.equal(result.ok, true);
+  assert.equal(result.evidence_mode, 'web_only');
   assert.equal(result.note_revision, 4);
   assert.equal(result.explicit_urls.length, 1);
   assert.equal(result.explicit_urls[0].canonical_url, 'https://example.com/openai-gpt5');
@@ -83,10 +72,10 @@ test('note analysis extracts URLs, finds factual claims, and ranks evidence', as
   assert.equal(result.claims[0].claim_text, 'OpenAI released GPT-5 in 2025.');
   assert.ok(searchQueries.some((query) => query.toLowerCase().includes('openai')));
   assert.ok(searchQueries.some((query) => query.toLowerCase().includes('official announcement')));
-  assert.ok(localQueries.some((query) => query.toLowerCase().includes('released')));
   assert.ok(fetchedUrls.includes('https://example.com/openai-gpt5'));
-  assert.ok(result.sources.length >= 2);
-  assert.ok(result.passages.length >= 2);
+  assert.ok(result.sources.length >= 1);
+  assert.ok(result.sources.every((source) => source.source_kind !== 'local_evidence'));
+  assert.ok(result.passages.length >= 1);
   assert.ok(result.citations.length >= 1);
   assert.ok(['supported', 'uncertain', 'contested', 'no_evidence'].includes(result.claims[0].status));
   assert.ok(Number(result.claims[0].top_score || 0) > 0);
@@ -115,7 +104,6 @@ test('compound factual sentences are split into smaller claim spans', async () =
         ? 'OpenAI released GPT-5 in early 2025.'
         : 'No useful evidence here.',
     }),
-    localEvidenceSearch: async () => ({ ok: true, results: [] }),
     temporalGraphScorer: makeTemporalScorer(),
     makeId: (() => {
       let counter = 0;
@@ -142,7 +130,6 @@ test('note analysis ignores non-factual and speculative-only notes', async () =>
   const engine = createNoteAnalysisEngine({
     webSearch: async () => ({ results: [] }),
     fetchUrl: async () => ({ ok: false }),
-    localEvidenceSearch: async () => ({ ok: true, results: [] }),
     temporalGraphScorer: makeTemporalScorer(),
   });
 
@@ -157,4 +144,222 @@ test('note analysis ignores non-factual and speculative-only notes', async () =>
   assert.equal(result.sources.length, 0);
   assert.equal(result.citations.length, 0);
   assert.equal(result.message, 'No factual claims detected.');
+});
+
+test('note analysis uses orthogonal queries and snippet fallback when fetch fails', async () => {
+  const seenQueries = [];
+  const fetchedUrls = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      seenQueries.push(query);
+      const normalized = String(query || '').toLowerCase();
+      if (normalized.includes('release date')) {
+        return {
+          results: [{
+            title: 'AcmeAI announcement',
+            url: 'https://example.com/acme-release',
+            snippet: 'AcmeAI released Model-Z in early 2025 in its official announcement.',
+          }],
+        };
+      }
+      if (normalized.includes('enterprise adoption') || normalized.includes('adoption data')) {
+        return {
+          results: [{
+            title: 'Enterprise model adoption report',
+            url: 'https://example.com/acme-adoption',
+            snippet: 'AcmeAI Model-Z enterprise adoption outpaced Baseline-4 in early enterprise rollouts, according to a market report.',
+          }],
+        };
+      }
+      return { results: [] };
+    },
+    fetchUrl: async (url) => {
+      fetchedUrls.push(url);
+      return { ok: false };
+    },
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_fallback',
+    analysis_revision: 3,
+    body_markdown: 'AcmeAI released Model-Z in early 2025 and its enterprise adoption grew faster than Baseline-4.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.ok(seenQueries.some((query) => {
+    const value = query.toLowerCase();
+    return value.includes('official announcement') || value.includes('release date');
+  }));
+  assert.ok(seenQueries.some((query) => {
+    const value = query.toLowerCase();
+    return value.includes('acmeai') && value.includes('enterprise adoption');
+  }));
+  assert.ok(fetchedUrls.includes('https://example.com/acme-release'));
+  assert.ok(fetchedUrls.includes('https://example.com/acme-adoption'));
+  assert.ok(result.passages.some((passage) => String(passage.passage_text || '').toLowerCase().includes('official announcement')));
+  assert.ok(result.passages.some((passage) => String(passage.passage_text || '').toLowerCase().includes('model-z enterprise adoption outpaced')));
+  assert.ok(result.citations.length >= 2);
+});
+
+test('lowercase current-event conflict claims are still treated as factual claims', async () => {
+  const seenQueries = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      seenQueries.push(query);
+      return {
+        results: [{
+          title: 'Reuters conflict report',
+          url: 'https://example.com/conflict-report',
+          snippet: 'Iran and the US are not in a declared war, but conflict reports discuss the latest military confrontation and strikes.',
+        }],
+      };
+    },
+    fetchUrl: async () => ({ ok: false }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_conflict',
+    analysis_revision: 5,
+    body_markdown: 'iran and US is fighting a war now.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.claims.length, 1);
+  assert.match(result.claims[0].claim_text, /iran and US/i);
+  assert.ok(seenQueries.some((query) => query.toLowerCase().includes('iran') && query.toLowerCase().includes('us')));
+  assert.ok(result.sources.length >= 1);
+  assert.ok(result.passages.length >= 1);
+});
+
+test('pipeline distinguishes false, partial, and correct claims with deterministic fixtures', async () => {
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      const normalized = String(query || '').toLowerCase();
+      if (normalized.includes('novaai acquired nasa')) {
+        if (normalized.includes('rumor') || normalized.includes('not released') || normalized.includes('criticism')) {
+          return {
+            results: [{
+              title: 'No acquisition announcement',
+              url: 'https://example.com/novaai-nasa-denial',
+              snippet: 'There is no official record that NovaAI acquired NASA.',
+            }],
+          };
+        }
+        return { results: [] };
+      }
+      if (normalized.includes('iran') && normalized.includes('conflict')) {
+        return {
+          results: [{
+            title: 'Reuters conflict report',
+            url: 'https://example.com/iran-us-conflict',
+            snippet: 'Iran and the US exchanged strikes and military threats, but reports stop short of calling it a declared war.',
+          }],
+        };
+      }
+      if (normalized.includes('novaai') && normalized.includes('atlas-7') && normalized.includes('enterprise team')) {
+        return {
+          results: [{
+            title: 'Launch coverage',
+            url: 'https://example.com/novaai-atlas7-enterprise',
+            snippet: 'NovaAI released Atlas-7 in 2025 and began an enterprise rollout, but reports do not say every team received access immediately.',
+          }],
+        };
+      }
+      if (normalized.includes('novaai') && normalized.includes('atlas-7')) {
+        if (normalized.includes('official')) {
+          return {
+            results: [{
+              title: 'NovaAI official announcement',
+              url: 'https://example.com/novaai-atlas7-official',
+              snippet: 'NovaAI released Atlas-7 in 2025 according to its official announcement.',
+            }],
+          };
+        }
+        return {
+          results: [{
+            title: 'NovaAI released Atlas-7 in 2025',
+            url: 'https://example.com/novaai-atlas7-news',
+            snippet: 'NovaAI released Atlas-7 in 2025 and documented the launch publicly.',
+          }],
+        };
+      }
+      return { results: [] };
+    },
+    fetchUrl: async (url) => {
+      if (url === 'https://example.com/novaai-nasa-denial') {
+        return {
+          ok: true,
+          title: 'No acquisition announcement',
+          markdown: 'There is no official record that NovaAI acquired NASA. NASA remains a US government agency.',
+        };
+      }
+      if (url === 'https://example.com/iran-us-conflict') {
+        return {
+          ok: true,
+          title: 'Reuters conflict report',
+          markdown: 'Iran and the US exchanged strikes and military threats in the latest confrontation, but Reuters did not describe it as a declared war.',
+        };
+      }
+      if (url === 'https://example.com/novaai-atlas7-enterprise') {
+        return {
+          ok: true,
+          title: 'Launch coverage',
+          markdown: 'NovaAI released Atlas-7 in 2025 for enterprise customers, but the rollout happened in stages rather than reaching every team at once.',
+        };
+      }
+      if (url === 'https://example.com/novaai-atlas7-official') {
+        return {
+          ok: true,
+          title: 'NovaAI official announcement',
+          markdown: 'NovaAI released Atlas-7 in 2025 according to the company announcement.',
+        };
+      }
+      if (url === 'https://example.com/novaai-atlas7-news') {
+        return {
+          ok: true,
+          title: 'Launch coverage',
+          markdown: 'Independent coverage confirmed that NovaAI released Atlas-7 in 2025 and described the rollout timeline.',
+        };
+      }
+      return { ok: false };
+    },
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const falseResult = await engine.analyze({
+    id: 'note_false',
+    analysis_revision: 1,
+    body_markdown: 'NovaAI acquired NASA in 2025.',
+  }, {});
+  const partialResult = await engine.analyze({
+    id: 'note_partial',
+    analysis_revision: 1,
+    body_markdown: 'NovaAI released Atlas-7 to every enterprise team in 2025.',
+  }, {});
+  const correctResult = await engine.analyze({
+    id: 'note_correct',
+    analysis_revision: 1,
+    body_markdown: 'NovaAI released Atlas-7 in 2025.',
+  }, {});
+
+  assert.equal(falseResult.claims.length, 1);
+  assert.equal(falseResult.claims[0].status, 'no_evidence');
+  assert.equal(partialResult.claims.length, 1);
+  assert.equal(partialResult.claims[0].status, 'uncertain');
+  assert.equal(correctResult.claims.length, 1);
+  assert.equal(correctResult.claims[0].status, 'supported');
 });
