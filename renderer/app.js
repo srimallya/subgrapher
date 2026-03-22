@@ -179,7 +179,12 @@ const state = {
   noteCitationPopover: {
     open: false,
     claimId: '',
+    claimText: '',
+    claimStartOffset: -1,
+    claimEndOffset: -1,
     expandedCitationId: '',
+    requestSeq: 0,
+    loading: false,
   },
   memoryReplay: {
     active: false,
@@ -1551,7 +1556,7 @@ function getFilteredNotes() {
   });
 }
 
-const NOTE_PREVIEW_VERB_PATTERN = /\b(is|are|was|were|has|have|had|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|kill|kills|killed)\b/i;
+const NOTE_PREVIEW_VERB_PATTERN = /\b(is|are|was|were|has|have|had|began|begin|beginning|started|start|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|broke|break|broken|wounded|wound|redirected|redirect|deployed|deploy|sent|send|targeted|target|carried|carry|carrying|kill|kills|killed)\b/i;
 const NOTE_PREVIEW_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'their', 'there', 'about', 'according', 'over', 'than']);
 
 function buildProvisionalNoteClaims(markdown = '') {
@@ -1621,7 +1626,7 @@ function getRenderableNoteClaims() {
 function getActiveNoteClaimById(claimId = '') {
   const targetId = String(claimId || '').trim();
   if (!targetId) return null;
-  return (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
+  return getRenderableNoteClaims()
     .find((item) => String((item && item.id) || '').trim() === targetId) || null;
 }
 
@@ -1855,8 +1860,69 @@ function clearNoteAnalysisRefreshTimer() {
   state.noteAnalysisRefreshTimer = null;
 }
 
+function resolveOpenNoteClaim() {
+  const popover = state.noteCitationPopover || {};
+  const claimId = String(popover.claimId || '').trim();
+  const claimText = normalizeWhitespace(String(popover.claimText || ''));
+  const start = Number(popover.claimStartOffset);
+  const end = Number(popover.claimEndOffset);
+  const claims = getRenderableNoteClaims();
+  if (!claims.length) return null;
+  if (claimId) {
+    const byId = claims.find((item) => String((item && item.id) || '').trim() === claimId);
+    if (byId) return byId;
+  }
+  if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start) {
+    const byRange = claims.find((item) => Number(item.start_offset || -1) === start && Number(item.end_offset || -1) === end);
+    if (byRange) return byRange;
+  }
+  if (claimText) {
+    return claims.find((item) => normalizeWhitespace(String((item && item.claim_text) || '')) === claimText) || null;
+  }
+  return null;
+}
+
+function buildNoteCitationSummaryHtml(claim = {}, options = {}) {
+  const tone = getNoteClaimTone(claim || {});
+  const confidence = Math.round(getNoteClaimConfidence(claim || {}) * 100);
+  const suggestions = buildNoteClaimSuggestions(claim || {});
+  const stateMessage = String((options && options.stateMessage) || '').trim();
+  return `
+    <section class="notes-claim-summary">
+      <div class="notes-claim-spectrum">
+        <div class="notes-claim-spectrum-fill ${escapeHtml(tone.className)}" style="width:${Math.max(6, confidence)}%"></div>
+      </div>
+      <div class="notes-claim-summary-meta">
+        <strong>${escapeHtml(tone.label)}</strong>
+        <span class="muted small">${escapeHtml(`${confidence}% confidence`)}</span>
+      </div>
+      <div class="muted">${escapeHtml(tone.guidance)}</div>
+    </section>
+    ${suggestions.length ? `
+      <section class="notes-claim-actions">
+        ${suggestions.map((item) => `
+          <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(String((claim && claim.id) || ''))}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
+            <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
+            <span>${escapeHtml(String(item.description || ''))}</span>
+          </button>
+        `).join('')}
+      </section>
+    ` : ''}
+    ${stateMessage ? `<div class="notes-citation-state muted">${escapeHtml(stateMessage)}</div>` : ''}
+  `;
+}
+
 function closeNoteCitationPopover() {
-  state.noteCitationPopover = { open: false, claimId: '', expandedCitationId: '' };
+  state.noteCitationPopover = {
+    open: false,
+    claimId: '',
+    claimText: '',
+    claimStartOffset: -1,
+    claimEndOffset: -1,
+    expandedCitationId: '',
+    requestSeq: Number((state.noteCitationPopover && state.noteCitationPopover.requestSeq) || 0),
+    loading: false,
+  };
   const popover = e('notes-citation-popover');
   const body = e('notes-citation-body');
   const surface = e('notes-main');
@@ -2162,11 +2228,7 @@ function renderNotesSurface() {
   if (previewPane) previewPane.classList.toggle('hidden', mode !== 'view');
   renderNotesList();
   renderNoteHighlightLayer();
-  if (mode === 'view') {
-    void renderNotePreview();
-  } else {
-    closeNoteCitationPopover();
-  }
+  if (mode === 'view') void renderNotePreview();
 }
 
 async function refreshActiveNoteAnalysis(options = {}) {
@@ -2194,6 +2256,11 @@ async function refreshActiveNoteAnalysis(options = {}) {
     clearNoteAnalysisRefreshTimer();
   }
   renderNotesSurface();
+  if (state.noteCitationPopover && state.noteCitationPopover.open) {
+    const activeClaim = resolveOpenNoteClaim();
+    if (activeClaim) void openNoteCitationPopover(String(activeClaim.id || '').trim());
+    else closeNoteCitationPopover();
+  }
 }
 
 async function saveActiveNote(options = {}) {
@@ -2382,98 +2449,59 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
   if (!notesApi || !state.activeNote) return;
   const noteId = String(state.activeNoteId || '').trim();
   const targetClaimId = String(claimId || '').trim();
-  if (!noteId || !targetClaimId) return;
+  if (!noteId) return;
   const popover = e('notes-citation-popover');
   const titleNode = e('notes-citation-title');
   const bodyNode = e('notes-citation-body');
   if (!popover || !titleNode || !bodyNode) return;
-  const claim = getActiveNoteClaimById(targetClaimId);
-  const tone = getNoteClaimTone(claim || {});
-  const confidence = Math.round(getNoteClaimConfidence(claim || {}) * 100);
-  const suggestions = buildNoteClaimSuggestions(claim || {});
-  titleNode.textContent = claim ? claim.claim_text : 'Sources';
-  bodyNode.innerHTML = `
-    <section class="notes-claim-summary">
-      <div class="notes-claim-spectrum">
-        <div class="notes-claim-spectrum-fill ${escapeHtml(tone.className)}" style="width:${Math.max(6, confidence)}%"></div>
-      </div>
-      <div class="notes-claim-summary-meta">
-        <strong>${escapeHtml(tone.label)}</strong>
-        <span class="muted small">${escapeHtml(`${confidence}% confidence`)}</span>
-      </div>
-      <div class="muted">${escapeHtml(tone.guidance)}</div>
-    </section>
-    ${suggestions.length ? `
-      <section class="notes-claim-actions">
-        ${suggestions.map((item) => `
-          <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(targetClaimId)}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
-            <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
-            <span>${escapeHtml(String(item.description || ''))}</span>
-          </button>
-        `).join('')}
-      </section>
-    ` : ''}
-    <div class="muted">Loading sources...</div>
-  `;
+  const claim = getActiveNoteClaimById(targetClaimId) || resolveOpenNoteClaim();
+  if (!claim) return;
+  const requestSeq = Number((state.noteCitationPopover && state.noteCitationPopover.requestSeq) || 0) + 1;
+  titleNode.textContent = String(claim.claim_text || 'Sources');
+  bodyNode.innerHTML = buildNoteCitationSummaryHtml(claim, {
+    stateMessage: claim.provisional
+      ? 'Source checking is still running for this claim.'
+      : 'Loading sources...',
+  });
   popover.classList.remove('hidden');
   positionNoteCitationPopover(anchorEl);
-  state.noteCitationPopover = { open: true, claimId: targetClaimId, expandedCitationId: '' };
-  const res = await Promise.race([
-    notesApi.getCitations(noteId, targetClaimId),
-    new Promise((resolve) => {
-      window.setTimeout(() => resolve({ ok: false, timeout: true, message: 'Source scan is still running.' }), 2500);
-    }),
-  ]);
+  state.noteCitationPopover = {
+    open: true,
+    claimId: String(claim.id || targetClaimId).trim(),
+    claimText: String(claim.claim_text || ''),
+    claimStartOffset: Number((claim && claim.start_offset) || -1),
+    claimEndOffset: Number((claim && claim.end_offset) || -1),
+    expandedCitationId: '',
+    requestSeq,
+    loading: !claim.provisional,
+  };
+  if (claim.provisional) return;
+  const res = await notesApi.getCitations(noteId, String(claim.id || '').trim());
+  const popoverState = state.noteCitationPopover || {};
+  if (!popoverState.open || Number(popoverState.requestSeq || 0) !== requestSeq) return;
+  state.noteCitationPopover = {
+    ...popoverState,
+    loading: false,
+  };
   if (!res || !res.ok) {
-    bodyNode.innerHTML = `
-      <section class="notes-claim-summary">
-        <div class="notes-claim-spectrum">
-          <div class="notes-claim-spectrum-fill ${escapeHtml(tone.className)}" style="width:${Math.max(6, confidence)}%"></div>
-        </div>
-        <div class="notes-claim-summary-meta">
-          <strong>${escapeHtml(tone.label)}</strong>
-          <span class="muted small">${escapeHtml(`${confidence}% confidence`)}</span>
-        </div>
-        <div class="muted">${escapeHtml(tone.guidance)}</div>
-      </section>
-      ${suggestions.length ? `
-        <section class="notes-claim-actions">
-          ${suggestions.map((item) => `
-            <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(targetClaimId)}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
-              <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
-              <span>${escapeHtml(String(item.description || ''))}</span>
-            </button>
-          `).join('')}
-        </section>
-      ` : ''}
-      <div class="muted">${escapeHtml((res && res.message) || 'Unable to load sources.')}</div>
-    `;
+    const fallbackMessage = state.noteAnalysisPending || String((res && res.message) || '').trim() === 'Claim not found.'
+      ? 'Source scan is still running for this claim. Check back after the note finishes reanalyzing.'
+      : String((res && res.message) || 'Unable to load sources.');
+    bodyNode.innerHTML = buildNoteCitationSummaryHtml(claim, { stateMessage: fallbackMessage });
     return;
   }
   const citations = Array.isArray(res.citations) ? res.citations : [];
-  titleNode.textContent = String((res.claim && res.claim.claim_text) || (claim && claim.claim_text) || 'Sources');
-  const headerHtml = `
-    <section class="notes-claim-summary">
-      <div class="notes-claim-spectrum">
-        <div class="notes-claim-spectrum-fill ${escapeHtml(tone.className)}" style="width:${Math.max(6, confidence)}%"></div>
-      </div>
-      <div class="notes-claim-summary-meta">
-        <strong>${escapeHtml(tone.label)}</strong>
-        <span class="muted small">${escapeHtml(`${confidence}% confidence`)}</span>
-      </div>
-      <div class="muted">${escapeHtml(tone.guidance)}</div>
-    </section>
-    ${suggestions.length ? `
-      <section class="notes-claim-actions">
-        ${suggestions.map((item) => `
-          <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(targetClaimId)}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
-            <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
-            <span>${escapeHtml(String(item.description || ''))}</span>
-          </button>
-        `).join('')}
-      </section>
-    ` : ''}
-  `;
+  const resolvedClaim = (res && res.claim) ? res.claim : claim;
+  state.noteCitationPopover = {
+    ...state.noteCitationPopover,
+    claimId: String((resolvedClaim && resolvedClaim.id) || claim.id || '').trim(),
+    claimText: String((resolvedClaim && resolvedClaim.claim_text) || claim.claim_text || ''),
+    claimStartOffset: Number((resolvedClaim && resolvedClaim.start_offset) || (claim && claim.start_offset) || -1),
+    claimEndOffset: Number((resolvedClaim && resolvedClaim.end_offset) || (claim && claim.end_offset) || -1),
+  };
+  titleNode.textContent = String((resolvedClaim && resolvedClaim.claim_text) || claim.claim_text || 'Sources');
+  const tone = getNoteClaimTone(resolvedClaim || {});
+  const headerHtml = buildNoteCitationSummaryHtml(resolvedClaim);
   const eligibleCitations = citations.filter((citation) => {
     const kind = getNoteCitationSourceKind(citation);
     return !kind || ['explicit_url', 'web_search', 'official_search', 'challenge_search'].includes(kind);
@@ -2485,11 +2513,14 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
   const helpfulOfficials = getHelpfulLeadCitations(officialCitations);
   const helpfulContrarian = getHelpfulLeadCitations(contrarianCitations);
   if (!eligibleCitations.length) {
-    bodyNode.innerHTML = `${headerHtml}<div class="muted">No evidence available for this passage yet.</div>`;
+    const noEvidenceMessage = state.noteAnalysisPending
+      ? 'Source scan is still running for this claim.'
+      : 'No evidence available for this passage yet.';
+    bodyNode.innerHTML = `${headerHtml}<div class="notes-citation-state muted">${escapeHtml(noEvidenceMessage)}</div>`;
     return;
   }
   if (tone.className === 'no-evidence' && helpfulSupport.length === 0 && helpfulOfficials.length === 0 && helpfulContrarian.length === 0) {
-    bodyNode.innerHTML = `${headerHtml}<div class="muted">No strong web evidence was found. Tighten the claim first, then search again.</div>`;
+    bodyNode.innerHTML = `${headerHtml}<div class="notes-citation-state muted">No strong web evidence was found. Tighten the claim first, then search again.</div>`;
     return;
   }
   const supportingSection = tone.className === 'no-evidence' ? helpfulSupport : supportingCitations.slice(0, 3);
@@ -2501,7 +2532,7 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
     renderNoteCitationSection('Contrarian result', contrarianSection),
   ].filter(Boolean).join('');
   const fallbackMessage = tone.className === 'no-evidence'
-    ? '<div class="muted">No strong web evidence was found, but these links may help you tighten the claim.</div>'
+    ? '<div class="notes-citation-state muted">No strong web evidence was found, but these links may help you tighten the claim.</div>'
     : '';
   bodyNode.innerHTML = `${headerHtml}${sectionsHtml || fallbackMessage}`;
   positionNoteCitationPopover();
@@ -13992,7 +14023,7 @@ function bindControls() {
     const end = Number(noteInput.selectionEnd);
     if (!Number.isFinite(start) || !Number.isFinite(end) || start !== end) return;
     const claim = getActiveNoteClaimAtOffset(start);
-    if (claim && !claim.provisional) {
+    if (claim) {
       void openNoteCitationPopover(String(claim.id || '').trim(), noteInput);
     } else {
       closeNoteCitationPopover();
@@ -14079,11 +14110,7 @@ function bindControls() {
       excerpt: String(openButton.getAttribute('data-note-citation-excerpt') || '').trim(),
     });
   });
-  document.addEventListener('click', (event) => {
-    if (!state.noteCitationPopover.open) return;
-    const target = event.target instanceof Element ? event.target : null;
-    if (!target) return;
-    if (target.closest('#notes-citation-popover') || target.closest('.notes-inline-citation')) return;
+  e('notes-citation-close-btn')?.addEventListener('click', () => {
     closeNoteCitationPopover();
   });
 

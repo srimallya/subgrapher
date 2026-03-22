@@ -11,7 +11,7 @@ const MAX_PASSAGES_PER_SOURCE = 8;
 const MAX_WEB_RESULTS_PER_CLAIM = 3;
 const MAX_FETCHES_PER_NOTE = 18;
 const MAX_CONCURRENCY = 2;
-const VERB_PATTERN = /\b(is|are|was|were|has|have|had|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|kill|kills|killed)\b/i;
+const VERB_PATTERN = /\b(is|are|was|were|has|have|had|began|begin|beginning|started|start|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|broke|break|broken|wounded|wound|redirected|redirect|deployed|deploy|sent|send|targeted|target|carried|carry|carrying|kill|kills|killed)\b/i;
 const WEB_NOTE_SOURCE_KINDS = new Set(['explicit_url', 'web_search', 'official_search', 'challenge_search']);
 const QUERY_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'their', 'there', 'about', 'according', 'over', 'than']);
 

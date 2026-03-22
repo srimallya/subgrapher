@@ -3418,15 +3418,19 @@ body.chat-collapsed #chat-panel-resizer {
 
 #notes-page {
   padding: 0;
+  --notes-side-rail-width: 252px;
 }
 
 .notes-page-shell {
   display: grid;
-  grid-template-columns: 252px minmax(0, 1fr);
+  grid-template-columns: var(--notes-side-rail-width) minmax(0, 1fr);
   height: 100%;
 }
 
 .notes-sidebar {
+  width: var(--notes-side-rail-width);
+  min-width: var(--notes-side-rail-width);
+  max-width: var(--notes-side-rail-width);
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -3514,7 +3518,7 @@ body.chat-collapsed #chat-panel-resizer {
 }
 
 .notes-main.notes-citation-open {
-  grid-template-columns: minmax(0, 1fr) 380px;
+  grid-template-columns: minmax(0, 1fr) var(--notes-side-rail-width);
 }
 
 .notes-toolbar {
@@ -3688,7 +3692,9 @@ body.chat-collapsed #chat-panel-resizer {
 .notes-citation-popover {
   grid-column: 2;
   grid-row: 1 / span 2;
-  width: 100%;
+  width: var(--notes-side-rail-width);
+  min-width: var(--notes-side-rail-width);
+  max-width: var(--notes-side-rail-width);
   overflow: hidden;
   border-left: 1px solid var(--border);
   background: #1b1b1b;
@@ -3699,10 +3705,26 @@ body.chat-collapsed #chat-panel-resizer {
   min-height: 0;
 }
 
-.notes-citation-title {
-  font-weight: 600;
+.notes-citation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px;
   border-bottom: 1px solid var(--border);
+}
+
+.notes-citation-title {
+  font-weight: 600;
+  min-width: 0;
+}
+
+.notes-citation-close-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #1b1b1b;
+  flex: 0 0 auto;
 }
 
 .notes-citation-body {
@@ -3797,6 +3819,13 @@ body.chat-collapsed #chat-panel-resizer {
   font-size: 12px;
   font-weight: 600;
   color: var(--muted);
+}
+
+.notes-citation-state {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #202020;
 }
 
 .notes-citation-source-btn {

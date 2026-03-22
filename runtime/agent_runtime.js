@@ -1112,6 +1112,8 @@ function normalizeResearchPolicy(input) {
     isDetailed: !!policy.isDetailed,
     requiresWebResearch: !!policy.requiresWebResearch,
     requireDeliverableBeforeFinish: !!policy.requireDeliverableBeforeFinish,
+    requireOpenTabBeforeFinish: !!policy.requireOpenTabBeforeFinish,
+    articleOpenOnly: !!policy.articleOpenOnly,
     localEvidenceAvailable: !!policy.localEvidenceAvailable,
     requiresCitations: !!policy.requiresCitations,
     citationMode: normalizeCitationMode(policy.citationMode),
@@ -1190,6 +1192,9 @@ function computeMissingPhase(policy, localEvidenceCount, webEvidenceCount, deliv
   if (policy.requireDeliverableBeforeFinish && !deliverableWritten) {
     return 'deliverable';
   }
+  if (policy.requireOpenTabBeforeFinish && !(Number(policy.openedTabCount || 0) > 0)) {
+    return 'open_tab';
+  }
   if (gate && Array.isArray(gate.reasons)) {
     if (gate.reasons.includes('citation_format_required')) return 'citation_format';
     if (gate.reasons.includes('marker_required_for_quotes')) return 'marker';
@@ -1220,6 +1225,14 @@ function buildRecoveryPrompt(missingPhase) {
       'Continue the task.',
       'Required phase missing: deliverable artifact writing.',
       'Call write_markdown_artifact now.',
+      'Do not call finish yet.',
+    ].join(' ');
+  }
+  if (phase === 'open_tab') {
+    return [
+      'Continue the task.',
+      'Required phase missing: opening relevant articles in workspace tabs.',
+      'Call open_web_tab now for the best 1-3 matching http(s) results you already found.',
       'Do not call finish yet.',
     ].join(' ');
   }
@@ -1266,6 +1279,30 @@ function buildDeterministicRecoveryFollowup(recoveryResult = {}) {
     'Use these recovered sources in your synthesis and citation section.',
     'Do not call finish until required phases are satisfied.',
   ].filter(Boolean).join('\n');
+}
+
+function buildCitationPromptSummary(citationSources = new Map()) {
+  const entries = Array.from((citationSources instanceof Map ? citationSources.values() : [])).slice(0, 8);
+  if (entries.length === 0) return '';
+  return entries.map((entry, idx) => {
+    const row = (entry && typeof entry === 'object') ? entry : {};
+    const url = String(row.url || '').trim();
+    const artifactId = String(row.artifact_id || '').trim();
+    const contextFileId = String(row.context_file_id || '').trim();
+    const locator = String(row.source_locator || '').trim();
+    const resolved = url || (artifactId ? `artifact:${artifactId}` : '') || (contextFileId ? `context_file:${contextFileId}` : '') || locator;
+    return `[${idx + 1}] ${resolved}`;
+  }).filter(Boolean).join('\n');
+}
+
+function shouldAttemptCitationRepair(researchPolicy, citationGate, citationSources, finalText) {
+  const gate = (citationGate && typeof citationGate === 'object') ? citationGate : {};
+  const reasons = Array.isArray(gate.reasons) ? gate.reasons : [];
+  if (!researchPolicy || !researchPolicy.requiresCitations) return false;
+  if (!String(finalText || '').trim()) return false;
+  if (!(citationSources instanceof Map) || citationSources.size === 0) return false;
+  if (reasons.length === 0) return false;
+  return reasons.every((code) => code === 'citation_format_required' || code === 'marker_required_for_quotes');
 }
 
 function isLikelyRateLimitError(err) {
@@ -1365,6 +1402,7 @@ async function executeAgenticLoop(options = {}) {
   let localEvidenceCount = 0;
   let webEvidenceCount = 0;
   let deliverableWritten = false;
+  let openedTabCount = 0;
   let webUnavailable = false;
   let localBypassNoted = false;
   let recoveryTurnCount = 0;
@@ -1468,7 +1506,7 @@ async function executeAgenticLoop(options = {}) {
         text: citationDraftTargetText,
       });
       const missingPhase = computeMissingPhase(
-        researchPolicy,
+        { ...researchPolicy, openedTabCount },
         localEvidenceCount,
         webEvidenceCount,
         deliverableWritten,
@@ -1582,6 +1620,7 @@ async function executeAgenticLoop(options = {}) {
       const isWebTool = WEB_TOOL_NAMES.has(toolName);
       const isDeliverableTool = DELIVERABLE_TOOL_NAMES.has(toolName);
       const isFinishTool = toolName === 'finish';
+      const isOpenWebTabTool = toolName === 'open_web_tab';
 
       if (isLocalEvidenceTool) emitPhase('local');
       if (isWebTool) {
@@ -1635,6 +1674,27 @@ async function executeAgenticLoop(options = {}) {
         toolRes = buildPolicyBlockedToolResult(
           'Write the requested deliverable artifact before finishing.',
           'deliverable_required',
+        );
+      }
+      if (
+        !toolRes
+        && researchPolicy.articleOpenOnly
+        && (toolName === 'run_python' || isDeliverableTool)
+      ) {
+        toolRes = buildPolicyBlockedToolResult(
+          'This request is for finding and opening relevant articles only. Use web_search and open_web_tab, then finish.',
+          'article_open_only',
+        );
+      }
+      if (
+        !toolRes
+        && researchPolicy.requireOpenTabBeforeFinish
+        && isFinishTool
+        && openedTabCount === 0
+      ) {
+        toolRes = buildPolicyBlockedToolResult(
+          'Open at least one relevant article in a workspace tab before finishing.',
+          'open_tab_required',
         );
       }
       if (
@@ -1749,6 +1809,21 @@ async function executeAgenticLoop(options = {}) {
       }
       if (toolOk && isLocalEvidenceTool) localEvidenceCount += 1;
       if (toolOk && isWebTool) webEvidenceCount += 1;
+      if (toolOk && isOpenWebTabTool) openedTabCount += 1;
+      if (
+        toolOk
+        && researchPolicy.articleOpenOnly
+        && isOpenWebTabTool
+        && openedTabCount >= 1
+      ) {
+        finished = true;
+        finalText = 'Opened relevant articles in workspace tabs.';
+        aggregate.stopped_reason = 'article_tabs_opened';
+        emitStatus('info', 'agent', 'Opened article tabs; finishing request.', {
+          meta: { turn, reason: 'article_tabs_opened', opened_tab_count: openedTabCount },
+        });
+        break;
+      }
       if (toolOk && isDeliverableTool) {
         deliverableWritten = true;
         const candidateContent = String(args.content || '').trim();
@@ -1788,10 +1863,22 @@ async function executeAgenticLoop(options = {}) {
 
   const shouldForceFinalization = !finished && !isSubstantiveFinalText(finalText);
   if (shouldForceFinalization) {
+    const availableSourcesSummary = buildCitationPromptSummary(citationSources);
     const finalInstruction = [
       'Finalize now with available evidence. No more tool calls.',
       researchPolicy.requiresWebResearch && webEvidenceCount === 0 && webUnavailable
         ? 'Web research is currently unavailable. Mention this limitation explicitly in your final answer.'
+        : '',
+      researchPolicy.requiresCitations && citationSources.size > 0
+        ? [
+          'Use footnote citations in the answer, like [1] or [1][2].',
+          'Add a "## Sources" section with one resolvable entry per cited footnote.',
+          'Use only the available sources listed below.',
+          availableSourcesSummary ? `Available sources:\n${availableSourcesSummary}` : '',
+          researchPolicy.requireMarkerForQuotedClaims && markerSourceKeys.size === 0
+            ? 'Do not include direct quotes, because no marker-backed sources are available.'
+            : '',
+        ].filter(Boolean).join('\n')
         : '',
       'Provide a complete user-facing response.',
     ].filter(Boolean).join(' ');
@@ -1850,18 +1937,72 @@ async function executeAgenticLoop(options = {}) {
     local_evidence_count: localEvidenceCount,
     web_evidence_count: webEvidenceCount,
     deliverable_written: deliverableWritten,
+    opened_tab_count: openedTabCount,
     web_unavailable: webUnavailable,
     citation_sources_count: citationSources.size,
     marker_sources_count: markerSourceKeys.size,
     citation_gate_passed: true,
   };
-  const finalCitationGate = evaluateCitationGate(researchPolicy, {
+  let finalCitationGate = evaluateCitationGate(researchPolicy, {
     citationSourcesCount: citationSources.size,
     markerSourcesCount: markerSourceKeys.size,
     enforceFormat: !!researchPolicy.requiresCitations
       && !!String((deliverableWritten && latestDeliverableArtifactContent) ? latestDeliverableArtifactContent : finalText).trim(),
     text: (deliverableWritten && latestDeliverableArtifactContent) ? latestDeliverableArtifactContent : finalText,
   });
+  if (shouldAttemptCitationRepair(researchPolicy, finalCitationGate, citationSources, finalText)) {
+    const availableSourcesSummary = buildCitationPromptSummary(citationSources);
+    const citationRepairInstruction = [
+      'Rewrite the response to satisfy citation policy. No tool calls.',
+      'Use footnote citations in the body, like [1] or [1][2].',
+      'Add a "## Sources" section with one resolvable source entry per cited footnote.',
+      'Use only the available sources listed below.',
+      availableSourcesSummary ? `Available sources:\n${availableSourcesSummary}` : '',
+      researchPolicy.requireMarkerForQuotedClaims && markerSourceKeys.size === 0
+        ? 'Do not use direct quotes or blockquotes in the rewrite.'
+        : '',
+      finalCitationGate.reasons.includes('citation_format_required')
+        ? 'The previous draft was missing required footnote/source formatting.'
+        : '',
+      finalCitationGate.reasons.includes('marker_required_for_quotes')
+        ? 'The previous draft used quoted claims without marker-backed evidence.'
+        : '',
+      'Return only the rewritten user-facing answer.',
+    ].filter(Boolean).join('\n');
+    try {
+      emitStatus('info', 'agent', 'Repairing final response to satisfy citation format.');
+      const citationRepairRes = await callProviderWithBackoff({
+        provider,
+        model,
+        apiKey,
+        systemPrompt,
+        messages: [
+          { role: 'user', content: userPrompt },
+          { role: 'assistant', content: finalText },
+          { role: 'user', content: citationRepairInstruction },
+        ],
+        tools: directTools,
+        signal,
+      }, {
+        disableTools: true,
+      });
+      const repairedText = String((citationRepairRes && citationRepairRes.text) || '').trim();
+      if (repairedText) {
+        finalText = repairedText;
+        finalCitationGate = evaluateCitationGate(researchPolicy, {
+          citationSourcesCount: citationSources.size,
+          markerSourcesCount: markerSourceKeys.size,
+          enforceFormat: true,
+          text: finalText,
+        });
+        if (finalCitationGate.ok) {
+          aggregate.stopped_reason = aggregate.stopped_reason || 'citation_repair';
+        }
+      }
+    } catch (citationRepairErr) {
+      emitStatus('error', 'agent', `Citation repair failed: ${String((citationRepairErr && citationRepairErr.message) || 'unknown error')}`);
+    }
+  }
   finalCitationGate.reasons.forEach((code) => {
     if (!citationBlockReasons.includes(code)) citationBlockReasons.push(code);
   });
@@ -1870,12 +2011,13 @@ async function executeAgenticLoop(options = {}) {
   aggregate.research_policy_state.deliverable_artifact_type = latestDeliverableArtifactType;
   aggregate.policy_diagnostics = {
     missing_phase: computeMissingPhase(
-      researchPolicy,
+      { ...researchPolicy, openedTabCount },
       localEvidenceCount,
       webEvidenceCount,
       deliverableWritten,
       webUnavailable,
       finalCitationGate,
+      
     ),
     recovery_attempts: recoveryTurnCount,
     blocked_tools: blockedTools,

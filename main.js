@@ -147,7 +147,7 @@ const FOLDER_MOUNT_MAX_FILES = 500;
 const CONTEXT_FILE_MAX_BYTES = 32 * 1024 * 1024;
 const FOLDER_MOUNT_MAX_FILE_BYTES = CONTEXT_FILE_MAX_BYTES;
 const CHAT_REQUEST_TIMEOUT_MS = 60_000;
-const CHAT_REQUEST_TIMEOUT_MAX_MS = 300_000;
+const CHAT_REQUEST_TIMEOUT_MAX_MS = 10 * 60_000;
 const DECISION_TRACE_MAX_STEPS = 240;
 const GRAPH_MAX_NODES = 600;
 const GRAPH_MAX_EDGES = 1200;
@@ -1074,18 +1074,30 @@ function resolveChatTimeoutMs(input = {}, ref = null) {
     return Math.max(30_000, Math.min(CHAT_REQUEST_TIMEOUT_MAX_MS, Math.round(requested)));
   }
   const message = String(payload.message || '').trim().toLowerCase();
-  const researchHeavyRequest = isResearchIntentRequest(message) || isDetailedDeliverableRequest(message);
+  const thread = (ref && ref.chat_thread && typeof ref.chat_thread === 'object') ? ref.chat_thread : {};
+  const threadMessages = Array.isArray(thread.messages) ? thread.messages : [];
+  const recentThreadText = threadMessages
+    .slice(-8)
+    .map((item) => String((item && item.text) || '').trim())
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+  const isRetryLikeMessage = /^(try again|retry|continue|go on|proceed|again)\.?$/i.test(message);
+  const effectiveMessage = isRetryLikeMessage && recentThreadText ? `${recentThreadText}\n${message}` : message;
+  const detailedDeliverableRequest = isDetailedDeliverableRequest(effectiveMessage);
+  const researchHeavyRequest = isResearchIntentRequest(effectiveMessage) || detailedDeliverableRequest;
   const contextFiles = Array.isArray(ref && ref.context_files) ? ref.context_files : [];
   const imageCount = contextFiles.filter((file) => isImageContextFile(file)).length;
   const fileIntent = (
-    message.includes('what are these files')
-    || message.includes('analyze these files')
-    || message.includes('analyse these files')
-    || message.includes('describe these files')
-    || message.includes('context files')
-    || message.includes('images')
+    effectiveMessage.includes('what are these files')
+    || effectiveMessage.includes('analyze these files')
+    || effectiveMessage.includes('analyse these files')
+    || effectiveMessage.includes('describe these files')
+    || effectiveMessage.includes('context files')
+    || effectiveMessage.includes('images')
   );
-  if (researchHeavyRequest || imageCount >= 3 || (imageCount > 0 && fileIntent)) return 180_000;
+  if (detailedDeliverableRequest) return 8 * 60_000;
+  if (researchHeavyRequest || imageCount >= 3 || (imageCount > 0 && fileIntent)) return 6 * 60_000;
   return CHAT_REQUEST_TIMEOUT_MS;
 }
 
@@ -16484,6 +16496,29 @@ function isResearchIntentRequest(userMessage) {
   return RESEARCH_INTENT_KEYWORDS.some((kw) => lower.includes(kw));
 }
 
+function isOpenArticleIntentRequest(userMessage) {
+  const text = String(userMessage || '').trim().toLowerCase();
+  if (!text) return false;
+  const asksToOpen = /\b(open|load)\b/.test(text);
+  const asksForArticles = /\b(article|articles|links|sources|results|tabs|pages)\b/.test(text);
+  const asksToSearch = /\b(search|find|look up|lookup|research)\b/.test(text);
+  return (asksToOpen && asksForArticles) || (asksToSearch && asksToOpen);
+}
+
+function shouldIgnoreCitationGate(userMessage) {
+  const text = String(userMessage || '').trim().toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes('ignore citation gate')
+    || text.includes('ignore the citation gate')
+    || text.includes('disable citation gate')
+    || text.includes('disable the citation gate')
+    || text.includes('skip citation gate')
+    || text.includes('skip the citation gate')
+    || text.includes('ignore citations')
+  );
+}
+
 function hasLocalEvidenceForResearch(ref) {
   const target = (ref && typeof ref === 'object') ? ref : {};
   const artifacts = Array.isArray(target.artifacts) ? target.artifacts : [];
@@ -16754,6 +16789,8 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
       '- For research outputs, use footnote citation format in content: [1], [2], ... and include a "## Sources" section.',
       '- In chat responses, format source URLs as markdown links.',
       '- In artifact content, keep source URLs as plain text (non-markdown links).',
+      '- If the user asks you to search and open articles, use web_search first, then open_web_tab for the best 1-3 matching http(s) results before finishing.',
+      '- For "search and open articles" requests, do not use run_python, do not write artifacts, and do not keep refining search terms after you have enough good matches to open.',
       'Interactive artifact policy:',
       '- Prefer HTML artifacts for interactive visualizations and games.',
       '- Use write_html_artifact (or create_artifact with artifact_type="html") for dynamic browser-executed outputs.',
@@ -17820,12 +17857,17 @@ async function executeLuminoChat(input, options = {}) {
   const isPathBDelegation = !!payload.path_b_delegate;
   const isDetailed = false;
   const isResearchIntent = isPathBDelegation ? false : isResearchIntentRequest(message);
+  const isOpenArticleIntent = isPathBDelegation ? false : isOpenArticleIntentRequest(message);
+  const ignoreCitationGate = shouldIgnoreCitationGate(message);
+  const agentMaxTurns = isOpenArticleIntent ? 4 : AGENTIC_MAX_TURNS;
   const researchPolicy = {
     isDetailed,
     requiresWebResearch: isResearchIntent,
     requireDeliverableBeforeFinish: false,
+    requireOpenTabBeforeFinish: isOpenArticleIntent,
+    articleOpenOnly: isOpenArticleIntent,
     localEvidenceAvailable: hasLocalEvidenceForResearch(activeRef),
-    requiresCitations: isResearchIntent,
+    requiresCitations: isResearchIntent && !isOpenArticleIntent && !ignoreCitationGate,
     citationMode: 'hybrid',
     minCitationsShort: 1,
     minCitationsDetailed: 2,
@@ -17855,7 +17897,7 @@ async function executeLuminoChat(input, options = {}) {
       systemPrompt: prompts.systemPrompt,
       userPrompt: prompts.userPrompt,
       signal,
-      maxTurns: AGENTIC_MAX_TURNS,
+      maxTurns: agentMaxTurns,
       onDelta,
       onStatus: (statusPayload) => {
         const status = (statusPayload && typeof statusPayload === 'object') ? statusPayload : {};
@@ -19124,8 +19166,12 @@ async function executeLuminoChat(input, options = {}) {
   }
   if (!isDetailed && isSubstantive && !citationRequirementSatisfied && !deliverableArtifact) {
     const missingPhase = String(policyDiagnostics.missing_phase || '').trim().toLowerCase();
-    if (missingPhase === 'citation' || missingPhase === 'citation_format' || missingPhase === 'marker') {
-      finalResult.message = 'Citation requirements were not met. Use search_local_evidence, add marker-backed evidence for quoted claims, and provide footnote citations with a Sources section.';
+    if (missingPhase === 'citation') {
+      finalResult.message = 'Citation requirements were not met. Gather at least one source before answering.';
+    } else if (missingPhase === 'citation_format') {
+      finalResult.message = 'Citation requirements were not met. Rewrite the response with footnote citations and a ## Sources section.';
+    } else if (missingPhase === 'marker') {
+      finalResult.message = 'Citation requirements were not met. Avoid direct quotes unless you add marker-backed evidence, and include footnote citations with a ## Sources section.';
     }
   }
   const shouldUpdateMemory = isDetailed ? !!deliverableArtifact : isSubstantive;
@@ -20326,6 +20372,8 @@ ipcMain.handle('notes:get_analysis', async (_event, payload) => {
 ipcMain.handle('notes:get_citations', async (_event, payload) => {
   const noteId = String((payload && payload.noteId) || '').trim();
   const claimId = String((payload && payload.claimId) || '').trim();
+  const fresh = await ensureFreshNoteAnalysis(noteId);
+  if (!fresh || fresh.ok === false) return fresh;
   return getNotesStore().getCitations(noteId, claimId);
 });
 
