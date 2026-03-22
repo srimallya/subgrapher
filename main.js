@@ -14581,13 +14581,22 @@ function buildReferenceProtocolFields(seed = {}, parent = null) {
     || ''
   ).trim();
   const fallbackForkKind = parentRef ? 'local_fork' : 'root';
-  const originSnapshotId = String(source.origin_snapshot_id || '').trim();
-  const lastSyncedSnapshotId = String(source.last_synced_snapshot_id || originSnapshotId || '').trim();
+  const inheritedOriginSnapshotId = String(
+    source.origin_snapshot_id
+    || (parentRef && (parentRef.origin_snapshot_id || parentRef.last_synced_snapshot_id))
+    || ''
+  ).trim();
+  const lastSyncedSnapshotId = String(
+    source.last_synced_snapshot_id
+    || (parentRef && (parentRef.last_synced_snapshot_id || parentRef.origin_snapshot_id))
+    || inheritedOriginSnapshotId
+    || ''
+  ).trim();
   return {
     reference_uid: referenceUid,
     lineage_id: inheritedLineageId,
     parent_reference_uid: inheritedParentReferenceUid || null,
-    origin_snapshot_id: originSnapshotId || '',
+    origin_snapshot_id: inheritedOriginSnapshotId || '',
     last_synced_snapshot_id: lastSyncedSnapshotId || '',
     fork_kind: normalizeReferenceForkKind(source.fork_kind, fallbackForkKind),
   };
@@ -14785,6 +14794,9 @@ function createForkReference(parent, seed = {}) {
   const resolvedColorTag = inheritsColor
     ? sanitizeReferenceColorTag(parent && parent.color_tag)
     : sanitizeReferenceColorTag(seed.color_tag);
+  const inheritedSourceMetadata = Object.prototype.hasOwnProperty.call(seed, 'source_metadata')
+    ? ((seed.source_metadata && typeof seed.source_metadata === 'object') ? seed.source_metadata : {})
+    : ((parent && parent.source_metadata && typeof parent.source_metadata === 'object') ? cloneValue(parent.source_metadata) : {});
   return {
     id: makeId('sr'),
     ...protocol,
@@ -14800,10 +14812,10 @@ function createForkReference(parent, seed = {}) {
     visibility: 'private',
     is_public_candidate: false,
     source_type: 'local',
-    source_peer_id: '',
-    source_peer_name: '',
+    source_peer_id: String(seed.source_peer_id || ((parent && parent.source_peer_id) || '')).toUpperCase(),
+    source_peer_name: String(seed.source_peer_name || ((parent && parent.source_peer_name) || '')),
     source_candidate_key: '',
-    source_metadata: (seed.source_metadata && typeof seed.source_metadata === 'object') ? seed.source_metadata : {},
+    source_metadata: inheritedSourceMetadata,
     is_temp_candidate: false,
     temp_imported_at: 0,
     hyperweb_payload_version: 1,
