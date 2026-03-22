@@ -93,6 +93,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     srRemoveTab: (srId, tabId) => ipcRenderer.invoke('browser:srRemoveTab', { srId, tabId }),
     resolveArtifactAsset: (srId, uri) => ipcRenderer.invoke('browser:resolveArtifactAsset', { srId, uri }),
     saveArtifactImage: (srId, sourceUrl, suggestedName) => ipcRenderer.invoke('browser:saveArtifactImage', { srId, sourceUrl, suggestedName }),
+    exportArtifact: (srId, payload = {}) => ipcRenderer.invoke('browser:exportArtifact', { srId, ...(payload || {}) }),
     srGetProgram: (srId) => ipcRenderer.invoke('browser:srGetProgram', { srId }),
     srSetProgram: (srId, program) => ipcRenderer.invoke('browser:srSetProgram', { srId, program }),
 

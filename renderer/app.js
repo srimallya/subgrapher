@@ -4818,7 +4818,10 @@ function updateArtifactRuntimeControls(artifact) {
     codeBtn.disabled = !isHtml;
   }
   if (saveBtn) {
+    saveBtn.classList.toggle('hidden', !isMarkdown && !isHtml);
     saveBtn.disabled = isMemoryReplayActive();
+    saveBtn.textContent = 'Save';
+    saveBtn.title = isHtml ? 'Save rendered PDF' : 'Save to disk';
   }
   if (refreshBtn) {
     refreshBtn.classList.toggle('hidden', !isHtml);
@@ -4980,6 +4983,104 @@ async function saveActiveArtifact(options = {}) {
   if (status && !opts.skipStatus) status.textContent = 'Saved';
   void noteReferenceRankingInteraction('artifact_edit', { srId: state.activeSrId });
   return res;
+}
+
+async function exportActiveMarkdownArtifact() {
+  if (isMemoryReplayActive()) {
+    showPassiveNotification('Memory replay is read-only.');
+    return;
+  }
+  if (!state.activeSrId || state.activeSurface.kind !== 'artifact') return;
+  const ref = getActiveReference();
+  if (!ref) return;
+  const artifactId = String(state.activeSurface.artifactId || '').trim();
+  const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
+  if (!artifact || normalizeArtifactType(artifact.type) !== 'markdown') return;
+
+  if (state.artifactSaveTimer) {
+    clearTimeout(state.artifactSaveTimer);
+    state.artifactSaveTimer = null;
+  }
+
+  const saveRes = await saveActiveArtifact({ skipStatus: true });
+  if (saveRes && saveRes.ok === false) {
+    showPassiveNotification(String(saveRes.message || 'Unable to prepare artifact export.'));
+    return;
+  }
+  const status = e('artifact-status');
+  if (status) status.textContent = 'Saved';
+
+  const input = e('artifact-input');
+  const content = String((input && typeof input.value === 'string') ? input.value : (artifact.content || ''));
+  const renderedHtml = await renderMarkdownToHtml(content);
+  const exportRes = await api.exportArtifact(state.activeSrId, {
+    artifact_type: 'markdown',
+    artifact_id: artifactId,
+    title: String(artifact.title || 'artifact'),
+    content,
+    rendered_html: renderedHtml,
+  });
+
+  if (!exportRes || !exportRes.ok) {
+    const message = String((exportRes && exportRes.message) || '');
+    if (!exportRes || !exportRes.canceled) {
+      showPassiveNotification(message || 'Unable to export artifact.');
+    }
+    return;
+  }
+
+  showPassiveNotification(`Saved ${String(exportRes.format || 'file').toUpperCase()} to ${String(exportRes.saved_path || '').trim() || 'disk'}`);
+}
+
+async function exportActiveArtifact() {
+  if (isMemoryReplayActive()) {
+    showPassiveNotification('Memory replay is read-only.');
+    return;
+  }
+  if (!state.activeSrId || state.activeSurface.kind !== 'artifact') return;
+  const ref = getActiveReference();
+  if (!ref) return;
+  const artifactId = String(state.activeSurface.artifactId || '').trim();
+  const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
+  if (!artifact) return;
+  const artifactType = normalizeArtifactType(artifact.type);
+  if (artifactType === 'markdown') {
+    await exportActiveMarkdownArtifact();
+    return;
+  }
+  if (artifactType !== 'html') return;
+
+  if (state.artifactSaveTimer) {
+    clearTimeout(state.artifactSaveTimer);
+    state.artifactSaveTimer = null;
+  }
+
+  const saveRes = await saveActiveArtifact({ skipStatus: true });
+  if (saveRes && saveRes.ok === false) {
+    showPassiveNotification(String(saveRes.message || 'Unable to prepare artifact export.'));
+    return;
+  }
+  const status = e('artifact-status');
+  if (status) status.textContent = 'Saved';
+
+  const input = e('artifact-input');
+  const htmlContent = String((input && typeof input.value === 'string') ? input.value : (artifact.content || ''));
+  const exportRes = await api.exportArtifact(state.activeSrId, {
+    artifact_type: 'html',
+    artifact_id: artifactId,
+    title: String(artifact.title || 'artifact'),
+    html_content: htmlContent,
+  });
+
+  if (!exportRes || !exportRes.ok) {
+    const message = String((exportRes && exportRes.message) || '');
+    if (!exportRes || !exportRes.canceled) {
+      showPassiveNotification(message || 'Unable to export artifact.');
+    }
+    return;
+  }
+
+  showPassiveNotification(`Saved PDF to ${String(exportRes.saved_path || '').trim() || 'disk'}`);
 }
 
 function startOfDashboardMonth(date = new Date()) {
@@ -12740,11 +12841,7 @@ function bindControls() {
   });
 
   e('artifact-save-btn')?.addEventListener('click', async () => {
-    if (state.artifactSaveTimer) {
-      clearTimeout(state.artifactSaveTimer);
-      state.artifactSaveTimer = null;
-    }
-    await saveActiveArtifact();
+    await exportActiveArtifact();
   });
 
   e('artifact-mode-render-btn')?.addEventListener('click', async () => {

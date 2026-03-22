@@ -4269,6 +4269,238 @@ async function saveArtifactImageForReference(srId, sourceUrl, suggestedName) {
   }
 }
 
+function sanitizeArtifactExportBasename(name = '', fallback = 'artifact') {
+  const raw = String(name || '').trim();
+  const safe = raw.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
+  return safe || fallback;
+}
+
+function ensureArtifactExportExtension(filePath = '', extension = 'md') {
+  const target = String(filePath || '').trim();
+  const ext = String(extension || '').replace(/^\.+/, '').trim().toLowerCase();
+  if (!target || !ext) return target;
+  if (String(path.extname(target) || '').trim().toLowerCase() === `.${ext}`) return target;
+  return `${target}.${ext}`;
+}
+
+function escapeArtifactExportHtml(value = '') {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function buildArtifactPdfDocument(title = '', renderedHtml = '') {
+  const safeTitle = escapeArtifactExportHtml(String(title || '').trim() || 'Artifact');
+  const bodyHtml = String(renderedHtml || '').trim() || '<p>No content.</p>';
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="utf-8" />',
+    `<title>${safeTitle}</title>`,
+    '<style>',
+    '@page { size: A4; margin: 20mm 16mm; }',
+    'html, body { margin: 0; padding: 0; background: #ffffff; color: #171717; font-family: "IBM Plex Sans", "Helvetica Neue", sans-serif; font-size: 12pt; line-height: 1.6; }',
+    'body { padding: 0; }',
+    '.artifact-pdf-root { width: 100%; }',
+    '.artifact-pdf-root h1, .artifact-pdf-root h2, .artifact-pdf-root h3, .artifact-pdf-root h4, .artifact-pdf-root h5, .artifact-pdf-root h6 { line-height: 1.3; margin: 0 0 10pt; }',
+    '.artifact-pdf-root h1 { font-size: 24pt; }',
+    '.artifact-pdf-root h2 { font-size: 18pt; }',
+    '.artifact-pdf-root h3 { font-size: 15pt; }',
+    '.artifact-pdf-root p, .artifact-pdf-root ul, .artifact-pdf-root ol, .artifact-pdf-root blockquote, .artifact-pdf-root pre { margin: 0 0 10pt; }',
+    '.artifact-pdf-root ul, .artifact-pdf-root ol { padding-left: 18pt; }',
+    '.artifact-pdf-root li + li { margin-top: 4pt; }',
+    '.artifact-pdf-root blockquote { margin-left: 0; padding-left: 10pt; border-left: 2px solid #b7b1a3; color: #57534b; }',
+    '.artifact-pdf-root code, .artifact-pdf-root pre { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }',
+    '.artifact-pdf-root code { background: #f4f1eb; padding: 1pt 4pt; border: 1px solid #ddd6c8; border-radius: 3px; font-size: 10.5pt; }',
+    '.artifact-pdf-root pre { padding: 10pt; border: 1px solid #ddd6c8; background: #faf8f4; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }',
+    '.artifact-pdf-root pre code { background: transparent; border: 0; padding: 0; }',
+    '.artifact-pdf-root img { display: block; max-width: 100%; height: auto; margin: 8pt 0 12pt; }',
+    '.artifact-pdf-root hr { border: 0; border-top: 1px solid #ddd6c8; margin: 14pt 0; }',
+    '.artifact-pdf-root a { color: #8b4d28; text-decoration: underline; }',
+    '</style>',
+    '</head>',
+    '<body>',
+    `<main class="artifact-pdf-root">${bodyHtml}</main>`,
+    '</body>',
+    '</html>',
+  ].join('');
+}
+
+async function renderArtifactPdfBuffer(title = '', renderedHtml = '') {
+  const documentHtml = buildArtifactPdfDocument(title, renderedHtml);
+  let win = null;
+  try {
+    win = new BrowserWindow({
+      show: false,
+      width: 1024,
+      height: 1440,
+      frame: false,
+      webPreferences: {
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        javascript: false,
+        webSecurity: true,
+      },
+    });
+    const dataUrl = `data:text/html;base64,${Buffer.from(documentHtml, 'utf8').toString('base64')}`;
+    await win.loadURL(dataUrl);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const pdf = await win.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      margins: {
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+      },
+    });
+    return { ok: true, pdf };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to render PDF.') };
+  } finally {
+    if (win && !win.isDestroyed()) win.destroy();
+  }
+}
+
+async function exportMarkdownArtifactForReference(srId, options = {}) {
+  const refId = String(srId || '').trim();
+  const opts = (options && typeof options === 'object') ? options : {};
+  const artifactType = String(opts.artifact_type || 'markdown').trim().toLowerCase();
+  const title = String(opts.title || 'artifact').trim() || 'artifact';
+  const content = String(opts.content || '');
+  const renderedHtml = String(opts.rendered_html || '').trim();
+
+  if (!refId) return { ok: false, message: 'srId is required.' };
+  if (artifactType !== 'markdown') return { ok: false, message: 'Only markdown artifacts can be exported from this button.' };
+
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    title: 'Export Markdown Artifact',
+    message: 'Choose an export format.',
+    detail: 'Save the raw markdown as a .md file or export the rendered document as a PDF.',
+    buttons: ['Markdown (.md)', 'Rendered PDF (.pdf)', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  if (!choice || choice.response === 2) {
+    return { ok: false, canceled: true, message: 'Export canceled.' };
+  }
+
+  const exportFormat = choice.response === 1 ? 'pdf' : 'md';
+  const exportLabel = exportFormat === 'pdf' ? 'Rendered PDF' : 'Markdown';
+  const exportExt = exportFormat === 'pdf' ? 'pdf' : 'md';
+  const defaultName = `${sanitizeArtifactExportBasename(title, 'artifact')}.${exportExt}`;
+  const pick = await dialog.showSaveDialog(mainWindow, {
+    title: `Save ${exportLabel}`,
+    defaultPath: path.join(os.homedir(), 'Downloads', defaultName),
+    filters: exportFormat === 'pdf'
+      ? [
+        { name: 'PDF Files', extensions: ['pdf'] },
+        { name: 'All Files', extensions: ['*'] },
+      ]
+      : [
+        { name: 'Markdown Files', extensions: ['md', 'markdown'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+  });
+  if (!pick || pick.canceled || !pick.filePath) {
+    return { ok: false, canceled: true, message: 'Export canceled.' };
+  }
+
+  const destPath = ensureArtifactExportExtension(String(pick.filePath || '').trim(), exportExt);
+  if (!destPath) return { ok: false, message: 'Invalid destination path.' };
+
+  try {
+    if (exportFormat === 'pdf') {
+      const pdfRes = await renderArtifactPdfBuffer(title, renderedHtml);
+      if (!pdfRes || !pdfRes.ok || !pdfRes.pdf) return pdfRes || { ok: false, message: 'Unable to render PDF.' };
+      fs.writeFileSync(destPath, pdfRes.pdf);
+      return { ok: true, saved_path: destPath, format: 'pdf' };
+    }
+
+    fs.writeFileSync(destPath, content, 'utf8');
+    return { ok: true, saved_path: destPath, format: 'md' };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to export artifact.') };
+  }
+}
+
+async function exportHtmlArtifactForReference(srId, options = {}) {
+  const refId = String(srId || '').trim();
+  const opts = (options && typeof options === 'object') ? options : {};
+  const title = String(opts.title || 'artifact').trim() || 'artifact';
+  const htmlContent = String(opts.html_content || '').trim();
+
+  if (!refId) return { ok: false, message: 'srId is required.' };
+  if (!htmlContent) return { ok: false, message: 'HTML content is required.' };
+
+  const defaultName = `${sanitizeArtifactExportBasename(title, 'artifact')}.pdf`;
+  const pick = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Rendered PDF',
+    defaultPath: path.join(os.homedir(), 'Downloads', defaultName),
+    filters: [
+      { name: 'PDF Files', extensions: ['pdf'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (!pick || pick.canceled || !pick.filePath) {
+    return { ok: false, canceled: true, message: 'Export canceled.' };
+  }
+
+  const destPath = ensureArtifactExportExtension(String(pick.filePath || '').trim(), 'pdf');
+  if (!destPath) return { ok: false, message: 'Invalid destination path.' };
+
+  let win = null;
+  try {
+    win = new BrowserWindow({
+      show: false,
+      width: 1280,
+      height: 1440,
+      frame: false,
+      webPreferences: {
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        javascript: true,
+        webSecurity: true,
+      },
+    });
+    const dataUrl = `data:text/html;base64,${Buffer.from(htmlContent, 'utf8').toString('base64')}`;
+    await win.loadURL(dataUrl);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const pdf = await win.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      margins: {
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+      },
+    });
+    fs.writeFileSync(destPath, pdf);
+    return { ok: true, saved_path: destPath, format: 'pdf' };
+  } catch (err) {
+    return { ok: false, message: String((err && err.message) || 'Unable to export artifact.') };
+  } finally {
+    if (win && !win.isDestroyed()) win.destroy();
+  }
+}
+
+async function exportArtifactForReference(srId, options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const artifactType = String(opts.artifact_type || 'markdown').trim().toLowerCase();
+  if (artifactType === 'html') return exportHtmlArtifactForReference(srId, opts);
+  return exportMarkdownArtifactForReference(srId, opts);
+}
+
 function getTelegramRendersDir() {
   const dir = path.join(app.getPath('userData'), 'telegram_renders');
   fs.mkdirSync(dir, { recursive: true });
@@ -20870,6 +21102,11 @@ ipcMain.handle('browser:saveArtifactImage', async (_event, payload) => {
   const sourceUrl = String((payload && payload.sourceUrl) || '').trim();
   const suggestedName = String((payload && payload.suggestedName) || '').trim();
   return saveArtifactImageForReference(srId, sourceUrl, suggestedName);
+});
+
+ipcMain.handle('browser:exportArtifact', async (_event, payload) => {
+  const srId = String((payload && payload.srId) || '').trim();
+  return exportArtifactForReference(srId, payload || {});
 });
 
 ipcMain.handle('browser:srUpsertArtifact', (_event, payload) => {
