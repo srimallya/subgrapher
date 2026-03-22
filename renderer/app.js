@@ -1657,7 +1657,7 @@ function getNoteClaimConfidence(claim = {}) {
 
 function getNoteClaimTone(claim = {}) {
   if (claim && claim.provisional) {
-    return { label: 'Checking', className: 'mixed', guidance: 'This sentence looks factual. Evidence gathering is still running.' };
+    return { label: 'Finding evidence', className: 'checking', guidance: 'This sentence looks factual, but no verdict is available yet.' };
   }
   const verdict = String((claim && (claim.verdict || claim.status)) || '').trim();
   const explanation = normalizeWhitespace(String((claim && claim.explanation) || ''));
@@ -1808,6 +1808,10 @@ function resolveOpenNoteClaim() {
   return null;
 }
 
+function getNotesMainSurface() {
+  return document.querySelector('#notes-page .notes-main');
+}
+
 function buildNoteCitationSummaryHtml(claim = {}, options = {}) {
   const tone = getNoteClaimTone(claim || {});
   const confidence = Math.round(getNoteClaimConfidence(claim || {}) * 100);
@@ -1851,7 +1855,7 @@ function closeNoteCitationPopover() {
   };
   const popover = e('notes-citation-popover');
   const body = e('notes-citation-body');
-  const surface = e('notes-main');
+  const surface = getNotesMainSurface();
   if (popover) popover.classList.add('hidden');
   if (body) body.innerHTML = '';
   if (surface) surface.classList.remove('notes-citation-open');
@@ -1859,7 +1863,7 @@ function closeNoteCitationPopover() {
 
 function positionNoteCitationPopover() {
   const popover = e('notes-citation-popover');
-  const surface = e('notes-main');
+  const surface = getNotesMainSurface();
   if (!popover || !surface) return;
   popover.style.top = '';
   popover.style.height = '';
@@ -2041,6 +2045,9 @@ function tryWrapClaimText(root, claim = {}) {
       const tone = getNoteClaimTone(claim);
       span.className = `notes-inline-citation ${tone.className}`;
       span.dataset.claimId = String((claim && claim.id) || '').trim();
+      span.dataset.claimText = target;
+      span.dataset.claimStartOffset = String(Number((claim && claim.start_offset) || -1));
+      span.dataset.claimEndOffset = String(Number((claim && claim.end_offset) || -1));
       span.dataset.supportLabel = String((claim && claim.status) || '').trim();
       span.title = `${tone.label} claim`;
       try {
@@ -2065,17 +2072,70 @@ function applyNotePreviewHighlights(root) {
   });
 }
 
+function injectNotePreviewClaimTokens(markdown = '', claims = []) {
+  const source = String(markdown || '');
+  const items = Array.isArray(claims) ? claims : [];
+  if (!source || items.length === 0) {
+    return { markdown: source, tokenClaims: [] };
+  }
+  const tokenClaims = [];
+  let cursor = 0;
+  let out = '';
+  items.forEach((claim) => {
+    const start = clamp(Math.round(Number((claim && claim.start_offset) || 0)), 0, source.length);
+    const end = clamp(Math.round(Number((claim && claim.end_offset) || 0)), start, source.length);
+    if (end <= start || start < cursor) return;
+    const tokenId = tokenClaims.length;
+    const startToken = `@@NOTECLAIMSTART${tokenId}@@`;
+    const endToken = `@@NOTECLAIMEND${tokenId}@@`;
+    out += source.slice(cursor, start);
+    out += startToken;
+    out += source.slice(start, end);
+    out += endToken;
+    tokenClaims.push({
+      tokenId,
+      startToken,
+      endToken,
+      claim,
+    });
+    cursor = end;
+  });
+  out += source.slice(cursor);
+  return { markdown: out, tokenClaims };
+}
+
+function applyNotePreviewClaimTokens(html = '', tokenClaims = []) {
+  let out = String(html || '');
+  (Array.isArray(tokenClaims) ? tokenClaims : []).forEach((entry) => {
+    const claim = entry && entry.claim ? entry.claim : {};
+    const tone = getNoteClaimTone(claim);
+    const openTag = `<span class="notes-inline-citation ${escapeHtml(String(tone.className || ''))}" data-claim-id="${escapeHtml(String((claim && claim.id) || ''))}" data-claim-text="${escapeHtml(String((claim && claim.claim_text) || ''))}" data-claim-start-offset="${escapeHtml(String(Number((claim && claim.start_offset) || -1)))}" data-claim-end-offset="${escapeHtml(String(Number((claim && claim.end_offset) || -1)))}" title="${escapeHtml(`${String(tone.label || 'Claim').trim()} claim`)}">`;
+    out = out.split(String((entry && entry.startToken) || '')).join(openTag);
+    out = out.split(String((entry && entry.endToken) || '')).join('</span>');
+  });
+  return out;
+}
+
 function bindNotePreviewInteractions() {
   const content = e('notes-preview-content');
   if (!content || content.__notesPreviewBound) return;
   content.addEventListener('click', (event) => {
-    const target = event.target instanceof Element ? event.target : null;
+    const rawTarget = event.target instanceof Node ? event.target : null;
+    const target = rawTarget instanceof Element ? rawTarget : (rawTarget && rawTarget.parentElement ? rawTarget.parentElement : null);
     if (!target) return;
     const citation = target.closest('.notes-inline-citation');
     if (citation) {
       event.preventDefault();
       event.stopPropagation();
-      void openNoteCitationPopover(String(citation.getAttribute('data-claim-id') || citation.dataset.claimId || '').trim(), citation);
+      void openNoteCitationPopover(
+        String(citation.getAttribute('data-claim-id') || citation.dataset.claimId || '').trim(),
+        citation,
+        {
+          claim_text: String(citation.getAttribute('data-claim-text') || citation.dataset.claimText || citation.textContent || '').trim(),
+          start_offset: Number(citation.getAttribute('data-claim-start-offset') || citation.dataset.claimStartOffset || -1),
+          end_offset: Number(citation.getAttribute('data-claim-end-offset') || citation.dataset.claimEndOffset || -1),
+        },
+      );
       return;
     }
     const link = target.closest('a[data-artifact-link], a[data-artifact-link-resolved]');
@@ -2099,11 +2159,15 @@ async function renderNotePreview() {
   state.notePreviewRenderSeq = requestSeq;
   content.innerHTML = '<div class="artifact-markdown-preview-empty">Rendering note...</div>';
   bindNotePreviewInteractions();
-  const html = await renderMarkdownToHtml(String(getActiveNoteDraftBody()));
+  const claims = getRenderableNoteClaims();
+  const injected = injectNotePreviewClaimTokens(String(getActiveNoteDraftBody()), claims);
+  const html = applyNotePreviewClaimTokens(
+    await renderMarkdownToHtml(injected.markdown),
+    injected.tokenClaims,
+  );
   if (requestSeq !== Number(state.notePreviewRenderSeq || 0)) return;
   if (!state.activeNote) return;
   content.innerHTML = html;
-  applyNotePreviewHighlights(content);
 }
 
 function renderNotesSurface() {
@@ -2374,7 +2438,7 @@ async function deleteActiveNote() {
   }
 }
 
-async function openNoteCitationPopover(claimId = '', anchorEl = null) {
+async function openNoteCitationPopover(claimId = '', anchorEl = null, claimHint = null) {
   if (!notesApi || !state.activeNote) return;
   const noteId = String(state.activeNoteId || '').trim();
   const targetClaimId = String(claimId || '').trim();
@@ -2383,13 +2447,36 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
   const titleNode = e('notes-citation-title');
   const bodyNode = e('notes-citation-body');
   if (!popover || !titleNode || !bodyNode) return;
-  const claim = getActiveNoteClaimById(targetClaimId) || resolveOpenNoteClaim();
+  const normalizedHint = claimHint && typeof claimHint === 'object'
+    ? {
+        id: String((claimHint && claimHint.id) || targetClaimId).trim(),
+        claim_text: String((claimHint && claimHint.claim_text) || '').trim(),
+        start_offset: Number((claimHint && claimHint.start_offset) || -1),
+        end_offset: Number((claimHint && claimHint.end_offset) || -1),
+      }
+    : null;
+  const matchingHintClaim = normalizedHint
+    ? getRenderableNoteClaims().find((item) => (
+      Number.isFinite(normalizedHint.start_offset)
+      && Number.isFinite(normalizedHint.end_offset)
+      && normalizedHint.start_offset >= 0
+      && normalizedHint.end_offset > normalizedHint.start_offset
+      && Number(item && item.start_offset) === normalizedHint.start_offset
+      && Number(item && item.end_offset) === normalizedHint.end_offset
+    )) || getRenderableNoteClaims().find((item) => (
+      normalizedHint.claim_text
+      && normalizeWhitespace(String((item && item.claim_text) || '')) === normalizeWhitespace(normalizedHint.claim_text)
+    )) || normalizedHint
+    : null;
+  const claim = getActiveNoteClaimById(targetClaimId)
+    || matchingHintClaim
+    || resolveOpenNoteClaim();
   if (!claim) return;
   const requestSeq = Number((state.noteCitationPopover && state.noteCitationPopover.requestSeq) || 0) + 1;
   titleNode.textContent = String(claim.claim_text || 'Sources');
   bodyNode.innerHTML = buildNoteCitationSummaryHtml(claim, {
     stateMessage: claim.provisional
-      ? 'Evidence gathering is still running for this claim.'
+      ? 'Finding evidence for this claim...'
       : 'Loading evidence...',
   });
   popover.classList.remove('hidden');
@@ -2402,9 +2489,8 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
     claimEndOffset: Number((claim && claim.end_offset) || -1),
     expandedCitationId: '',
     requestSeq,
-    loading: !claim.provisional,
+    loading: true,
   };
-  if (claim.provisional) return;
   const res = await notesApi.getCitations(noteId, String(claim.id || '').trim(), {
     claim_text: String(claim.claim_text || ''),
     start_offset: Number((claim && claim.start_offset) || -1),
@@ -13949,11 +14035,16 @@ function bindControls() {
     }
   });
   e('notes-highlight-layer')?.addEventListener('click', (event) => {
-    const target = event.target instanceof Element ? event.target.closest('mark[data-claim-id]') : null;
-    if (!target) return;
+    const rawTarget = event.target instanceof Node ? event.target : null;
+    const target = rawTarget instanceof Element ? rawTarget : (rawTarget && rawTarget.parentElement ? rawTarget.parentElement : null);
+    const claimMark = target ? target.closest('mark[data-claim-id]') : null;
+    if (!claimMark) {
+      e('notes-input')?.focus();
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
-    void openNoteCitationPopover(String(target.getAttribute('data-claim-id') || '').trim(), target);
+    void openNoteCitationPopover(String(claimMark.getAttribute('data-claim-id') || '').trim(), claimMark);
   });
   noteInput?.addEventListener('keydown', async (event) => {
     if ((event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 's') {

@@ -3619,6 +3619,11 @@ body.chat-collapsed #chat-panel-resizer {
   box-shadow: inset 0 0 0 1px rgba(95, 143, 107, 0.36);
 }
 
+.notes-highlight-layer mark.notes-highlight-checking {
+  background: rgba(132, 128, 119, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(132, 128, 119, 0.38);
+}
+
 .notes-highlight-layer mark.notes-highlight-mixed {
   background: rgba(180, 135, 62, 0.32);
   box-shadow: inset 0 0 0 1px rgba(180, 135, 62, 0.34);
@@ -3680,6 +3685,11 @@ body.chat-collapsed #chat-panel-resizer {
 .notes-preview-content .notes-inline-citation.supported {
   background: rgba(95, 143, 107, 0.2);
   box-shadow: inset 0 -1px 0 rgba(95, 143, 107, 0.5);
+}
+
+.notes-preview-content .notes-inline-citation.checking {
+  background: rgba(132, 128, 119, 0.12);
+  box-shadow: inset 0 -1px 0 rgba(132, 128, 119, 0.48);
 }
 
 .notes-preview-content .notes-inline-citation.mixed {
@@ -3771,6 +3781,10 @@ body.chat-collapsed #chat-panel-resizer {
 
 .notes-claim-spectrum-fill.supported {
   background: #5f8f6b;
+}
+
+.notes-claim-spectrum-fill.checking {
+  background: #848077;
 }
 
 .notes-claim-spectrum-fill.mixed {
