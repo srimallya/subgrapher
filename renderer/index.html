@@ -159,8 +159,12 @@
             <span id="artifact-type-chip" class="artifact-type-chip">Markdown</span>
             <span id="artifact-status" class="muted">Saved</span>
             <span id="artifact-runtime-status" class="muted">Markdown artifact</span>
-            <button id="artifact-mode-code-btn" class="hidden" title="Edit code">Code</button>
-            <button id="artifact-run-refresh-btn" class="hidden" title="Refresh HTML preview" aria-label="Refresh HTML preview">↻</button>
+            <div class="artifact-header-actions">
+              <button id="artifact-mode-render-btn" class="hidden" type="button" title="Render markdown">Render</button>
+              <button id="artifact-mode-code-btn" class="hidden" type="button" title="Toggle HTML code and preview">Code</button>
+              <button id="artifact-save-btn" type="button" title="Save artifact">Save</button>
+              <button id="artifact-run-refresh-btn" class="hidden" type="button" title="Refresh HTML preview" aria-label="Refresh HTML preview">Refresh</button>
+            </div>
           </div>
           <div id="artifact-viewer-shell" class="artifact-body artifact-mode-text-only">
             <section id="artifact-image-pane" class="artifact-image-pane hidden">
@@ -185,6 +189,9 @@
             <section id="artifact-text-pane" class="artifact-text-pane">
               <pre id="artifact-highlight-layer" class="artifact-highlight-layer" aria-hidden="true"></pre>
               <textarea id="artifact-input" spellcheck="false"></textarea>
+            </section>
+            <section id="artifact-markdown-preview-pane" class="artifact-markdown-preview-pane hidden">
+              <div id="artifact-markdown-preview-content" class="artifact-markdown-preview-content"></div>
             </section>
             <section id="artifact-html-preview-pane" class="artifact-html-preview-pane hidden">
               <div id="artifact-html-runtime-host" class="artifact-html-runtime-host"></div>

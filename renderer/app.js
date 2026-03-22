@@ -23,6 +23,7 @@ const state = {
   },
   artifactSaveTimer: null,
   artifactPreviewSeq: 0,
+  artifactMarkdownRenderSeq: 0,
   artifactSplitByRef: {},
   artifactZoomByRef: {},
   artifactCarouselIndexByArtifact: {},
@@ -4143,6 +4144,305 @@ function extractMarkdownImageTokens(markdownText) {
   return tokens;
 }
 
+function normalizeMarkdownLinkTarget(value) {
+  let target = String(value || '').trim();
+  if (!target) return '';
+  if (target.startsWith('<') && target.endsWith('>')) {
+    target = target.slice(1, -1).trim();
+  }
+  return target
+    .replace(/\s+"[^"]*"\s*$/, '')
+    .replace(/\s+'[^']*'\s*$/, '')
+    .trim();
+}
+
+async function replaceAsyncRegex(input, pattern, replacer) {
+  const source = String(input || '');
+  const regex = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+  let out = '';
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(source)) !== null) {
+    out += source.slice(lastIndex, match.index);
+    out += await replacer(...match);
+    lastIndex = match.index + match[0].length;
+    if (match.index === regex.lastIndex) regex.lastIndex += 1;
+  }
+  out += source.slice(lastIndex);
+  return out;
+}
+
+function isMarkdownHorizontalRule(line = '') {
+  return /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(String(line || ''));
+}
+
+function parseMarkdownListMarker(line = '') {
+  const match = String(line || '').match(/^(\s*)([-+*]|\d+\.)\s+(.*)$/);
+  if (!match) return null;
+  return {
+    ordered: /\d+\./.test(match[2]),
+    indent: String(match[1] || '').length,
+    text: String(match[3] || ''),
+  };
+}
+
+function isMarkdownBlockBoundary(line = '') {
+  const text = String(line || '');
+  if (!text.trim()) return true;
+  if (/^```/.test(text.trim())) return true;
+  if (/^\s{0,3}#{1,6}\s+/.test(text)) return true;
+  if (/^\s*>\s?/.test(text)) return true;
+  if (isMarkdownHorizontalRule(text)) return true;
+  return !!parseMarkdownListMarker(text);
+}
+
+async function resolveMarkdownPreviewUri(rawTarget = '', kind = 'link') {
+  const target = normalizeMarkdownLinkTarget(rawTarget);
+  if (!target) return { raw: '', resolved: '' };
+  if (target.startsWith('#') || /^mailto:/i.test(target) || /^data:/i.test(target)) {
+    return { raw: target, resolved: target };
+  }
+  if (api && typeof api.resolveArtifactAsset === 'function' && state.activeSrId) {
+    try {
+      const resolved = await api.resolveArtifactAsset(state.activeSrId, target);
+      if (resolved && resolved.ok && String(resolved.resolved_url || '').trim()) {
+        return {
+          raw: target,
+          resolved: String(resolved.resolved_url || '').trim(),
+        };
+      }
+    } catch (_) {
+      // best-effort resolution only
+    }
+  }
+  if (/^https?:\/\//i.test(target) || /^file:\/\//i.test(target)) {
+    return { raw: target, resolved: target };
+  }
+  return {
+    raw: target,
+    resolved: kind === 'image' ? '' : target,
+  };
+}
+
+function stashMarkdownToken(store, html) {
+  const index = store.push(String(html || '')) - 1;
+  return `@@MDTOKEN${index}@@`;
+}
+
+function restoreMarkdownTokens(value, store) {
+  return String(value || '').replace(/@@MDTOKEN(\d+)@@/g, (_match, rawIndex) => {
+    const index = Number(rawIndex);
+    return Number.isInteger(index) && index >= 0 && index < store.length ? store[index] : '';
+  });
+}
+
+async function renderMarkdownInline(markdownText) {
+  const tokens = [];
+  let source = String(markdownText || '');
+
+  source = source.replace(/`([^`\n]+)`/g, (_match, codeText) => stashMarkdownToken(tokens, `<code>${escapeHtml(codeText)}</code>`));
+
+  source = await replaceAsyncRegex(source, /!\[([^\]]*)\]\(([^)]+)\)/g, async (_match, altText, rawTarget) => {
+    const alt = String(altText || '').trim();
+    const { raw, resolved } = await resolveMarkdownPreviewUri(rawTarget, 'image');
+    if (!resolved) {
+      return stashMarkdownToken(
+        tokens,
+        `<span class="artifact-markdown-preview-missing-image">${escapeHtml(alt || raw || 'Image unavailable')}</span>`,
+      );
+    }
+    return stashMarkdownToken(
+      tokens,
+      `<img src="${escapeHtml(resolved)}" alt="${escapeHtml(alt)}" />`,
+    );
+  });
+
+  source = await replaceAsyncRegex(source, /\[([^\]]+)\]\(([^)]+)\)/g, async (_match, labelText, rawTarget) => {
+    const label = String(labelText || '').trim() || String(rawTarget || '').trim() || 'Link';
+    const { raw, resolved } = await resolveMarkdownPreviewUri(rawTarget, 'link');
+    const href = String(resolved || raw || '').trim();
+    return stashMarkdownToken(
+      tokens,
+      `<a href="${escapeHtml(href || '#')}" data-artifact-link="${escapeHtml(raw || '')}" data-artifact-link-resolved="${escapeHtml(href)}">${escapeHtml(label)}</a>`,
+    );
+  });
+
+  source = source.replace(/\*\*([^*]+)\*\*/g, (_match, strongText) => stashMarkdownToken(tokens, `<strong>${escapeHtml(strongText)}</strong>`));
+  source = source.replace(/__([^_]+)__/g, (_match, strongText) => stashMarkdownToken(tokens, `<strong>${escapeHtml(strongText)}</strong>`));
+  source = source.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, (_match, prefix, emText) => `${prefix}${stashMarkdownToken(tokens, `<em>${escapeHtml(emText)}</em>`)}`);
+  source = source.replace(/(^|[^_])_([^_\n]+)_(?!_)/g, (_match, prefix, emText) => `${prefix}${stashMarkdownToken(tokens, `<em>${escapeHtml(emText)}</em>`)}`);
+
+  return restoreMarkdownTokens(escapeHtml(source), tokens);
+}
+
+async function renderMarkdownBlocksFromLines(lines = []) {
+  const parts = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = String(lines[index] || '');
+    const trimmed = line.trim();
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    if (/^```/.test(trimmed)) {
+      const language = trimmed.slice(3).trim();
+      index += 1;
+      const codeLines = [];
+      while (index < lines.length && !/^```/.test(String(lines[index] || '').trim())) {
+        codeLines.push(String(lines[index] || ''));
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      const languageAttr = language ? ` data-language="${escapeHtml(language)}"` : '';
+      parts.push(`<pre><code${languageAttr}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const level = Math.min(6, String(heading[1] || '').length);
+      parts.push(`<h${level}>${await renderMarkdownInline(heading[2] || '')}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (isMarkdownHorizontalRule(line)) {
+      parts.push('<hr />');
+      index += 1;
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quotedLines = [];
+      while (index < lines.length) {
+        const candidate = String(lines[index] || '');
+        if (!candidate.trim()) {
+          quotedLines.push('');
+          index += 1;
+          continue;
+        }
+        if (!/^\s*>\s?/.test(candidate)) break;
+        quotedLines.push(candidate.replace(/^\s*>\s?/, ''));
+        index += 1;
+      }
+      parts.push(`<blockquote>${await renderMarkdownBlocksFromLines(quotedLines)}</blockquote>`);
+      continue;
+    }
+
+    const listStart = parseMarkdownListMarker(line);
+    if (listStart) {
+      const tag = listStart.ordered ? 'ol' : 'ul';
+      const items = [];
+      while (index < lines.length) {
+        const marker = parseMarkdownListMarker(lines[index]);
+        if (!marker || marker.ordered !== listStart.ordered || marker.indent !== listStart.indent) break;
+        const itemLines = [marker.text];
+        index += 1;
+        while (index < lines.length) {
+          const nextLine = String(lines[index] || '');
+          if (!nextLine.trim()) {
+            index += 1;
+            break;
+          }
+          const nextMarker = parseMarkdownListMarker(nextLine);
+          if (nextMarker && nextMarker.ordered === listStart.ordered && nextMarker.indent === listStart.indent) break;
+          if (isMarkdownBlockBoundary(nextLine) && !/^\s+/.test(nextLine)) break;
+          itemLines.push(nextLine.trim());
+          index += 1;
+        }
+        items.push(`<li>${await renderMarkdownInline(itemLines.join(' '))}</li>`);
+      }
+      parts.push(`<${tag}>${items.join('')}</${tag}>`);
+      continue;
+    }
+
+    const paragraphLines = [line];
+    index += 1;
+    while (index < lines.length) {
+      const nextLine = String(lines[index] || '');
+      if (!nextLine.trim() || isMarkdownBlockBoundary(nextLine)) break;
+      paragraphLines.push(nextLine);
+      index += 1;
+    }
+    parts.push(`<p>${await renderMarkdownInline(paragraphLines.map((item) => item.trim()).join(' '))}</p>`);
+  }
+
+  return parts.join('');
+}
+
+async function renderMarkdownToHtml(markdownText) {
+  const lines = String(markdownText || '').replace(/\r\n?/g, '\n').split('\n');
+  const html = await renderMarkdownBlocksFromLines(lines);
+  return String(html || '').trim() || '<p class="artifact-markdown-preview-empty">Nothing to render.</p>';
+}
+
+function decodeFileUrlToPath(rawUrl = '') {
+  const value = String(rawUrl || '').trim();
+  if (!/^file:\/\//i.test(value)) return '';
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'file:') return '';
+    let localPath = decodeURIComponent(parsed.pathname || '');
+    if (electronApi && electronApi.platform === 'win32') {
+      localPath = localPath.replace(/^\/([a-zA-Z]:)/, '$1');
+    }
+    return localPath;
+  } catch (_) {
+    return '';
+  }
+}
+
+async function openArtifactPreviewLink(rawTarget = '') {
+  const target = String(rawTarget || '').trim();
+  if (!target || target === '#') return;
+  if (/^https?:\/\//i.test(target) || /^mailto:/i.test(target)) {
+    if (api && typeof api.openExternal === 'function') {
+      await api.openExternal(target);
+    }
+    return;
+  }
+  if (/^file:\/\//i.test(target)) {
+    const localPath = decodeFileUrlToPath(target);
+    if (localPath && api && typeof api.openPath === 'function') {
+      await api.openPath(localPath);
+      return;
+    }
+  }
+  showPassiveNotification('Link type is not supported in markdown preview.');
+}
+
+function bindArtifactMarkdownPreviewInteractions() {
+  const pane = e('artifact-markdown-preview-pane');
+  if (!pane || pane.__artifactPreviewLinksBound) return;
+  pane.addEventListener('click', (event) => {
+    const link = event.target instanceof Element ? event.target.closest('a[data-artifact-link], a[data-artifact-link-resolved]') : null;
+    if (!link) return;
+    event.preventDefault();
+    const resolved = String(link.getAttribute('data-artifact-link-resolved') || '').trim();
+    const raw = String(link.getAttribute('data-artifact-link') || '').trim();
+    void openArtifactPreviewLink(resolved || raw);
+  });
+  pane.__artifactPreviewLinksBound = true;
+}
+
+async function renderMarkdownArtifactPreview(markdownText, artifactId = '') {
+  const content = e('artifact-markdown-preview-content');
+  if (!content) return;
+  const targetArtifactId = String(artifactId || state.activeSurface.artifactId || '').trim();
+  const requestSeq = Number(state.artifactMarkdownRenderSeq || 0) + 1;
+  state.artifactMarkdownRenderSeq = requestSeq;
+  content.innerHTML = '<div class="artifact-markdown-preview-empty">Rendering markdown...</div>';
+  bindArtifactMarkdownPreviewInteractions();
+  const html = await renderMarkdownToHtml(markdownText);
+  if (requestSeq !== state.artifactMarkdownRenderSeq) return;
+  if (state.activeSurface.kind !== 'artifact') return;
+  if (targetArtifactId && String(state.activeSurface.artifactId || '').trim() !== targetArtifactId) return;
+  content.innerHTML = html;
+}
+
 function applyArtifactSplitLayout(ratio) {
   const shell = e('artifact-viewer-shell');
   const imagePane = e('artifact-image-pane');
@@ -4344,10 +4644,10 @@ function normalizeArtifactType(value) {
 
 function getArtifactViewMode(artifactId, artifactType) {
   const normalizedType = normalizeArtifactType(artifactType);
-  if (normalizedType !== 'html') return ARTIFACT_VIEW_MODE_CODE;
   const key = String(artifactId || '').trim();
   const raw = key ? String((state.artifactViewModeByArtifact && state.artifactViewModeByArtifact[key]) || '') : '';
-  return raw === ARTIFACT_VIEW_MODE_CODE ? ARTIFACT_VIEW_MODE_CODE : ARTIFACT_VIEW_MODE_PREVIEW;
+  if (raw === ARTIFACT_VIEW_MODE_CODE || raw === ARTIFACT_VIEW_MODE_PREVIEW) return raw;
+  return normalizedType === 'html' ? ARTIFACT_VIEW_MODE_PREVIEW : ARTIFACT_VIEW_MODE_CODE;
 }
 
 function setArtifactViewMode(artifactId, nextMode) {
@@ -4482,6 +4782,7 @@ function updateArtifactRuntimeControls(artifact) {
   const artifactId = String((safeArtifact && safeArtifact.id) || '').trim();
   const artifactType = normalizeArtifactType((safeArtifact && safeArtifact.type) || 'markdown');
   const isHtml = artifactType === 'html';
+  const isMarkdown = artifactType === 'markdown';
   const replicationBlock = getHtmlArtifactReplicationBlockState(safeArtifact);
   const mode = getArtifactViewMode(artifactId, artifactType);
   const runtime = (state.htmlArtifactRuntime && typeof state.htmlArtifactRuntime === 'object')
@@ -4492,20 +4793,32 @@ function updateArtifactRuntimeControls(artifact) {
   const runtimeForArtifact = isHtml && runtime.running && String(runtime.artifactId || '') === artifactId;
 
   const chip = e('artifact-type-chip');
+  const renderBtn = e('artifact-mode-render-btn');
   const codeBtn = e('artifact-mode-code-btn');
+  const saveBtn = e('artifact-save-btn');
   const refreshBtn = e('artifact-run-refresh-btn');
   const runtimeStatus = e('artifact-runtime-status');
   const textPane = e('artifact-text-pane');
+  const markdownPreviewPane = e('artifact-markdown-preview-pane');
   const previewPane = e('artifact-html-preview-pane');
 
   if (chip) {
     chip.textContent = isHtml ? 'HTML' : 'Markdown';
     chip.classList.toggle('artifact-type-html', isHtml);
   }
+  if (renderBtn) {
+    renderBtn.classList.toggle('hidden', !isMarkdown);
+    renderBtn.disabled = !isMarkdown;
+    renderBtn.textContent = mode === ARTIFACT_VIEW_MODE_PREVIEW ? 'Edit' : 'Render';
+  }
   if (codeBtn) {
     codeBtn.classList.toggle('hidden', !isHtml);
     codeBtn.classList.toggle('active', isHtml && mode === ARTIFACT_VIEW_MODE_CODE);
+    codeBtn.textContent = mode === ARTIFACT_VIEW_MODE_CODE ? 'Preview' : 'Code';
     codeBtn.disabled = !isHtml;
+  }
+  if (saveBtn) {
+    saveBtn.disabled = isMemoryReplayActive();
   }
   if (refreshBtn) {
     refreshBtn.classList.toggle('hidden', !isHtml);
@@ -4513,7 +4826,7 @@ function updateArtifactRuntimeControls(artifact) {
   }
   if (runtimeStatus) {
     if (!isHtml) {
-      runtimeStatus.textContent = 'Markdown artifact';
+      runtimeStatus.textContent = mode === ARTIFACT_VIEW_MODE_PREVIEW ? 'Markdown preview' : 'Markdown artifact';
     } else if (replicationBlock.blocked) {
       runtimeStatus.textContent = replicationBlock.message;
     } else if (!runtimeForArtifact) {
@@ -4523,7 +4836,8 @@ function updateArtifactRuntimeControls(artifact) {
     }
   }
 
-  if (textPane) textPane.classList.toggle('hidden', isHtml && mode === ARTIFACT_VIEW_MODE_PREVIEW);
+  if (textPane) textPane.classList.toggle('hidden', mode === ARTIFACT_VIEW_MODE_PREVIEW);
+  if (markdownPreviewPane) markdownPreviewPane.classList.toggle('hidden', !isMarkdown || mode !== ARTIFACT_VIEW_MODE_PREVIEW);
   if (previewPane) previewPane.classList.toggle('hidden', !isHtml || mode !== ARTIFACT_VIEW_MODE_PREVIEW);
 }
 
@@ -4606,6 +4920,66 @@ function refreshActiveHtmlArtifactRuntime() {
   const input = e('artifact-input');
   const source = String((input && typeof input.value === 'string') ? input.value : (artifact.content || ''));
   ensureHtmlArtifactRuntime(artifact, source, { force: true, focus: true, focusReason: 'runtime-refresh-button' });
+}
+
+async function saveActiveArtifact(options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  if (isMemoryReplayActive()) return { ok: false, message: 'Memory replay is read-only.' };
+  if (!state.activeSrId || state.activeSurface.kind !== 'artifact') {
+    return { ok: false, message: 'No active artifact.' };
+  }
+  const ref = getActiveReference();
+  if (!ref) return { ok: false, message: 'Reference not found.' };
+  const artifactId = String(state.activeSurface.artifactId || '').trim();
+  const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
+  if (!artifact) return { ok: false, message: 'Artifact not found.' };
+
+  const status = e('artifact-status');
+  const input = e('artifact-input');
+  const nextContent = String((input && typeof input.value === 'string') ? input.value : (artifact.content || ''));
+  const artifactType = normalizeArtifactType(artifact.type);
+
+  if (status && !opts.skipStatus) status.textContent = 'Saving...';
+  if (artifactType === 'markdown') {
+    void refreshArtifactVisualState(nextContent, artifact.id);
+  }
+
+  const res = await api.srUpsertArtifact(state.activeSrId, {
+    ...artifact,
+    type: artifactType,
+    content: nextContent,
+    updated_at: Date.now(),
+  });
+
+  if (!res || !res.ok) {
+    if (status && !opts.skipStatus) status.textContent = 'Save failed';
+    return res || { ok: false, message: 'Save failed.' };
+  }
+
+  state.references = res.references || state.references;
+  renderWorkspaceTabs();
+
+  const updatedRef = getActiveReference();
+  const updatedArtifact = (Array.isArray(updatedRef && updatedRef.artifacts) ? updatedRef.artifacts : [])
+    .find((item) => String((item && item.id) || '') === String(artifact.id || ''));
+
+  if (updatedArtifact) {
+    if (artifactType === 'html') {
+      ensureHtmlArtifactRuntime(updatedArtifact, nextContent, {
+        focus: getArtifactViewMode(updatedArtifact.id, updatedArtifact.type) !== ARTIFACT_VIEW_MODE_CODE,
+        focusReason: 'artifact-save',
+      });
+    } else {
+      if (getArtifactViewMode(updatedArtifact.id, updatedArtifact.type) === ARTIFACT_VIEW_MODE_PREVIEW) {
+        await renderMarkdownArtifactPreview(nextContent, updatedArtifact.id);
+      }
+      updateArtifactRuntimeControls(updatedArtifact);
+    }
+  }
+
+  if (status && !opts.skipStatus) status.textContent = 'Saved';
+  void noteReferenceRankingInteraction('artifact_edit', { srId: state.activeSrId });
+  return res;
 }
 
 function startOfDashboardMonth(date = new Date()) {
@@ -5737,6 +6111,9 @@ async function showArtifactSurface(artifactId) {
       stopHtmlArtifactRuntime();
     }
     await refreshArtifactVisualState(String(artifact.content || ''), artifact.id);
+    if (getArtifactViewMode(artifact.id, artifactType) === ARTIFACT_VIEW_MODE_PREVIEW) {
+      await renderMarkdownArtifactPreview(String(artifact.content || ''), artifact.id);
+    }
   } else {
     state.artifactResolvedImages = [];
     state.artifactUnresolvedImages = [];
@@ -12311,46 +12688,12 @@ function bindControls() {
     renderArtifactHighlightLayer();
 
     const status = e('artifact-status');
-    if (status) status.textContent = 'Saving...';
+    if (status) status.textContent = 'Edited';
 
     if (state.artifactSaveTimer) clearTimeout(state.artifactSaveTimer);
     state.artifactSaveTimer = setTimeout(async () => {
-      const ref = getActiveReference();
-      if (!ref) return;
-      const artifactId = String(state.activeSurface.artifactId || '').trim();
-      const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
-      if (!artifact) return;
-
-      const input = e('artifact-input');
-      const nextContent = String(input && input.value ? input.value : '');
-      const artifactType = normalizeArtifactType(artifact.type);
-      if (artifactType === 'markdown') {
-        void refreshArtifactVisualState(nextContent, artifact.id);
-      }
-      const res = await api.srUpsertArtifact(state.activeSrId, {
-        ...artifact,
-        type: artifactType,
-        content: nextContent,
-        updated_at: Date.now(),
-      });
-      if (res && res.ok) {
-        state.references = res.references || state.references;
-        if (status) status.textContent = 'Saved';
-        renderWorkspaceTabs();
-        const updatedRef = getActiveReference();
-        const updatedArtifact = (Array.isArray(updatedRef && updatedRef.artifacts) ? updatedRef.artifacts : [])
-          .find((item) => String((item && item.id) || '') === String(artifact.id || ''));
-        if (updatedArtifact) {
-          if (artifactType === 'html') {
-            ensureHtmlArtifactRuntime(updatedArtifact, nextContent, { focus: getArtifactViewMode(updatedArtifact.id, updatedArtifact.type) !== ARTIFACT_VIEW_MODE_CODE, focusReason: 'artifact-save' });
-          } else {
-            updateArtifactRuntimeControls(updatedArtifact);
-          }
-        }
-        void noteReferenceRankingInteraction('artifact_edit', { srId: state.activeSrId });
-      } else if (status) {
-        status.textContent = 'Save failed';
-      }
+      state.artifactSaveTimer = null;
+      await saveActiveArtifact();
     }, 350);
   });
   artifactInput?.addEventListener('select', () => {
@@ -12396,22 +12739,58 @@ function bindControls() {
     await saveActiveArtifactImage();
   });
 
+  e('artifact-save-btn')?.addEventListener('click', async () => {
+    if (state.artifactSaveTimer) {
+      clearTimeout(state.artifactSaveTimer);
+      state.artifactSaveTimer = null;
+    }
+    await saveActiveArtifact();
+  });
+
+  e('artifact-mode-render-btn')?.addEventListener('click', async () => {
+    const ref = getActiveReference();
+    if (!ref || state.activeSurface.kind !== 'artifact') return;
+    const artifactId = String(state.activeSurface.artifactId || '').trim();
+    if (!artifactId) return;
+    const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
+    if (!artifact || normalizeArtifactType(artifact.type) !== 'markdown') return;
+    const currentMode = getArtifactViewMode(artifactId, artifact.type);
+    const nextMode = currentMode === ARTIFACT_VIEW_MODE_PREVIEW ? ARTIFACT_VIEW_MODE_CODE : ARTIFACT_VIEW_MODE_PREVIEW;
+    setArtifactViewMode(artifactId, nextMode);
+    if (nextMode === ARTIFACT_VIEW_MODE_PREVIEW) {
+      const input = e('artifact-input');
+      const source = String((input && typeof input.value === 'string') ? input.value : (artifact.content || ''));
+      await renderMarkdownArtifactPreview(source, artifactId);
+    }
+    updateArtifactRuntimeControls(artifact);
+    if (nextMode === ARTIFACT_VIEW_MODE_CODE) {
+      e('artifact-input')?.focus();
+    }
+  });
+
   e('artifact-mode-code-btn')?.addEventListener('click', () => {
     const ref = getActiveReference();
     if (!ref || state.activeSurface.kind !== 'artifact') return;
     const artifactId = String(state.activeSurface.artifactId || '').trim();
     if (!artifactId) return;
-    const currentMode = getArtifactViewMode(artifactId, 'html');
+    const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
+    if (!artifact || normalizeArtifactType(artifact.type) !== 'html') return;
+    const currentMode = getArtifactViewMode(artifactId, artifact.type);
+    const nextMode = currentMode === ARTIFACT_VIEW_MODE_CODE ? ARTIFACT_VIEW_MODE_PREVIEW : ARTIFACT_VIEW_MODE_CODE;
     setArtifactViewMode(
       artifactId,
-      currentMode === ARTIFACT_VIEW_MODE_CODE ? ARTIFACT_VIEW_MODE_PREVIEW : ARTIFACT_VIEW_MODE_CODE,
+      nextMode,
     );
-    const artifact = (Array.isArray(ref.artifacts) ? ref.artifacts : []).find((item) => String((item && item.id) || '') === artifactId);
-    if (artifact) {
-      updateArtifactRuntimeControls(artifact);
+    updateArtifactRuntimeControls(artifact);
+    if (nextMode !== ARTIFACT_VIEW_MODE_CODE) {
+      const input = e('artifact-input');
+      const source = String((input && typeof input.value === 'string') ? input.value : (artifact.content || ''));
+      ensureHtmlArtifactRuntime(artifact, source, { focus: true, focusReason: 'code-toggle-preview' });
       if (getArtifactViewMode(artifactId, artifact.type) !== ARTIFACT_VIEW_MODE_CODE) {
         focusActiveHtmlRuntime('code-toggle-preview');
       }
+    } else {
+      e('artifact-input')?.focus();
     }
   });
 
