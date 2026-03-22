@@ -2,6 +2,7 @@
 
 const electronApi = window.electronAPI || null;
 const api = electronApi && electronApi.browser;
+const notesApi = electronApi && electronApi.notes;
 const PYTHON_WINDOWS_DOWNLOAD_URL = 'https://www.python.org/downloads/windows/';
 
 const state = {
@@ -81,6 +82,19 @@ const state = {
   chatUserNodeByRequest: new Map(),
   chatStatusByRequest: new Map(),
   appView: 'workspace',
+  notes: [],
+  notesSearchQuery: '',
+  activeNoteId: '',
+  activeNote: null,
+  activeNoteAnalysis: null,
+  activeNoteClaims: [],
+  noteDraftTitle: '',
+  noteDraftBody: '',
+  noteSaveTimer: null,
+  noteAnalysisRefreshTimer: null,
+  notePreviewRenderSeq: 0,
+  noteSaveState: 'idle',
+  noteAnalysisPending: false,
   zenMode: false,
   hyperwebFeed: [],
   hyperwebFilterFingerprint: '',
@@ -160,6 +174,10 @@ const state = {
   historyMapBounds: null,
   historyMapClusters: [],
   historyHoveredPointId: '',
+  noteCitationPopover: {
+    open: false,
+    claimId: '',
+  },
   memoryReplay: {
     active: false,
     lane: 'all',
@@ -1439,7 +1457,7 @@ function renderArtifactHighlightLayer() {
     layer.innerHTML = '';
     return;
   }
-  const content = String(input.value || '');
+  const content = String(state.noteDraftBody || input.value || '');
   const highlights = getActiveArtifactHighlights();
   const useLayer = !!(state.markerMode || highlights.length);
   const rawStart = Number(input.selectionStart);
@@ -1470,6 +1488,851 @@ function renderArtifactHighlightLayer() {
   layer.innerHTML = html || '&#8203;';
   layer.scrollTop = input.scrollTop;
   layer.scrollLeft = input.scrollLeft;
+}
+
+function normalizeNotesSearchQuery(raw) {
+  return normalizeInlineText(raw).toLowerCase();
+}
+
+function upsertLocalNoteSummary(note = null) {
+  if (!note || !note.id) return;
+  const targetId = String(note.id || '').trim();
+  const summary = {
+    id: targetId,
+    title: String(note.title || 'Untitled Note').trim() || 'Untitled Note',
+    updated_at: Number(note.updated_at || 0) || 0,
+    last_saved_at: Number(note.last_saved_at || 0) || 0,
+    last_analyzed_at: Number(note.last_analyzed_at || 0) || 0,
+    active_mode: String(note.active_mode || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit',
+    promoted_reference_id: String(note.promoted_reference_id || '').trim(),
+    analysis_revision: Number(note.analysis_revision || 0) || 0,
+  };
+  const next = Array.isArray(state.notes) ? state.notes.slice() : [];
+  const existingIndex = next.findIndex((item) => String((item && item.id) || '').trim() === targetId);
+  if (existingIndex >= 0) next.splice(existingIndex, 1, summary);
+  else next.push(summary);
+  next.sort((a, b) => Number((b && b.updated_at) || 0) - Number((a && a.updated_at) || 0));
+  state.notes = next;
+}
+
+function removeLocalNoteSummary(noteId = '') {
+  const targetId = String(noteId || '').trim();
+  state.notes = (Array.isArray(state.notes) ? state.notes : [])
+    .filter((item) => String((item && item.id) || '').trim() !== targetId);
+}
+
+function getFilteredNotes() {
+  const query = normalizeNotesSearchQuery(state.notesSearchQuery || '');
+  const list = Array.isArray(state.notes) ? state.notes : [];
+  if (!query) return list;
+  return list.filter((item) => {
+    const haystack = normalizeNotesSearchQuery([
+      String((item && item.title) || ''),
+      String((item && item.id) || ''),
+    ].join(' '));
+    return haystack.includes(query);
+  });
+}
+
+function getRenderableNoteClaims() {
+  return (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
+    .filter((claim) => {
+      if (!claim) return false;
+      const start = Number((claim && claim.start_offset) || 0);
+      const end = Number((claim && claim.end_offset) || 0);
+      return Number.isFinite(start) && Number.isFinite(end) && end > start;
+    })
+    .slice()
+    .sort((a, b) => {
+      const startDiff = Number((a && a.start_offset) || 0) - Number((b && b.start_offset) || 0);
+      if (startDiff !== 0) return startDiff;
+      return Number((b && b.end_offset) || 0) - Number((a && a.end_offset) || 0);
+    });
+}
+
+function getActiveNoteClaimById(claimId = '') {
+  const targetId = String(claimId || '').trim();
+  if (!targetId) return null;
+  return (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
+    .find((item) => String((item && item.id) || '').trim() === targetId) || null;
+}
+
+function getActiveNoteClaimAtOffset(offset = -1) {
+  const target = Number(offset);
+  if (!Number.isFinite(target) || target < 0) return null;
+  return getRenderableNoteClaims().find((claim) => target >= Number(claim.start_offset || 0) && target <= Number(claim.end_offset || 0)) || null;
+}
+
+function clampUnit(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.min(1, numeric));
+}
+
+function getNoteClaimConfidence(claim = {}) {
+  const status = String((claim && claim.status) || '').trim();
+  const raw = Number((claim && claim.highlight_score) || (claim && claim.top_score) || 0);
+  if (raw > 0) return clampUnit(raw);
+  if (status === 'supported') return 0.85;
+  if (status === 'uncertain') return 0.52;
+  if (status === 'contested') return 0.4;
+  return 0.22;
+}
+
+function getNoteClaimTone(claim = {}) {
+  const status = String((claim && claim.status) || '').trim();
+  const confidence = getNoteClaimConfidence(claim);
+  if (status === 'supported') {
+    return { label: 'Supported', className: 'supported', guidance: 'Good evidence found. You can still tighten the wording if the source is too broad.' };
+  }
+  if (status === 'contested') {
+    return { label: 'Contested', className: 'contested', guidance: 'Sources disagree or point to different interpretations. Narrow the claim before trusting it.' };
+  }
+  if (status === 'uncertain') {
+    return { label: 'Partial', className: 'uncertain', guidance: 'The claim is close, but it needs more specificity to match solid evidence.' };
+  }
+  if (confidence < 0.18) {
+    return { label: 'Unclear', className: 'no-evidence', guidance: 'This reads more like an opinion or broad impression than a checkable claim.' };
+  }
+  return { label: 'No evidence', className: 'no-evidence', guidance: 'No strong evidence matched this claim yet. Add specifics so the system can search more precisely.' };
+}
+
+function buildClaimReplacement(claim = {}, variant = 'source') {
+  const text = String((claim && claim.claim_text) || '').trim();
+  const base = text.replace(/\s+$/g, '').replace(/[.]+$/g, '').trim();
+  if (!base) return '';
+  if (variant === 'date') return `${base} in [year].`;
+  if (variant === 'metric') return `${base} measured by [metric] over [period].`;
+  if (variant === 'source') return `${base} according to [source].`;
+  if (variant === 'split') {
+    const chunks = base.split(/\s+\band\b\s+/i).map((item) => item.trim()).filter(Boolean);
+    if (chunks.length >= 2) return chunks.map((item) => `${item}.`).join('\n');
+    return `${base}.\n[Separate the comparison into a second sentence.]`;
+  }
+  return `${base}.`;
+}
+
+function buildNoteClaimSuggestions(claim = {}) {
+  const text = String((claim && claim.claim_text) || '').trim();
+  const lower = text.toLowerCase();
+  const suggestions = [];
+  if (!String((claim && claim.time_text) || '').trim()) {
+    suggestions.push({
+      key: 'date',
+      label: 'Add date',
+      description: 'Anchor the statement to a year or period.',
+      replacement: buildClaimReplacement(claim, 'date'),
+    });
+  }
+  if (/\b(faster|slower|better|worse|more|less|best|worst|grew|fell)\b/.test(lower)) {
+    suggestions.push({
+      key: 'metric',
+      label: 'Add metric',
+      description: 'Explain what the comparison is measured by.',
+      replacement: buildClaimReplacement(claim, 'metric'),
+    });
+  }
+  suggestions.push({
+    key: 'source',
+    label: 'Name source',
+    description: 'Tie the claim to a source or publication.',
+    replacement: buildClaimReplacement(claim, 'source'),
+  });
+  if (/\band\b/i.test(lower)) {
+    suggestions.push({
+      key: 'split',
+      label: 'Split claim',
+      description: 'Break one broad sentence into narrower statements.',
+      replacement: buildClaimReplacement(claim, 'split'),
+    });
+  }
+  return suggestions.slice(0, 3);
+}
+
+function getHelpfulLeadCitations(citations = []) {
+  return (Array.isArray(citations) ? citations : [])
+    .filter((citation) => {
+      const score = Number((citation && citation.score) || 0);
+      const lexical = Number((citation && citation.lexical_score) || 0);
+      const semantic = Number((citation && citation.semantic_score) || 0);
+      const kind = String((citation && citation.source && citation.source.source_kind) || '').trim();
+      if (kind === 'challenge_search' || kind === 'official_search') {
+        return lexical >= 0.14 && semantic >= 0.18;
+      }
+      return score >= 0.34 && lexical >= 0.18 && semantic >= 0.2;
+    })
+    .sort((a, b) => {
+      const kindA = String((a && a.source && a.source.source_kind) || '').trim();
+      const kindB = String((b && b.source && b.source.source_kind) || '').trim();
+      const rank = (kind) => {
+        if (kind === 'challenge_search') return 0;
+        if (kind === 'official_search') return 1;
+        return 2;
+      };
+      const kindDiff = rank(kindA) - rank(kindB);
+      if (kindDiff !== 0) return kindDiff;
+      return Number((b && b.score) || 0) - Number((a && a.score) || 0);
+    })
+    .slice(0, 2);
+}
+
+function applyNoteClaimSuggestion(claimId = '', replacement = '') {
+  const claim = getActiveNoteClaimById(claimId);
+  const input = e('notes-input');
+  if (!claim || !input) return;
+  const start = Math.max(0, Number(claim.start_offset || 0));
+  const end = Math.max(start, Number(claim.end_offset || 0));
+  const current = String(state.noteDraftBody || input.value || '');
+  const next = `${current.slice(0, start)}${replacement}${current.slice(end)}`;
+  state.noteDraftBody = next;
+  input.value = next;
+  state.noteSaveState = 'edited';
+  renderNotesSurface();
+  renderNoteHighlightLayer();
+  input.focus();
+  input.setSelectionRange(start, start + String(replacement || '').length);
+  scheduleActiveNoteSave(300);
+}
+
+function clearNoteAnalysisRefreshTimer() {
+  if (!state.noteAnalysisRefreshTimer) return;
+  clearTimeout(state.noteAnalysisRefreshTimer);
+  state.noteAnalysisRefreshTimer = null;
+}
+
+function closeNoteCitationPopover() {
+  state.noteCitationPopover = { open: false, claimId: '' };
+  const popover = e('notes-citation-popover');
+  const body = e('notes-citation-body');
+  if (popover) popover.classList.add('hidden');
+  if (body) body.innerHTML = '';
+}
+
+function positionNoteCitationPopover(anchorEl = null) {
+  const popover = e('notes-citation-popover');
+  const surface = e('notes-main');
+  if (!popover || !surface || !anchorEl) return;
+  const anchorRect = anchorEl.getBoundingClientRect();
+  const surfaceRect = surface.getBoundingClientRect();
+  const desiredTop = Math.round(anchorRect.bottom - surfaceRect.top + 10 + surface.scrollTop);
+  const desiredRight = Math.max(16, Math.round(surfaceRect.right - anchorRect.right));
+  popover.style.top = `${Math.max(64, desiredTop)}px`;
+  popover.style.right = `${Math.max(16, desiredRight)}px`;
+}
+
+function computeNoteStatusText() {
+  if (!state.activeNote) return 'No note selected';
+  if (state.noteSaveState === 'saving') return 'Saving';
+  if (state.noteSaveState === 'edited') return 'Edited';
+  if (state.noteAnalysisPending) return 'Checking sources';
+  const summary = state.activeNoteAnalysis;
+  if (summary && Number(summary.claim_count || 0) <= 0) {
+    const message = String(summary.message || '').trim();
+    return message || 'Saved';
+  }
+  if (summary && Number(summary.claim_count || 0) > 0) {
+    if (Number(summary.uncertain_count || 0) > 0 || Number(summary.no_evidence_count || 0) > 0) {
+      return 'Evidence partial';
+    }
+    return 'Sources updated';
+  }
+  return 'Saved';
+}
+
+function renderNotesList() {
+  const list = e('notes-list');
+  if (!list) return;
+  const items = getFilteredNotes();
+  if (!items.length) {
+    list.innerHTML = '<div class="notes-list-empty muted">No notes yet.</div>';
+    return;
+  }
+  list.innerHTML = items.map((note) => {
+    const noteId = String((note && note.id) || '').trim();
+    const title = String((note && note.title) || 'Untitled Note').trim() || 'Untitled Note';
+    const meta = [];
+    const savedAgo = formatAgo(Number((note && note.updated_at) || 0));
+    if (savedAgo) meta.push(savedAgo);
+    if (String((note && note.promoted_reference_id) || '').trim()) meta.push('Promoted');
+    return `
+      <div class="notes-list-row${noteId === String(state.activeNoteId || '').trim() ? ' active' : ''}">
+        <button type="button" class="notes-list-item${noteId === String(state.activeNoteId || '').trim() ? ' active' : ''}" data-note-id="${escapeHtml(noteId)}">
+          <span class="notes-list-item-title">${escapeHtml(title)}</span>
+          <span class="notes-list-item-meta">${escapeHtml(meta.join(' · ') || 'Draft')}</span>
+        </button>
+        <button type="button" class="notes-list-delete-btn" data-note-delete="${escapeHtml(noteId)}" aria-label="Delete note" title="Delete note">×</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderNoteHighlightLayer() {
+  const pane = e('notes-text-pane');
+  const input = e('notes-input');
+  const layer = e('notes-highlight-layer');
+  if (!pane || !input || !layer) return;
+  if (!state.activeNote) {
+    pane.classList.remove('marker-visualized');
+    layer.innerHTML = '';
+    return;
+  }
+  const content = String(input.value || '');
+  const claims = getRenderableNoteClaims();
+  const useLayer = claims.length > 0;
+  pane.classList.toggle('marker-visualized', useLayer);
+  if (!useLayer) {
+    layer.innerHTML = '';
+    return;
+  }
+  let cursor = 0;
+  let html = '';
+  claims.forEach((claim) => {
+    const start = clamp(Math.round(Number((claim && claim.start_offset) || 0)), 0, content.length);
+    const end = clamp(Math.round(Number((claim && claim.end_offset) || 0)), start, content.length);
+    if (end <= start || start < cursor) return;
+    html += escapeHtml(content.slice(cursor, start));
+    const tone = getNoteClaimTone(claim);
+    html += `<mark class="notes-highlight-${tone.className}" data-claim-id="${escapeHtml(String((claim && claim.id) || ''))}">${escapeHtml(content.slice(start, end))}</mark>`;
+    cursor = end;
+  });
+  html += escapeHtml(content.slice(cursor));
+  layer.innerHTML = html || '&#8203;';
+  layer.scrollTop = input.scrollTop;
+  layer.scrollLeft = input.scrollLeft;
+}
+
+function tryWrapClaimText(root, claim = {}) {
+  const target = String((claim && claim.claim_text) || '').trim();
+  if (!root || !target) return false;
+  const lowerTarget = target.toLowerCase();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node && node.parentElement;
+      if (!node || !String(node.nodeValue || '').trim()) return NodeFilter.FILTER_REJECT;
+      if (parent && parent.closest('.notes-inline-citation, a, code, pre, script, style')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  let current = walker.nextNode();
+  while (current) {
+    const raw = String(current.nodeValue || '');
+    const start = raw.indexOf(target);
+    const fallbackStart = start >= 0 ? start : raw.toLowerCase().indexOf(lowerTarget);
+    if (fallbackStart >= 0) {
+      const range = document.createRange();
+      range.setStart(current, fallbackStart);
+      range.setEnd(current, fallbackStart + target.length);
+      const span = document.createElement('span');
+      const tone = getNoteClaimTone(claim);
+      span.className = `notes-inline-citation ${tone.className}`;
+      span.dataset.claimId = String((claim && claim.id) || '').trim();
+      span.dataset.supportLabel = String((claim && claim.status) || '').trim();
+      span.title = `${tone.label} claim`;
+      try {
+        range.surroundContents(span);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    current = walker.nextNode();
+  }
+  return false;
+}
+
+function applyNotePreviewHighlights(root) {
+  if (!root) return;
+  const claims = getRenderableNoteClaims()
+    .slice()
+    .sort((a, b) => String((b && b.claim_text) || '').length - String((a && a.claim_text) || '').length);
+  claims.forEach((claim) => {
+    tryWrapClaimText(root, claim);
+  });
+}
+
+function bindNotePreviewInteractions() {
+  const content = e('notes-preview-content');
+  if (!content || content.__notesPreviewBound) return;
+  content.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    const citation = target.closest('.notes-inline-citation');
+    if (citation) {
+      event.preventDefault();
+      event.stopPropagation();
+      void openNoteCitationPopover(String(citation.getAttribute('data-claim-id') || citation.dataset.claimId || '').trim(), citation);
+      return;
+    }
+    const link = target.closest('a[data-artifact-link], a[data-artifact-link-resolved]');
+    if (!link) return;
+    event.preventDefault();
+    const resolved = String(link.getAttribute('data-artifact-link-resolved') || '').trim();
+    const raw = String(link.getAttribute('data-artifact-link') || '').trim();
+    void openArtifactPreviewLink(resolved || raw);
+  });
+  content.__notesPreviewBound = true;
+}
+
+async function renderNotePreview() {
+  const content = e('notes-preview-content');
+  if (!content) return;
+  if (!state.activeNote) {
+    content.innerHTML = '';
+    return;
+  }
+  const requestSeq = Number(state.notePreviewRenderSeq || 0) + 1;
+  state.notePreviewRenderSeq = requestSeq;
+  content.innerHTML = '<div class="artifact-markdown-preview-empty">Rendering note...</div>';
+  bindNotePreviewInteractions();
+  const html = await renderMarkdownToHtml(String(state.noteDraftBody || (state.activeNote && state.activeNote.body_markdown) || ''));
+  if (requestSeq !== Number(state.notePreviewRenderSeq || 0)) return;
+  if (!state.activeNote) return;
+  content.innerHTML = html;
+  applyNotePreviewHighlights(content);
+}
+
+function renderNotesSurface() {
+  const hasNote = !!state.activeNote;
+  const emptyState = e('notes-empty-state');
+  const editorShell = e('notes-editor-shell');
+  const titleInput = e('note-title-input');
+  const textPane = e('notes-text-pane');
+  const previewPane = e('notes-preview-pane');
+  const input = e('notes-input');
+  const saveBtn = e('notes-save-btn');
+  const deleteBtn = e('notes-delete-btn');
+  const promoteBtn = e('notes-create-reference-btn');
+  const statusNode = e('notes-status');
+  const editBtn = e('notes-mode-edit-btn');
+  const viewBtn = e('notes-mode-view-btn');
+
+  if (emptyState) emptyState.classList.toggle('hidden', hasNote);
+  if (editorShell) editorShell.classList.toggle('hidden', !hasNote);
+  if (titleInput) titleInput.disabled = !hasNote;
+  if (input) input.disabled = !hasNote;
+  if (saveBtn) saveBtn.disabled = !hasNote;
+  if (deleteBtn) deleteBtn.disabled = !hasNote;
+  if (promoteBtn) promoteBtn.disabled = !hasNote;
+  if (statusNode) statusNode.textContent = computeNoteStatusText();
+
+  if (!hasNote) {
+    if (titleInput) titleInput.value = '';
+    if (input) input.value = '';
+    state.noteDraftTitle = '';
+    state.noteDraftBody = '';
+    if (textPane) textPane.classList.remove('hidden');
+    if (previewPane) previewPane.classList.add('hidden');
+    closeNoteCitationPopover();
+    renderNotesList();
+    renderNoteHighlightLayer();
+    void renderNotePreview();
+    return;
+  }
+
+  const mode = String((state.activeNote && state.activeNote.active_mode) || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
+  if (titleInput && titleInput.value !== String(state.noteDraftTitle || '')) {
+    titleInput.value = String(state.noteDraftTitle || '');
+  }
+  if (input && input.value !== String(state.noteDraftBody || '')) {
+    input.value = String(state.noteDraftBody || '');
+  }
+  if (editBtn) editBtn.classList.toggle('active', mode === 'edit');
+  if (viewBtn) viewBtn.classList.toggle('active', mode === 'view');
+  if (textPane) textPane.classList.toggle('hidden', mode !== 'edit');
+  if (previewPane) previewPane.classList.toggle('hidden', mode !== 'view');
+  renderNotesList();
+  renderNoteHighlightLayer();
+  if (mode === 'view') {
+    void renderNotePreview();
+  } else {
+    closeNoteCitationPopover();
+  }
+}
+
+async function refreshActiveNoteAnalysis(options = {}) {
+  if (!notesApi) return;
+  const targetId = String((options && options.noteId) || state.activeNoteId || '').trim();
+  if (!targetId) return;
+  const res = await notesApi.getAnalysis(targetId);
+  if (!res || !res.ok) return;
+  if (String(state.activeNoteId || '').trim() !== targetId) return;
+  state.activeNoteAnalysis = res.analysis_summary || null;
+  state.activeNoteClaims = Array.isArray(res.claims) ? res.claims : [];
+  const noteRevision = Number((state.activeNote && state.activeNote.analysis_revision) || 0);
+  const analyzedRevision = Number((res.analysis_summary && res.analysis_summary.note_revision) || 0);
+  if (noteRevision > 0 && analyzedRevision < noteRevision && String((state.activeNote && state.activeNote.body_markdown) || '').trim()) {
+    state.noteAnalysisPending = true;
+    if (options.allowReschedule !== false) {
+      clearNoteAnalysisRefreshTimer();
+      state.noteAnalysisRefreshTimer = setTimeout(() => {
+        state.noteAnalysisRefreshTimer = null;
+        void refreshActiveNoteAnalysis({ noteId: targetId, allowReschedule: true });
+      }, Math.max(1200, Number((options && options.delayMs) || 1800)));
+    }
+  } else {
+    state.noteAnalysisPending = false;
+    clearNoteAnalysisRefreshTimer();
+  }
+  renderNotesSurface();
+}
+
+async function saveActiveNote(options = {}) {
+  if (!notesApi || !state.activeNote) return null;
+  const noteId = String(state.activeNoteId || '').trim();
+  if (!noteId) return null;
+  if (state.noteSaveTimer) {
+    clearTimeout(state.noteSaveTimer);
+    state.noteSaveTimer = null;
+  }
+  const title = String(state.noteDraftTitle || (state.activeNote && state.activeNote.title) || '').trim() || 'Untitled Note';
+  const body = String(state.noteDraftBody || (state.activeNote && state.activeNote.body_markdown) || '');
+  const currentTitle = String((state.activeNote && state.activeNote.title) || '').trim();
+  const currentBody = String((state.activeNote && state.activeNote.body_markdown) || '');
+  const currentMode = String((state.activeNote && state.activeNote.active_mode) || 'edit').trim();
+  if (title === currentTitle && body === currentBody && state.noteSaveState !== 'edited') {
+    return { ok: true, note: state.activeNote };
+  }
+  state.noteSaveState = 'saving';
+  renderNotesSurface();
+  const res = await notesApi.update(noteId, {
+    title,
+    body_markdown: body,
+    active_mode: currentMode,
+  });
+  if (!res || !res.ok || !res.note) {
+    state.noteSaveState = 'edited';
+    renderNotesSurface();
+    if (!options.silent) window.alert((res && res.message) || 'Unable to save note.');
+    return res || { ok: false, message: 'Unable to save note.' };
+  }
+  state.activeNote = res.note;
+  state.activeNoteId = String(res.note.id || '').trim();
+  state.noteDraftTitle = String(res.note.title || '');
+  state.noteDraftBody = String(res.note.body_markdown || '');
+  upsertLocalNoteSummary(res.note);
+  state.noteSaveState = 'saved';
+  state.noteAnalysisPending = true;
+  renderNotesSurface();
+  clearNoteAnalysisRefreshTimer();
+  state.noteAnalysisRefreshTimer = setTimeout(() => {
+    state.noteAnalysisRefreshTimer = null;
+    void refreshActiveNoteAnalysis({ noteId: String(res.note.id || '').trim(), allowReschedule: true });
+  }, 1800);
+  return res;
+}
+
+function scheduleActiveNoteSave(delayMs = 800) {
+  if (!state.activeNote || !notesApi) return;
+  if (state.noteSaveTimer) clearTimeout(state.noteSaveTimer);
+  state.noteSaveTimer = setTimeout(() => {
+    state.noteSaveTimer = null;
+    void saveActiveNote({ silent: true });
+  }, Math.max(200, Math.round(Number(delayMs) || 800)));
+}
+
+async function setActiveNoteMode(mode = 'edit') {
+  if (!notesApi || !state.activeNote) return;
+  const nextMode = String(mode || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
+  if (String((state.activeNote && state.activeNote.active_mode) || 'edit').trim() === nextMode) {
+    renderNotesSurface();
+    return;
+  }
+  state.activeNote = {
+    ...state.activeNote,
+    active_mode: nextMode,
+  };
+  upsertLocalNoteSummary(state.activeNote);
+  renderNotesSurface();
+  const res = await notesApi.update(String(state.activeNote.id || '').trim(), { active_mode: nextMode });
+  if (res && res.ok && res.note && String(state.activeNoteId || '').trim() === String(res.note.id || '').trim()) {
+    state.activeNote = res.note;
+    upsertLocalNoteSummary(res.note);
+    renderNotesSurface();
+  }
+}
+
+async function loadNoteRecord(noteId = '', options = {}) {
+  if (!notesApi) return;
+  const targetId = String(noteId || '').trim();
+  if (!targetId) return;
+  if (!options.skipSave && state.activeNote && String(state.activeNoteId || '').trim() !== targetId && state.noteSaveState === 'edited') {
+    await saveActiveNote({ silent: true });
+  }
+  const res = await notesApi.get(targetId);
+  if (!res || !res.ok || !res.note) {
+    if (!options.silent) window.alert((res && res.message) || 'Unable to load note.');
+    return;
+  }
+  closeNoteCitationPopover();
+  clearNoteAnalysisRefreshTimer();
+  state.activeNoteId = String(res.note.id || '').trim();
+  state.activeNote = res.note;
+  state.activeNoteAnalysis = res.analysis_summary || null;
+  state.activeNoteClaims = [];
+  state.noteDraftTitle = String(res.note.title || '');
+  state.noteDraftBody = String(res.note.body_markdown || '');
+  state.noteSaveState = 'saved';
+  state.noteAnalysisPending = !!(String(res.note.body_markdown || '').trim()
+    && Number((res.analysis_summary && res.analysis_summary.note_revision) || 0) < Number(res.note.analysis_revision || 0));
+  upsertLocalNoteSummary(res.note);
+  renderNotesSurface();
+  await refreshActiveNoteAnalysis({ noteId: state.activeNoteId, allowReschedule: true });
+}
+
+async function loadNotesList(options = {}) {
+  if (!notesApi) return;
+  const res = await notesApi.list();
+  if (!res || !res.ok) {
+    if (!options.silent) window.alert((res && res.message) || 'Unable to load notes.');
+    return;
+  }
+  state.notes = Array.isArray(res.notes) ? res.notes : [];
+  renderNotesList();
+  const activeId = String(state.activeNoteId || '').trim();
+  const hasActive = activeId && state.notes.some((item) => String((item && item.id) || '').trim() === activeId);
+  if (hasActive && state.activeNote) return;
+  if (hasActive) {
+    await loadNoteRecord(activeId, { skipSave: true, silent: true });
+    return;
+  }
+  if (state.notes.length > 0) {
+    await loadNoteRecord(String((state.notes[0] && state.notes[0].id) || '').trim(), { skipSave: true, silent: true });
+    return;
+  }
+  state.activeNoteId = '';
+  state.activeNote = null;
+  state.activeNoteAnalysis = null;
+  state.activeNoteClaims = [];
+  state.noteDraftTitle = '';
+  state.noteDraftBody = '';
+  state.noteSaveState = 'idle';
+  state.noteAnalysisPending = false;
+  renderNotesSurface();
+}
+
+async function createNewNote(options = {}) {
+  if (!notesApi) return;
+  if (state.activeNote && state.noteSaveState === 'edited') {
+    await saveActiveNote({ silent: true });
+  }
+  const res = await notesApi.create({ title: 'Untitled Note', body_markdown: '', active_mode: 'edit' });
+  if (!res || !res.ok || !res.note) {
+    window.alert((res && res.message) || 'Unable to create note.');
+    return;
+  }
+  upsertLocalNoteSummary(res.note);
+  await loadNoteRecord(String(res.note.id || '').trim(), { skipSave: true, silent: true });
+  const focusTarget = String((options && options.focusTarget) || 'body').trim().toLowerCase();
+  if (focusTarget === 'title') {
+    e('note-title-input')?.focus();
+    e('note-title-input')?.select();
+  } else {
+    e('notes-input')?.focus();
+  }
+}
+
+async function deleteActiveNote() {
+  if (!notesApi || !state.activeNote) return;
+  const noteId = String(state.activeNoteId || '').trim();
+  if (!noteId) return;
+  if (!window.confirm('Delete this note?')) return;
+  const res = await notesApi.delete(noteId);
+  if (!res || !res.ok) {
+    window.alert((res && res.message) || 'Unable to delete note.');
+    return;
+  }
+  removeLocalNoteSummary(noteId);
+  closeNoteCitationPopover();
+  clearNoteAnalysisRefreshTimer();
+  state.activeNoteId = '';
+  state.activeNote = null;
+  state.activeNoteAnalysis = null;
+  state.activeNoteClaims = [];
+  state.noteDraftTitle = '';
+  state.noteDraftBody = '';
+  state.noteSaveState = 'idle';
+  state.noteAnalysisPending = false;
+  renderNotesSurface();
+  if (state.notes.length > 0) {
+    await loadNoteRecord(String((state.notes[0] && state.notes[0].id) || '').trim(), { skipSave: true, silent: true });
+  }
+}
+
+async function openNoteCitationPopover(claimId = '', anchorEl = null) {
+  if (!notesApi || !state.activeNote) return;
+  const noteId = String(state.activeNoteId || '').trim();
+  const targetClaimId = String(claimId || '').trim();
+  if (!noteId || !targetClaimId) return;
+  const popover = e('notes-citation-popover');
+  const titleNode = e('notes-citation-title');
+  const bodyNode = e('notes-citation-body');
+  if (!popover || !titleNode || !bodyNode) return;
+  const claim = getActiveNoteClaimById(targetClaimId);
+  const tone = getNoteClaimTone(claim || {});
+  const confidence = Math.round(getNoteClaimConfidence(claim || {}) * 100);
+  const suggestions = buildNoteClaimSuggestions(claim || {});
+  titleNode.textContent = claim ? claim.claim_text : 'Sources';
+  bodyNode.innerHTML = `
+    <section class="notes-claim-summary">
+      <div class="notes-claim-spectrum">
+        <div class="notes-claim-spectrum-fill ${escapeHtml(tone.className)}" style="width:${Math.max(6, confidence)}%"></div>
+      </div>
+      <div class="notes-claim-summary-meta">
+        <strong>${escapeHtml(tone.label)}</strong>
+        <span class="muted small">${escapeHtml(`${confidence}% confidence`)}</span>
+      </div>
+      <div class="muted">${escapeHtml(tone.guidance)}</div>
+    </section>
+    ${suggestions.length ? `
+      <section class="notes-claim-actions">
+        ${suggestions.map((item) => `
+          <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(targetClaimId)}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
+            <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
+            <span>${escapeHtml(String(item.description || ''))}</span>
+          </button>
+        `).join('')}
+      </section>
+    ` : ''}
+    <div class="muted">Loading sources...</div>
+  `;
+  popover.classList.remove('hidden');
+  positionNoteCitationPopover(anchorEl);
+  state.noteCitationPopover = { open: true, claimId: targetClaimId };
+  const res = await notesApi.getCitations(noteId, targetClaimId);
+  if (!res || !res.ok) {
+    bodyNode.innerHTML = `
+      <section class="notes-claim-summary">
+        <div class="notes-claim-spectrum">
+          <div class="notes-claim-spectrum-fill ${escapeHtml(tone.className)}" style="width:${Math.max(6, confidence)}%"></div>
+        </div>
+        <div class="notes-claim-summary-meta">
+          <strong>${escapeHtml(tone.label)}</strong>
+          <span class="muted small">${escapeHtml(`${confidence}% confidence`)}</span>
+        </div>
+        <div class="muted">${escapeHtml(tone.guidance)}</div>
+      </section>
+      ${suggestions.length ? `
+        <section class="notes-claim-actions">
+          ${suggestions.map((item) => `
+            <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(targetClaimId)}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
+              <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
+              <span>${escapeHtml(String(item.description || ''))}</span>
+            </button>
+          `).join('')}
+        </section>
+      ` : ''}
+      <div class="muted">${escapeHtml((res && res.message) || 'Unable to load sources.')}</div>
+    `;
+    return;
+  }
+  const citations = Array.isArray(res.citations) ? res.citations : [];
+  titleNode.textContent = String((res.claim && res.claim.claim_text) || (claim && claim.claim_text) || 'Sources');
+  const headerHtml = `
+    <section class="notes-claim-summary">
+      <div class="notes-claim-spectrum">
+        <div class="notes-claim-spectrum-fill ${escapeHtml(tone.className)}" style="width:${Math.max(6, confidence)}%"></div>
+      </div>
+      <div class="notes-claim-summary-meta">
+        <strong>${escapeHtml(tone.label)}</strong>
+        <span class="muted small">${escapeHtml(`${confidence}% confidence`)}</span>
+      </div>
+      <div class="muted">${escapeHtml(tone.guidance)}</div>
+    </section>
+    ${suggestions.length ? `
+      <section class="notes-claim-actions">
+        ${suggestions.map((item) => `
+          <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(targetClaimId)}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
+            <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
+            <span>${escapeHtml(String(item.description || ''))}</span>
+          </button>
+        `).join('')}
+      </section>
+    ` : ''}
+  `;
+  const helpfulLeads = getHelpfulLeadCitations(citations);
+  if (!citations.length) {
+    bodyNode.innerHTML = `${headerHtml}<div class="muted">No evidence available for this passage yet.</div>`;
+    return;
+  }
+  if (tone.className === 'no-evidence' && helpfulLeads.length === 0) {
+    bodyNode.innerHTML = `${headerHtml}<div class="muted">No strong source match was found. Tighten the claim first, then search again.</div>`;
+    return;
+  }
+  const visibleCitations = tone.className === 'no-evidence' ? helpfulLeads : citations;
+  const leadHeading = tone.className === 'no-evidence'
+    ? '<div class="muted small">Worth reading</div>'
+    : '';
+  bodyNode.innerHTML = `${headerHtml}${leadHeading}${visibleCitations.map((citation) => {
+    const source = citation && citation.source ? citation.source : {};
+    const support = String((citation && citation.support_label) || '').replace(/_/g, ' ').trim();
+    const publishedAt = Number(source.published_at || 0);
+    const publishedText = publishedAt > 0 ? new Date(publishedAt).toLocaleDateString() : '';
+    const metaParts = [support || 'supported', publishedText].filter(Boolean);
+    if (tone.className === 'no-evidence') {
+      const kind = String((source && source.source_kind) || '').trim();
+      if (kind === 'challenge_search') metaParts.unshift('contrarian result');
+      else if (kind === 'official_search') metaParts.unshift('official source');
+      else metaParts.unshift('weak lead');
+    }
+    const meta = metaParts.join(' · ');
+    return `
+      <article class="notes-citation-item">
+        <strong>${escapeHtml(String(source.title || source.url || 'Source'))}</strong>
+        <div class="muted small">${escapeHtml(meta)}</div>
+        <a href="${escapeHtml(String(source.url || '#'))}" data-artifact-link="${escapeHtml(String(source.url || ''))}" data-artifact-link-resolved="${escapeHtml(String(source.url || ''))}">${escapeHtml(String(source.url || ''))}</a>
+        <div>${escapeHtml(String((citation && citation.excerpt) || ''))}</div>
+      </article>
+    `;
+  }).join('')}`;
+  positionNoteCitationPopover(anchorEl);
+}
+
+async function createReferenceFromActiveNote() {
+  if (!notesApi || !state.activeNote) return;
+  const saveRes = await saveActiveNote({ silent: true });
+  if (saveRes && saveRes.ok === false) return;
+  const noteId = String(state.activeNoteId || '').trim();
+  const res = await notesApi.createReference(noteId);
+  if (!res || !res.ok || !res.reference_id) {
+    window.alert((res && res.message) || 'Unable to create reference from note.');
+    return;
+  }
+  state.references = Array.isArray(res.references) ? res.references : state.references;
+  state.activeNote = {
+    ...(state.activeNote || {}),
+    promoted_reference_id: String(res.reference_id || '').trim(),
+  };
+  upsertLocalNoteSummary(state.activeNote);
+  renderNotesSurface();
+  await setAppView('workspace');
+  await activateReferenceSurface(String(res.reference_id || '').trim());
+  showPassiveNotification('Reference created from note.');
+}
+
+async function openNotesPage() {
+  await setAppView('notes');
+  if (!notesApi) {
+    window.alert('Notes API is unavailable.');
+    return;
+  }
+  if (!Array.isArray(state.notes) || state.notes.length === 0) {
+    await loadNotesList({ silent: true });
+    if (!Array.isArray(state.notes) || state.notes.length === 0) {
+      await createNewNote({ focusTarget: 'body' });
+      return;
+    }
+  }
+  if (!state.activeNote && state.notes.length > 0) {
+    const preferredId = String(state.activeNoteId || '').trim();
+    const fallbackId = String((state.notes[0] && state.notes[0].id) || '').trim();
+    const nextId = state.notes.some((item) => String((item && item.id) || '').trim() === preferredId)
+      ? preferredId
+      : fallbackId;
+    await loadNoteRecord(nextId, { skipSave: true, silent: true });
+    return;
+  }
+  renderNotesList();
+  renderNotesSurface();
 }
 
 function normalizeReferenceSearchQuery(raw) {
@@ -9247,26 +10110,32 @@ async function toggleZenMode() {
 function updateTopbarViewButtons() {
   const active = String(state.appView || 'workspace').trim().toLowerCase();
   e('workspace-open-btn')?.classList.toggle('active', active === 'workspace');
+  e('notes-open-btn')?.classList.toggle('active', active === 'notes');
   e('mail-open-btn')?.classList.toggle('active', active === 'mail');
   e('hyperweb-open-btn')?.classList.toggle('active', active === 'hyperweb');
   e('private-shares-open-btn')?.classList.toggle('active', active === 'private-shares');
   e('settings-open-btn')?.classList.toggle('active', active === 'settings');
   e('history-open-btn')?.classList.toggle('active', active === 'history');
+  const showWorkspaceChrome = active === 'workspace';
+  e('workspace-left-rail-toggle-btn')?.classList.toggle('hidden', !showWorkspaceChrome);
+  e('workspace-right-rail-toggle-btn')?.classList.toggle('hidden', !showWorkspaceChrome);
   renderTopbarBadges();
 }
 
 async function setAppView(viewName) {
   const target = String(viewName || 'workspace').trim().toLowerCase();
-  state.appView = (target === 'mail' || target === 'hyperweb' || target === 'private-shares' || target === 'settings' || target === 'history')
+  state.appView = (target === 'notes' || target === 'mail' || target === 'hyperweb' || target === 'private-shares' || target === 'settings' || target === 'history')
     ? target
     : 'workspace';
   const root = e('app-root');
+  const notes = e('notes-page');
   const mail = e('global-mail-page');
   const hyperweb = e('hyperweb-page');
   const privateShares = e('private-shares-page');
   const settings = e('settings-page');
   const history = e('history-page');
   if (root) root.classList.toggle('hidden', state.appView !== 'workspace');
+  if (notes) notes.classList.toggle('hidden', state.appView !== 'notes');
   if (mail) mail.classList.toggle('hidden', state.appView !== 'mail');
   if (hyperweb) hyperweb.classList.toggle('hidden', state.appView !== 'hyperweb');
   if (privateShares) privateShares.classList.toggle('hidden', state.appView !== 'private-shares');
@@ -9281,7 +10150,7 @@ async function setAppView(viewName) {
     state.hyperwebUnreadCount = Math.max(0, Number(state.hyperwebUnreadCount || 0));
     renderTopbarBadges();
   }
-  if (state.appView === 'hyperweb' || state.appView === 'private-shares' || state.appView === 'settings' || state.appView === 'mail') {
+  if (state.appView === 'notes' || state.appView === 'hyperweb' || state.appView === 'private-shares' || state.appView === 'settings' || state.appView === 'mail') {
     await api.historyPreviewHide();
     await api.hide();
     return;
@@ -12820,6 +13689,135 @@ function bindControls() {
     renderArtifactHighlightLayer();
   });
 
+  const noteTitleInput = e('note-title-input');
+  const noteInput = e('notes-input');
+  const scheduleNoteSaveFromInput = () => {
+    if (!state.activeNote) return;
+    state.noteSaveState = 'edited';
+    renderNotesSurface();
+    scheduleActiveNoteSave(800);
+  };
+  noteTitleInput?.addEventListener('input', () => {
+    state.noteDraftTitle = String(noteTitleInput.value || '');
+    scheduleNoteSaveFromInput();
+  });
+  noteTitleInput?.addEventListener('keydown', async (event) => {
+    if ((event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 's') {
+      event.preventDefault();
+      await saveActiveNote();
+    }
+  });
+  noteInput?.addEventListener('input', () => {
+    if (!state.activeNote) return;
+    state.noteDraftBody = String(noteInput.value || '');
+    scheduleNoteSaveFromInput();
+    renderNoteHighlightLayer();
+  });
+  noteInput?.addEventListener('select', () => {
+    renderNoteHighlightLayer();
+  });
+  noteInput?.addEventListener('focus', () => {
+    renderNoteHighlightLayer();
+  });
+  noteInput?.addEventListener('blur', () => {
+    renderNoteHighlightLayer();
+  });
+  noteInput?.addEventListener('scroll', () => {
+    renderNoteHighlightLayer();
+  });
+  noteInput?.addEventListener('mouseup', () => {
+    renderNoteHighlightLayer();
+    const start = Number(noteInput.selectionStart);
+    const end = Number(noteInput.selectionEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start !== end) return;
+    const claim = getActiveNoteClaimAtOffset(start);
+    if (claim) {
+      void openNoteCitationPopover(String(claim.id || '').trim(), noteInput);
+    } else {
+      closeNoteCitationPopover();
+    }
+  });
+  noteInput?.addEventListener('keydown', async (event) => {
+    if ((event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 's') {
+      event.preventDefault();
+      await saveActiveNote();
+    }
+  });
+
+  e('notes-new-btn')?.addEventListener('click', async () => {
+    await createNewNote();
+  });
+  e('notes-save-btn')?.addEventListener('click', async () => {
+    await saveActiveNote();
+  });
+  e('notes-delete-btn')?.addEventListener('click', async () => {
+    await deleteActiveNote();
+  });
+  e('notes-create-reference-btn')?.addEventListener('click', async () => {
+    await createReferenceFromActiveNote();
+  });
+  e('notes-mode-edit-btn')?.addEventListener('click', async () => {
+    await setActiveNoteMode('edit');
+    e('notes-input')?.focus();
+  });
+  e('notes-mode-view-btn')?.addEventListener('click', async () => {
+    await setActiveNoteMode('view');
+  });
+  e('notes-search')?.addEventListener('input', (event) => {
+    state.notesSearchQuery = String(event.target && event.target.value ? event.target.value : '');
+    renderNotesList();
+  });
+  e('notes-search-clear-btn')?.addEventListener('click', () => {
+    state.notesSearchQuery = '';
+    const input = e('notes-search');
+    if (input) input.value = '';
+    renderNotesList();
+  });
+  e('notes-list')?.addEventListener('click', async (event) => {
+    const deleteButton = event.target instanceof Element ? event.target.closest('[data-note-delete]') : null;
+    if (deleteButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const noteId = String(deleteButton.getAttribute('data-note-delete') || '').trim();
+      if (!noteId) return;
+      if (String(state.activeNoteId || '').trim() !== noteId) {
+        await loadNoteRecord(noteId, { silent: true });
+      }
+      await deleteActiveNote();
+      return;
+    }
+    const button = event.target instanceof Element ? event.target.closest('[data-note-id]') : null;
+    if (!button) return;
+    const noteId = String(button.getAttribute('data-note-id') || '').trim();
+    if (!noteId || noteId === String(state.activeNoteId || '').trim()) return;
+    await loadNoteRecord(noteId);
+  });
+  e('notes-citation-body')?.addEventListener('click', (event) => {
+    const actionButton = event.target instanceof Element ? event.target.closest('[data-claim-action]') : null;
+    if (actionButton) {
+      event.preventDefault();
+      const claimId = String(actionButton.getAttribute('data-claim-id') || '').trim();
+      const replacement = String(actionButton.getAttribute('data-claim-replacement') || '');
+      applyNoteClaimSuggestion(claimId, replacement);
+      closeNoteCitationPopover();
+      showPassiveNotification('Claim updated. Review and refine the placeholders.');
+      return;
+    }
+    const target = event.target instanceof Element ? event.target.closest('a[data-artifact-link], a[data-artifact-link-resolved]') : null;
+    if (!target) return;
+    event.preventDefault();
+    const resolved = String(target.getAttribute('data-artifact-link-resolved') || '').trim();
+    const raw = String(target.getAttribute('data-artifact-link') || '').trim();
+    void openArtifactPreviewLink(resolved || raw);
+  });
+  document.addEventListener('click', (event) => {
+    if (!state.noteCitationPopover.open) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    if (target.closest('#notes-citation-popover') || target.closest('.notes-inline-citation')) return;
+    closeNoteCitationPopover();
+  });
+
   e('artifact-zoom-in-btn')?.addEventListener('click', () => {
     adjustArtifactImageZoom(ARTIFACT_ZOOM_STEP);
   });
@@ -13021,6 +14019,10 @@ function bindControls() {
 
   e('workspace-open-btn')?.addEventListener('click', async () => {
     await setAppView('workspace');
+  });
+
+  e('notes-open-btn')?.addEventListener('click', async () => {
+    await openNotesPage();
   });
 
   e('mail-open-btn')?.addEventListener('click', async () => {

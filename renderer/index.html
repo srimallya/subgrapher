@@ -16,6 +16,7 @@
       </div>
       <nav class="primary-nav" aria-label="Primary">
         <button id="workspace-open-btn" class="top-btn active">Workspace</button>
+        <button id="notes-open-btn" class="top-btn">Notes</button>
         <button id="mail-open-btn" class="top-btn"><span>Mail</span><span id="mail-open-badge" class="top-btn-badge hidden"></span></button>
         <button id="hyperweb-open-btn" class="top-btn"><span>Hyperweb</span><span id="hyperweb-open-badge" class="top-btn-badge hidden"></span></button>
         <button id="private-shares-open-btn" class="top-btn">Private Shares</button>
@@ -301,6 +302,55 @@
       </div>
     </aside>
   </div>
+
+  <section id="notes-page" class="hidden">
+    <div class="notes-page-shell">
+      <aside class="notes-sidebar">
+        <div class="panel-header">
+          <h2>Notes</h2>
+          <div class="panel-controls">
+            <button id="notes-new-btn" title="Create note">+</button>
+          </div>
+        </div>
+        <div class="search-row">
+          <input id="notes-search" type="search" placeholder="Search notes..." />
+          <button id="notes-search-clear-btn" title="Clear notes search">×</button>
+        </div>
+        <div id="notes-list" class="list"></div>
+      </aside>
+      <main class="notes-main">
+        <div class="notes-toolbar">
+          <div class="notes-toolbar-main">
+            <input id="note-title-input" type="text" placeholder="Untitled Note" />
+            <div class="notes-mode-switch" role="tablist" aria-label="Note mode">
+              <button id="notes-mode-edit-btn" type="button" class="active">Edit</button>
+              <button id="notes-mode-view-btn" type="button">View</button>
+            </div>
+          </div>
+          <div class="notes-toolbar-actions">
+            <span id="notes-status" class="muted">No note selected</span>
+            <button id="notes-save-btn" type="button">Save</button>
+            <button id="notes-create-reference-btn" type="button">Create Reference</button>
+            <button id="notes-delete-btn" type="button">Delete</button>
+          </div>
+        </div>
+        <div id="notes-empty-state" class="notes-empty-state hidden">Create a note to begin.</div>
+        <div id="notes-editor-shell" class="notes-editor-shell hidden">
+          <section id="notes-text-pane" class="notes-text-pane">
+            <pre id="notes-highlight-layer" class="notes-highlight-layer" aria-hidden="true"></pre>
+            <textarea id="notes-input" spellcheck="false"></textarea>
+          </section>
+          <section id="notes-preview-pane" class="notes-preview-pane hidden">
+            <div id="notes-preview-content" class="notes-preview-content"></div>
+          </section>
+        </div>
+        <div id="notes-citation-popover" class="notes-citation-popover hidden">
+          <div id="notes-citation-title" class="notes-citation-title">Sources</div>
+          <div id="notes-citation-body" class="notes-citation-body"></div>
+        </div>
+      </main>
+    </div>
+  </section>
 
   <section id="hyperweb-page" class="hidden">
     <div class="hyperweb-toolbar">

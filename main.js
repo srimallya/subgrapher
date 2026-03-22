@@ -17,7 +17,7 @@ const {
   reindexLocalEvidenceReference,
 } = require('./runtime/local_evidence_search');
 const { getPathCScopedReferences, buildPathCHarnessPayload } = require('./runtime/pathc_harness');
-const { LuminoCrawler } = require('./runtime/lumino_crawler');
+const { LuminoCrawler, fetchWebPagePreview } = require('./runtime/lumino_crawler');
 const { HyperwebManager } = require('./runtime/hyperweb_manager');
 const { indexFolderAsContext } = require('./runtime/file_indexer');
 const {
@@ -50,6 +50,8 @@ const { computeMailConversationKey, parseRawEmailText } = require('./runtime/mai
 const { refreshGoogleAccessToken, startGoogleMailOAuthFlow } = require('./runtime/mail_google_oauth');
 const { createMailStore } = require('./runtime/mail_store');
 const { createDashboardStore } = require('./runtime/dashboard_store');
+const { createNotesStore } = require('./runtime/notes_store');
+const { createNoteAnalysisEngine } = require('./runtime/note_analysis');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -282,6 +284,9 @@ let orchestratorPreferencesStore = null;
 let mailStore = null;
 let mailSyncManager = null;
 let dashboardStore = null;
+let notesStore = null;
+let noteAnalysisEngine = null;
+const noteAnalysisTimers = new Map();
 const pathBMetrics = {
   pathb_reuse_count: 0,
   pathb_create_count: 0,
@@ -1014,6 +1019,28 @@ function normalizeUrlForMatch(raw) {
   } catch (_) {
     return input.toLowerCase();
   }
+}
+
+function normalizeWhitespace(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function extractExplicitUrlsFromMarkdown(markdown = '') {
+  const text = String(markdown || '');
+  const out = [];
+  const seen = new Set();
+  const re = /https?:\/\/[^\s<>)\]]+/g;
+  let match = re.exec(text);
+  while (match) {
+    const raw = String(match[0] || '').trim().replace(/[),.;:!?]+$/, '');
+    const urlNorm = normalizeUrlForMatch(raw);
+    if (urlNorm && !seen.has(urlNorm)) {
+      seen.add(urlNorm);
+      out.push({ url: raw, url_norm: urlNorm, start: match.index, end: match.index + raw.length });
+    }
+    match = re.exec(text);
+  }
+  return out;
 }
 
 function makeTimeoutSignal(timeoutMs = 12000) {
@@ -6291,6 +6318,117 @@ function getDashboardStore() {
     });
   }
   return dashboardStore;
+}
+
+function getNotesStore() {
+  if (!notesStore) {
+    notesStore = createNotesStore({
+      userDataPath: app.getPath('userData'),
+    });
+  }
+  return notesStore;
+}
+
+function buildNoteLocalEvidenceOptions() {
+  const settings = readSettings();
+  const ragEmbedding = resolveRagEmbeddingSettings(settings);
+  return {
+    userDataPath: app.getPath('userData'),
+    ragEnabled: !!settings.rag_enabled,
+    embeddingRuntime: ragEmbedding.runtime,
+    embeddingModel: ragEmbedding.model,
+    embeddingConfig: ragEmbedding.config,
+  };
+}
+
+function getNoteAnalysisEngine() {
+  if (!noteAnalysisEngine) {
+    noteAnalysisEngine = createNoteAnalysisEngine({
+      webSearch: runOrchestratorWebSearch,
+      fetchUrl: (url) => fetchWebPagePreview(url, {
+        markdownFirst: true,
+        maxChars: 18_000,
+        timeoutMs: 12_000,
+      }),
+      localEvidenceSearch: (query, refs = [], options = {}) => searchLocalEvidence(query, refs, options),
+      temporalGraphScorer: computeTemporalGraphScoresWithPython,
+      makeId,
+    });
+  }
+  return noteAnalysisEngine;
+}
+
+async function runNoteAnalysis(noteId = '') {
+  const targetId = String(noteId || '').trim();
+  if (!targetId) return { ok: false, message: 'noteId is required.' };
+  const store = getNotesStore();
+  const noteRes = await store.getNote(targetId);
+  if (!noteRes || !noteRes.ok || !noteRes.note) {
+    return { ok: false, message: (noteRes && noteRes.message) || 'Note not found.' };
+  }
+  const note = noteRes.note;
+  if (!String(note.body_markdown || '').trim()) {
+    return store.saveAnalysis(targetId, {
+      analysis_run_id: makeId('analysis'),
+      note_revision: Number(note.analysis_revision || 0),
+      extractor_version: 'note-analyzer-v1',
+      started_at: nowTs(),
+      completed_at: nowTs(),
+      status: 'completed',
+      message: 'Note is empty.',
+      claims: [],
+      sources: [],
+      passages: [],
+      citations: [],
+    });
+  }
+  const analysisRes = await getNoteAnalysisEngine().analyze(note, {
+    scopedRefs: getReferences(),
+    localEvidenceOptions: buildNoteLocalEvidenceOptions(),
+  });
+  if (!analysisRes || analysisRes.ok === false) {
+    return { ok: false, message: String((analysisRes && analysisRes.message) || 'Note analysis failed.') };
+  }
+  return store.saveAnalysis(targetId, analysisRes);
+}
+
+function scheduleNoteAnalysis(noteId = '', delayMs = 1200) {
+  const targetId = String(noteId || '').trim();
+  if (!targetId) return;
+  if (noteAnalysisTimers.has(targetId)) {
+    clearTimeout(noteAnalysisTimers.get(targetId));
+  }
+  const timer = setTimeout(async () => {
+    noteAnalysisTimers.delete(targetId);
+    try {
+      await runNoteAnalysis(targetId);
+    } catch (_) {
+      // noop
+    }
+  }, Math.max(100, Math.round(Number(delayMs) || 1200)));
+  noteAnalysisTimers.set(targetId, timer);
+}
+
+async function ensureFreshNoteAnalysis(noteId = '') {
+  const targetId = String(noteId || '').trim();
+  if (!targetId) return null;
+  const store = getNotesStore();
+  const noteRes = await store.getNote(targetId);
+  if (!noteRes || !noteRes.ok || !noteRes.note) return noteRes;
+  const note = noteRes.note;
+  const summary = noteRes.analysis_summary || null;
+  const analyzerVersion = String((getNoteAnalysisEngine() && getNoteAnalysisEngine().ANALYZER_VERSION) || '').trim();
+  const needsRefresh = !!(
+    String(note.body_markdown || '').trim()
+    && (
+      !summary
+      || Number(summary.note_revision || 0) < Number(note.analysis_revision || 0)
+      || String(summary.extractor_version || '').trim() !== analyzerVersion
+    )
+  );
+  if (!needsRefresh) return noteRes;
+  await runNoteAnalysis(targetId);
+  return store.getNote(targetId);
 }
 
 async function listDashboardNotifications(options = {}) {
@@ -15795,6 +15933,116 @@ function setReferences(refs, options = {}) {
   }).catch(() => {});
 }
 
+async function createReferenceFromNote(noteId = '') {
+  const targetId = String(noteId || '').trim();
+  if (!targetId) return { ok: false, message: 'noteId is required.' };
+  const store = getNotesStore();
+  const noteRes = await store.getNote(targetId);
+  if (!noteRes || !noteRes.ok || !noteRes.note) {
+    return { ok: false, message: (noteRes && noteRes.message) || 'Note not found.' };
+  }
+  const note = noteRes.note;
+  const analysisRes = await store.getAnalysis(targetId);
+  const claims = Array.isArray(analysisRes && analysisRes.claims) ? analysisRes.claims : [];
+
+  const associatedUrls = [];
+  const seenUrls = new Set();
+  const citationHighlights = [];
+
+  for (let i = 0; i < claims.length; i += 1) {
+    const claim = claims[i];
+    const citationsRes = await store.getCitations(targetId, String((claim && claim.id) || '').trim());
+    const citations = Array.isArray(citationsRes && citationsRes.citations) ? citationsRes.citations : [];
+    citations.forEach((citation) => {
+      const url = normalizeUrlForMatch((citation && citation.source && citation.source.url) || '');
+      if (url && !seenUrls.has(url) && Number((citation && citation.score) || 0) >= 0.72) {
+        seenUrls.add(url);
+        associatedUrls.push({
+          url: String((citation && citation.source && citation.source.url) || ''),
+          title: String((citation && citation.source && citation.source.title) || ''),
+        });
+      }
+      const excerpt = normalizeWhitespace(String((citation && citation.excerpt) || ''));
+      if (!excerpt || !url) return;
+      citationHighlights.push({
+        url: String((citation && citation.source && citation.source.url) || ''),
+        url_norm: url,
+        text: excerpt.slice(0, 4000),
+        context_before: '',
+        context_after: '',
+      });
+    });
+  }
+
+  const explicitUrls = extractExplicitUrlsFromMarkdown(String(note.body_markdown || ''));
+  explicitUrls.forEach((item) => {
+    const urlNorm = normalizeUrlForMatch((item && item.url) || '');
+    if (!urlNorm || seenUrls.has(urlNorm)) return;
+    seenUrls.add(urlNorm);
+    associatedUrls.unshift({
+      url: String(item.url || ''),
+      title: String(item.url || ''),
+    });
+  });
+
+  const ref = createReferenceBase({
+    title: String(note.title || 'Untitled Note').trim() || 'Untitled Note',
+    intent: 'Imported from note',
+    relation_type: 'root',
+    current_tab: { url: getDefaultSearchHomeUrl(), title: getDefaultSearchHomeTitle() },
+    source_metadata: {
+      source_note_id: targetId,
+      source_note_revision: Number(note.analysis_revision || 0),
+    },
+  });
+  ref.source_note_id = targetId;
+  ref.source_note_revision = Number(note.analysis_revision || 0);
+  ref.artifacts = [
+    createArtifact({
+      title: String(note.title || 'Note').trim() || 'Note',
+      type: 'markdown',
+      content: String(note.body_markdown || ''),
+    }),
+  ];
+  const nextTabs = associatedUrls
+    .map((item) => {
+      const rawUrl = String((item && item.url) || '').trim();
+      if (!rawUrl) return null;
+      return createWebTab({
+        url: rawUrl,
+        title: String((item && item.title) || rawUrl).trim() || rawUrl,
+      });
+    })
+    .filter(Boolean)
+    .slice(0, MAX_BROWSER_TABS_PER_REFERENCE);
+  if (nextTabs.length > 0) {
+    ref.tabs = nextTabs;
+    ref.active_tab_id = String((nextTabs[0] && nextTabs[0].id) || '').trim();
+  }
+  ref.highlights = citationHighlights
+    .map((item) => sanitizeHighlightEntry({
+      ...item,
+      source: 'web',
+      created_at: nowTs(),
+      updated_at: nowTs(),
+    }))
+    .filter(Boolean)
+    .slice(-MAX_HIGHLIGHTS);
+  ref.updated_at = nowTs();
+
+  const refs = getReferences();
+  refs.unshift(ref);
+  setReferences(refs);
+  await store.updateNote(targetId, { promoted_reference_id: ref.id });
+  return {
+    ok: true,
+    reference_id: ref.id,
+    reference: ref,
+    references: getReferences(),
+    promoted_from_note_id: targetId,
+  };
+}
+
 function runMemorySemanticEvaluation() {
   const refs = getReferences();
   const now = nowTs();
@@ -20024,6 +20272,56 @@ function commitPublicCandidateReference(payload = {}) {
   setReferences(refs);
   return { ok: true, reference: newRef, references: refs };
 }
+
+ipcMain.handle('notes:list', async () => getNotesStore().listNotes());
+
+ipcMain.handle('notes:create', async (_event, payload) => {
+  const res = await getNotesStore().createNote(payload || {});
+  if (res && res.ok && res.note) scheduleNoteAnalysis(String(res.note.id || '').trim(), 1200);
+  return res;
+});
+
+ipcMain.handle('notes:get', async (_event, payload) => {
+  const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  return ensureFreshNoteAnalysis(noteId);
+});
+
+ipcMain.handle('notes:update', async (_event, payload) => {
+  const noteId = String((payload && payload.noteId) || '').trim();
+  const patch = (payload && payload.patch && typeof payload.patch === 'object') ? payload.patch : {};
+  const res = await getNotesStore().updateNote(noteId, patch);
+  if (res && res.ok && res.note && Object.prototype.hasOwnProperty.call(patch, 'body_markdown')) {
+    scheduleNoteAnalysis(String(res.note.id || '').trim(), 1200);
+  }
+  return res;
+});
+
+ipcMain.handle('notes:delete', async (_event, payload) => {
+  const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  if (noteAnalysisTimers.has(noteId)) {
+    clearTimeout(noteAnalysisTimers.get(noteId));
+    noteAnalysisTimers.delete(noteId);
+  }
+  return getNotesStore().deleteNote(noteId);
+});
+
+ipcMain.handle('notes:get_analysis', async (_event, payload) => {
+  const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  const fresh = await ensureFreshNoteAnalysis(noteId);
+  if (!fresh || fresh.ok === false) return fresh;
+  return getNotesStore().getAnalysis(noteId);
+});
+
+ipcMain.handle('notes:get_citations', async (_event, payload) => {
+  const noteId = String((payload && payload.noteId) || '').trim();
+  const claimId = String((payload && payload.claimId) || '').trim();
+  return getNotesStore().getCitations(noteId, claimId);
+});
+
+ipcMain.handle('notes:create_reference', async (_event, payload) => {
+  const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  return createReferenceFromNote(noteId);
+});
 
 function createApplicationMenu() {
   const isMac = process.platform === 'darwin';

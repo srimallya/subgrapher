@@ -357,6 +357,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('browser:mail-event', (_event, data) => callback(data));
     },
   },
+  notes: {
+    list: () => ipcRenderer.invoke('notes:list'),
+    create: (payload = {}) => ipcRenderer.invoke('notes:create', payload || {}),
+    get: (noteId = '') => ipcRenderer.invoke('notes:get', { noteId }),
+    update: (noteId = '', patch = {}) => ipcRenderer.invoke('notes:update', { noteId, patch: patch || {} }),
+    delete: (noteId = '') => ipcRenderer.invoke('notes:delete', { noteId }),
+    getAnalysis: (noteId = '') => ipcRenderer.invoke('notes:get_analysis', { noteId }),
+    getCitations: (noteId = '', claimId = '') => ipcRenderer.invoke('notes:get_citations', { noteId, claimId }),
+    createReference: (noteId = '') => ipcRenderer.invoke('notes:create_reference', { noteId }),
+  },
   tabs: {
     create: (url) => ipcRenderer.invoke('tabs:create', url),
     close: (tabId) => ipcRenderer.invoke('tabs:close', tabId),
