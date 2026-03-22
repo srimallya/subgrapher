@@ -1591,9 +1591,11 @@ function buildProvisionalNoteClaims(markdown = '') {
           claim_text: trimmed,
           start_offset: start,
           end_offset: end,
-          status: 'uncertain',
+          status: 'insufficient_evidence',
+          verdict: 'insufficient_evidence',
           highlight_score: 0.34,
           top_score: 0.34,
+          truth_confidence: 0.34,
           provisional: true,
         });
       }
@@ -1644,86 +1646,35 @@ function clampUnit(value) {
 
 function getNoteClaimConfidence(claim = {}) {
   if (claim && claim.provisional) return 0.34;
-  const status = String((claim && claim.status) || '').trim();
-  const raw = Number((claim && claim.highlight_score) || (claim && claim.top_score) || 0);
+  const verdict = String((claim && (claim.verdict || claim.status)) || '').trim();
+  const raw = Number((claim && claim.truth_confidence) || (claim && claim.highlight_score) || (claim && claim.top_score) || 0);
   if (raw > 0) return clampUnit(raw);
-  if (status === 'supported') return 0.85;
-  if (status === 'uncertain') return 0.52;
-  if (status === 'contested') return 0.4;
+  if (verdict === 'supported') return 0.85;
+  if (verdict === 'contradicted') return 0.83;
+  if (verdict === 'mixed') return 0.58;
   return 0.22;
 }
 
 function getNoteClaimTone(claim = {}) {
   if (claim && claim.provisional) {
-    return { label: 'Checking', className: 'uncertain', guidance: 'This sentence looks factual. Source checking is still running.' };
+    return { label: 'Checking', className: 'mixed', guidance: 'This sentence looks factual. Evidence gathering is still running.' };
   }
-  const status = String((claim && claim.status) || '').trim();
-  const confidence = getNoteClaimConfidence(claim);
-  if (status === 'supported') {
-    return { label: 'Supported', className: 'supported', guidance: 'Good evidence found. You can still tighten the wording if the source is too broad.' };
+  const verdict = String((claim && (claim.verdict || claim.status)) || '').trim();
+  const explanation = normalizeWhitespace(String((claim && claim.explanation) || ''));
+  if (verdict === 'supported') {
+    return { label: 'Supported', className: 'supported', guidance: explanation || 'Current web reporting supports this wording.' };
   }
-  if (status === 'contested') {
-    return { label: 'Contested', className: 'contested', guidance: 'Sources disagree or point to different interpretations. Narrow the claim before trusting it.' };
+  if (verdict === 'contradicted') {
+    return { label: 'Contradicted', className: 'contradicted', guidance: explanation || 'Current web reporting contradicts this wording.' };
   }
-  if (status === 'uncertain') {
-    return { label: 'Partial', className: 'uncertain', guidance: 'The claim is close, but it needs more specificity to match solid evidence.' };
+  if (verdict === 'mixed') {
+    return { label: 'Mixed', className: 'mixed', guidance: explanation || 'Supporting and contradicting sources both match parts of this claim.' };
   }
-  if (confidence < 0.18) {
-    return { label: 'Unclear', className: 'no-evidence', guidance: 'This reads more like an opinion or broad impression than a checkable claim.' };
-  }
-  return { label: 'No evidence', className: 'no-evidence', guidance: 'No strong evidence matched this claim yet. Add specifics so the system can search more precisely.' };
-}
-
-function buildClaimReplacement(claim = {}, variant = 'source') {
-  const text = String((claim && claim.claim_text) || '').trim();
-  const base = text.replace(/\s+$/g, '').replace(/[.]+$/g, '').trim();
-  if (!base) return '';
-  if (variant === 'date') return `${base} in [year].`;
-  if (variant === 'metric') return `${base} measured by [metric] over [period].`;
-  if (variant === 'source') return `${base} according to [source].`;
-  if (variant === 'split') {
-    const chunks = base.split(/\s+\band\b\s+/i).map((item) => item.trim()).filter(Boolean);
-    if (chunks.length >= 2) return chunks.map((item) => `${item}.`).join('\n');
-    return `${base}.\n[Separate the comparison into a second sentence.]`;
-  }
-  return `${base}.`;
+  return { label: 'Insufficient evidence', className: 'insufficient', guidance: explanation || 'The available web evidence is not strong enough to confirm this wording yet.' };
 }
 
 function buildNoteClaimSuggestions(claim = {}) {
-  const text = String((claim && claim.claim_text) || '').trim();
-  const lower = text.toLowerCase();
-  const suggestions = [];
-  if (!String((claim && claim.time_text) || '').trim()) {
-    suggestions.push({
-      key: 'date',
-      label: 'Add date',
-      description: 'Anchor the statement to a year or period.',
-      replacement: buildClaimReplacement(claim, 'date'),
-    });
-  }
-  if (/\b(faster|slower|better|worse|more|less|best|worst|grew|fell)\b/.test(lower)) {
-    suggestions.push({
-      key: 'metric',
-      label: 'Add metric',
-      description: 'Explain what the comparison is measured by.',
-      replacement: buildClaimReplacement(claim, 'metric'),
-    });
-  }
-  suggestions.push({
-    key: 'source',
-    label: 'Name source',
-    description: 'Tie the claim to a source or publication.',
-    replacement: buildClaimReplacement(claim, 'source'),
-  });
-  if (/\band\b/i.test(lower)) {
-    suggestions.push({
-      key: 'split',
-      label: 'Split claim',
-      description: 'Break one broad sentence into narrower statements.',
-      replacement: buildClaimReplacement(claim, 'split'),
-    });
-  }
-  return suggestions.slice(0, 3);
+  return Array.isArray(claim && claim.rewrite_suggestions) ? claim.rewrite_suggestions.slice(0, 3) : [];
 }
 
 function getNoteCitationSourceKind(citation = {}) {
@@ -1764,34 +1715,30 @@ function getNoteCitationChunkText(citation = {}) {
 
 function renderNoteCitationItem(citation = {}) {
   const source = citation && citation.source ? citation.source : {};
-  const citationId = String((citation && citation.id) || '').trim();
   const publishedAt = Number(source.published_at || 0);
   const publishedText = publishedAt > 0 ? new Date(publishedAt).toLocaleDateString() : '';
   const provenance = getNoteCitationProvenanceLabel(citation);
   const relevance = getNoteCitationRelevanceReason(citation);
   const chunkText = getNoteCitationChunkText(citation);
+  const stance = String((citation && citation.stance) || '').trim() === 'contradict' ? 'contradict' : 'support';
   const meta = [provenance, publishedText].filter(Boolean).join(' · ');
   return `
-    <article class="notes-citation-item">
+    <article class="notes-citation-item ${escapeHtml(stance)}">
       <strong>${escapeHtml(String(source.title || source.url || 'Source'))}</strong>
       ${meta ? `<div class="muted small">${escapeHtml(meta)}</div>` : ''}
-      <button
-        type="button"
-        class="notes-citation-source-btn"
-        data-note-citation-toggle="${escapeHtml(citationId)}"
-        aria-expanded="false"
-      >${escapeHtml(String(source.url || ''))}</button>
+      <div class="notes-citation-stance ${escapeHtml(stance)}">${escapeHtml(stance === 'contradict' ? 'Contradicting source' : 'Supporting source')}</div>
+      <div class="notes-citation-chunk">${escapeHtml(chunkText)}</div>
+      <button type="button" class="notes-citation-source-btn">${escapeHtml(String(source.url || ''))}</button>
       <div class="notes-citation-actions-row">
         <button
           type="button"
           class="notes-citation-open-btn"
-          data-note-citation-open="${escapeHtml(citationId)}"
+          data-note-citation-open="${escapeHtml(String((citation && citation.id) || ''))}"
           data-note-citation-url="${escapeHtml(String(source.url || ''))}"
           data-note-citation-title="${escapeHtml(String(source.title || source.url || 'Source'))}"
           data-note-citation-excerpt="${escapeHtml(chunkText.slice(0, 600))}"
         >Open</button>
       </div>
-      <div class="notes-citation-chunk hidden" data-note-citation-chunk="${escapeHtml(citationId)}">${escapeHtml(chunkText)}</div>
       <div class="muted small">${escapeHtml(relevance)}</div>
     </article>
   `;
@@ -1810,30 +1757,9 @@ function renderNoteCitationSection(title = '', citations = []) {
 
 function getHelpfulLeadCitations(citations = []) {
   return (Array.isArray(citations) ? citations : [])
-    .filter((citation) => {
-      const score = Number((citation && citation.score) || 0);
-      const lexical = Number((citation && citation.lexical_score) || 0);
-      const semantic = Number((citation && citation.semantic_score) || 0);
-      const queryConfidence = Number((citation && citation.query_confidence) || 0);
-      const intent = getNoteCitationSearchIntent(citation);
-      if (intent === 'challenge' || intent === 'official') {
-        return (lexical >= 0.14 && semantic >= 0.18) || queryConfidence >= 0.5;
-      }
-      return (score >= 0.34 && lexical >= 0.18 && semantic >= 0.2) || queryConfidence >= 0.56;
-    })
-    .sort((a, b) => {
-      const intentA = getNoteCitationSearchIntent(a);
-      const intentB = getNoteCitationSearchIntent(b);
-      const rank = (intent) => {
-        if (intent === 'challenge') return 0;
-        if (intent === 'official') return 1;
-        return 2;
-      };
-      const kindDiff = rank(intentA) - rank(intentB);
-      if (kindDiff !== 0) return kindDiff;
-      return Number((b && b.score) || 0) - Number((a && a.score) || 0);
-    })
-    .slice(0, 3);
+    .filter((citation) => Number((citation && citation.score) || 0) >= 0.28)
+    .sort((a, b) => Number((b && b.score) || 0) - Number((a && a.score) || 0))
+    .slice(0, 4);
 }
 
 function applyNoteClaimSuggestion(claimId = '', replacement = '') {
@@ -1902,7 +1828,7 @@ function buildNoteCitationSummaryHtml(claim = {}, options = {}) {
       <section class="notes-claim-actions">
         ${suggestions.map((item) => `
           <button type="button" class="notes-claim-action-btn" data-claim-action="${escapeHtml(String(item.key || ''))}" data-claim-id="${escapeHtml(String((claim && claim.id) || ''))}" data-claim-replacement="${escapeHtml(String(item.replacement || ''))}">
-            <strong>${escapeHtml(String(item.label || 'Adjust'))}</strong>
+            <strong>${escapeHtml(String(item.label || 'Rewrite'))}</strong>
             <span>${escapeHtml(String(item.description || ''))}</span>
           </button>
         `).join('')}
@@ -2017,8 +1943,8 @@ function computeNoteStatusText() {
     return message || 'Saved';
   }
   if (summary && Number(summary.claim_count || 0) > 0) {
-    if (Number(summary.uncertain_count || 0) > 0 || Number(summary.no_evidence_count || 0) > 0) {
-      return 'Evidence partial';
+    if (Number(summary.contradicted_count || 0) > 0 || Number(summary.mixed_count || 0) > 0 || Number(summary.insufficient_evidence_count || 0) > 0) {
+      return 'Needs review';
     }
     return 'Sources updated';
   }
@@ -2062,16 +1988,17 @@ function renderNoteHighlightLayer() {
     layer.innerHTML = '';
     return;
   }
-  const content = String(input.value || '');
+  const content = String(getActiveNoteDraftBody() || input.value || '');
   const claims = getRenderableNoteClaims();
-  const useLayer = claims.length > 0;
-  pane.classList.toggle('marker-visualized', useLayer);
+  const useLayer = claims.length > 0 && !!content;
+  let cursor = 0;
+  let html = '';
+  let markCount = 0;
   if (!useLayer) {
+    pane.classList.remove('marker-visualized');
     layer.innerHTML = '';
     return;
   }
-  let cursor = 0;
-  let html = '';
   claims.forEach((claim) => {
     const start = clamp(Math.round(Number((claim && claim.start_offset) || 0)), 0, content.length);
     const end = clamp(Math.round(Number((claim && claim.end_offset) || 0)), start, content.length);
@@ -2079,10 +2006,12 @@ function renderNoteHighlightLayer() {
     html += escapeHtml(content.slice(cursor, start));
     const tone = getNoteClaimTone(claim);
     html += `<mark class="notes-highlight-${tone.className}" data-claim-id="${escapeHtml(String((claim && claim.id) || ''))}">${escapeHtml(content.slice(start, end))}</mark>`;
+    markCount += 1;
     cursor = end;
   });
   html += escapeHtml(content.slice(cursor));
-  layer.innerHTML = html || '&#8203;';
+  pane.classList.toggle('marker-visualized', markCount > 0);
+  layer.innerHTML = markCount > 0 ? (html || '&#8203;') : '';
   layer.scrollTop = input.scrollTop;
   layer.scrollLeft = input.scrollLeft;
 }
@@ -2460,8 +2389,8 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
   titleNode.textContent = String(claim.claim_text || 'Sources');
   bodyNode.innerHTML = buildNoteCitationSummaryHtml(claim, {
     stateMessage: claim.provisional
-      ? 'Source checking is still running for this claim.'
-      : 'Loading sources...',
+      ? 'Evidence gathering is still running for this claim.'
+      : 'Loading evidence...',
   });
   popover.classList.remove('hidden');
   positionNoteCitationPopover(anchorEl);
@@ -2476,7 +2405,11 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
     loading: !claim.provisional,
   };
   if (claim.provisional) return;
-  const res = await notesApi.getCitations(noteId, String(claim.id || '').trim());
+  const res = await notesApi.getCitations(noteId, String(claim.id || '').trim(), {
+    claim_text: String(claim.claim_text || ''),
+    start_offset: Number((claim && claim.start_offset) || -1),
+    end_offset: Number((claim && claim.end_offset) || -1),
+  });
   const popoverState = state.noteCitationPopover || {};
   if (!popoverState.open || Number(popoverState.requestSeq || 0) !== requestSeq) return;
   state.noteCitationPopover = {
@@ -2485,8 +2418,8 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
   };
   if (!res || !res.ok) {
     const fallbackMessage = state.noteAnalysisPending || String((res && res.message) || '').trim() === 'Claim not found.'
-      ? 'Source scan is still running for this claim. Check back after the note finishes reanalyzing.'
-      : String((res && res.message) || 'Unable to load sources.');
+      ? 'Evidence refresh is still running for this claim.'
+      : String((res && res.message) || 'Unable to load evidence.');
     bodyNode.innerHTML = buildNoteCitationSummaryHtml(claim, { stateMessage: fallbackMessage });
     return;
   }
@@ -2500,41 +2433,27 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null) {
     claimEndOffset: Number((resolvedClaim && resolvedClaim.end_offset) || (claim && claim.end_offset) || -1),
   };
   titleNode.textContent = String((resolvedClaim && resolvedClaim.claim_text) || claim.claim_text || 'Sources');
-  const tone = getNoteClaimTone(resolvedClaim || {});
-  const headerHtml = buildNoteCitationSummaryHtml(resolvedClaim);
-  const eligibleCitations = citations.filter((citation) => {
+  const headerHtml = buildNoteCitationSummaryHtml(resolvedClaim, {
+    stateMessage: String((res && res.analysis_state) || '').trim() === 'refreshing' ? 'Updating evidence...' : '',
+  });
+  const eligibleCitations = getHelpfulLeadCitations(citations.filter((citation) => {
     const kind = getNoteCitationSourceKind(citation);
     return !kind || ['explicit_url', 'web_search', 'official_search', 'challenge_search'].includes(kind);
-  });
-  const supportingCitations = eligibleCitations.filter((citation) => getNoteCitationSearchIntent(citation) === 'support');
-  const officialCitations = eligibleCitations.filter((citation) => getNoteCitationSearchIntent(citation) === 'official');
-  const contrarianCitations = eligibleCitations.filter((citation) => getNoteCitationSearchIntent(citation) === 'challenge');
-  const helpfulSupport = getHelpfulLeadCitations(supportingCitations);
-  const helpfulOfficials = getHelpfulLeadCitations(officialCitations);
-  const helpfulContrarian = getHelpfulLeadCitations(contrarianCitations);
+  }));
+  const supportingCitations = eligibleCitations.filter((citation) => String((citation && citation.stance) || '').trim() !== 'contradict');
+  const contradictingCitations = eligibleCitations.filter((citation) => String((citation && citation.stance) || '').trim() === 'contradict');
   if (!eligibleCitations.length) {
-    const noEvidenceMessage = state.noteAnalysisPending
-      ? 'Source scan is still running for this claim.'
+    const noEvidenceMessage = String((res && res.analysis_state) || '').trim() === 'refreshing'
+      ? 'Updating evidence for this claim.'
       : 'No evidence available for this passage yet.';
     bodyNode.innerHTML = `${headerHtml}<div class="notes-citation-state muted">${escapeHtml(noEvidenceMessage)}</div>`;
     return;
   }
-  if (tone.className === 'no-evidence' && helpfulSupport.length === 0 && helpfulOfficials.length === 0 && helpfulContrarian.length === 0) {
-    bodyNode.innerHTML = `${headerHtml}<div class="notes-citation-state muted">No strong web evidence was found. Tighten the claim first, then search again.</div>`;
-    return;
-  }
-  const supportingSection = tone.className === 'no-evidence' ? helpfulSupport : supportingCitations.slice(0, 3);
-  const officialSection = tone.className === 'no-evidence' ? helpfulOfficials : officialCitations.slice(0, 2);
-  const contrarianSection = tone.className === 'no-evidence' ? helpfulContrarian : contrarianCitations.slice(0, 2);
   const sectionsHtml = [
-    renderNoteCitationSection('Supporting evidence', supportingSection),
-    renderNoteCitationSection('Official source', officialSection),
-    renderNoteCitationSection('Contrarian result', contrarianSection),
+    renderNoteCitationSection('Supporting evidence', supportingCitations),
+    renderNoteCitationSection('Contradicting evidence', contradictingCitations),
   ].filter(Boolean).join('');
-  const fallbackMessage = tone.className === 'no-evidence'
-    ? '<div class="notes-citation-state muted">No strong web evidence was found, but these links may help you tighten the claim.</div>'
-    : '';
-  bodyNode.innerHTML = `${headerHtml}${sectionsHtml || fallbackMessage}`;
+  bodyNode.innerHTML = `${headerHtml}${sectionsHtml}`;
   positionNoteCitationPopover();
 }
 
@@ -14028,6 +13947,13 @@ function bindControls() {
     } else {
       closeNoteCitationPopover();
     }
+  });
+  e('notes-highlight-layer')?.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target.closest('mark[data-claim-id]') : null;
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openNoteCitationPopover(String(target.getAttribute('data-claim-id') || '').trim(), target);
   });
   noteInput?.addEventListener('keydown', async (event) => {
     if ((event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 's') {

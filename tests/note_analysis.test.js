@@ -77,8 +77,9 @@ test('note analysis extracts URLs, finds factual claims, and ranks evidence', as
   assert.ok(result.sources.every((source) => source.source_kind !== 'local_evidence'));
   assert.ok(result.passages.length >= 1);
   assert.ok(result.citations.length >= 1);
-  assert.ok(['supported', 'uncertain', 'contested', 'no_evidence'].includes(result.claims[0].status));
+  assert.ok(['supported', 'contradicted', 'mixed', 'insufficient_evidence'].includes(result.claims[0].status));
   assert.ok(Number(result.claims[0].top_score || 0) > 0);
+  assert.ok(Number(result.claims[0].truth_confidence || 0) > 0);
 });
 
 test('compound factual sentences are split into smaller claim spans', async () => {
@@ -246,7 +247,7 @@ test('pipeline distinguishes false, partial, and correct claims with determinist
     webSearch: async ({ query }) => {
       const normalized = String(query || '').toLowerCase();
       if (normalized.includes('novaai acquired nasa')) {
-        if (normalized.includes('rumor') || normalized.includes('not released') || normalized.includes('criticism')) {
+        if (normalized.includes('rumor') || normalized.includes('not released') || normalized.includes('criticism') || normalized.includes('false') || normalized.includes('denied')) {
           return {
             results: [{
               title: 'No acquisition announcement',
@@ -357,9 +358,11 @@ test('pipeline distinguishes false, partial, and correct claims with determinist
   }, {});
 
   assert.equal(falseResult.claims.length, 1);
-  assert.equal(falseResult.claims[0].status, 'no_evidence');
+  assert.equal(falseResult.claims[0].status, 'contradicted');
   assert.equal(partialResult.claims.length, 1);
-  assert.equal(partialResult.claims[0].status, 'uncertain');
+  assert.equal(partialResult.claims[0].status, 'mixed');
   assert.equal(correctResult.claims.length, 1);
   assert.equal(correctResult.claims[0].status, 'supported');
+  assert.ok(Array.isArray(falseResult.claims[0].rewrite_suggestions));
+  assert.ok(Array.isArray(correctResult.claims[0].rewrite_suggestions));
 });

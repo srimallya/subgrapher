@@ -3590,13 +3590,19 @@ body.chat-collapsed #chat-panel-resizer {
   inset: 0;
   margin: 0;
   padding: 12px;
+  box-sizing: border-box;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+  word-break: normal;
   line-height: 1.55;
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: normal;
+  tab-size: 4;
   color: var(--text);
   pointer-events: none;
-  z-index: 0;
+  z-index: 2;
 }
 
 .notes-highlight-layer mark {
@@ -3604,6 +3610,8 @@ body.chat-collapsed #chat-panel-resizer {
   color: inherit;
   background: rgba(177, 138, 83, 0.45);
   box-shadow: inset 0 0 0 1px rgba(177, 138, 83, 0.32);
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .notes-highlight-layer mark.notes-highlight-supported {
@@ -3611,17 +3619,17 @@ body.chat-collapsed #chat-panel-resizer {
   box-shadow: inset 0 0 0 1px rgba(95, 143, 107, 0.36);
 }
 
-.notes-highlight-layer mark.notes-highlight-uncertain {
+.notes-highlight-layer mark.notes-highlight-mixed {
   background: rgba(180, 135, 62, 0.32);
   box-shadow: inset 0 0 0 1px rgba(180, 135, 62, 0.34);
 }
 
-.notes-highlight-layer mark.notes-highlight-contested {
+.notes-highlight-layer mark.notes-highlight-contradicted {
   background: rgba(184, 92, 92, 0.32);
   box-shadow: inset 0 0 0 1px rgba(184, 92, 92, 0.36);
 }
 
-.notes-highlight-layer mark.notes-highlight-no-evidence {
+.notes-highlight-layer mark.notes-highlight-insufficient {
   background: rgba(135, 88, 111, 0.26);
   box-shadow: inset 0 0 0 1px rgba(135, 88, 111, 0.34);
 }
@@ -3674,17 +3682,17 @@ body.chat-collapsed #chat-panel-resizer {
   box-shadow: inset 0 -1px 0 rgba(95, 143, 107, 0.5);
 }
 
-.notes-preview-content .notes-inline-citation.uncertain {
+.notes-preview-content .notes-inline-citation.mixed {
   background: rgba(180, 135, 62, 0.18);
   box-shadow: inset 0 -1px 0 rgba(180, 135, 62, 0.48);
 }
 
-.notes-preview-content .notes-inline-citation.contested {
+.notes-preview-content .notes-inline-citation.contradicted {
   background: rgba(184, 92, 92, 0.16);
   box-shadow: inset 0 -1px 0 rgba(184, 92, 92, 0.5);
 }
 
-.notes-preview-content .notes-inline-citation.no-evidence {
+.notes-preview-content .notes-inline-citation.insufficient {
   background: rgba(135, 88, 111, 0.16);
   box-shadow: inset 0 -1px 0 rgba(135, 88, 111, 0.46);
 }
@@ -3765,15 +3773,15 @@ body.chat-collapsed #chat-panel-resizer {
   background: #5f8f6b;
 }
 
-.notes-claim-spectrum-fill.uncertain {
+.notes-claim-spectrum-fill.mixed {
   background: #b4873e;
 }
 
-.notes-claim-spectrum-fill.contested {
+.notes-claim-spectrum-fill.contradicted {
   background: #b85c5c;
 }
 
-.notes-claim-spectrum-fill.no-evidence {
+.notes-claim-spectrum-fill.insufficient {
   background: #87586f;
 }
 
@@ -3810,6 +3818,14 @@ body.chat-collapsed #chat-panel-resizer {
   background: #202020;
 }
 
+.notes-citation-item.support {
+  border-color: rgba(95, 143, 107, 0.45);
+}
+
+.notes-citation-item.contradict {
+  border-color: rgba(184, 92, 92, 0.45);
+}
+
 .notes-citation-section {
   display: grid;
   gap: 8px;
@@ -3826,6 +3842,19 @@ body.chat-collapsed #chat-panel-resizer {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: #202020;
+}
+
+.notes-citation-stance {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.notes-citation-stance.support {
+  color: #8db394;
+}
+
+.notes-citation-stance.contradict {
+  color: #d78989;
 }
 
 .notes-citation-source-btn {

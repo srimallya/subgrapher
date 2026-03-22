@@ -364,7 +364,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     update: (noteId = '', patch = {}) => ipcRenderer.invoke('notes:update', { noteId, patch: patch || {} }),
     delete: (noteId = '') => ipcRenderer.invoke('notes:delete', { noteId }),
     getAnalysis: (noteId = '') => ipcRenderer.invoke('notes:get_analysis', { noteId }),
-    getCitations: (noteId = '', claimId = '') => ipcRenderer.invoke('notes:get_citations', { noteId, claimId }),
+    getCitations: (noteId = '', claimId = '', claim = null) => ipcRenderer.invoke('notes:get_citations', { noteId, claimId, claim: claim && typeof claim === 'object' ? claim : null }),
     createReference: (noteId = '') => ipcRenderer.invoke('notes:create_reference', { noteId }),
   },
   tabs: {

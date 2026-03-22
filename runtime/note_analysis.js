@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { hashEmbedText } = require('./embedding_runtime');
 
-const ANALYZER_VERSION = 'note-analyzer-v5';
+const ANALYZER_VERSION = 'note-analyzer-v6';
 const NOTE_EVIDENCE_MODE = 'web_only';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HIGHLIGHT_THRESHOLD = 0.72;
@@ -12,8 +12,16 @@ const MAX_WEB_RESULTS_PER_CLAIM = 3;
 const MAX_FETCHES_PER_NOTE = 18;
 const MAX_CONCURRENCY = 2;
 const VERB_PATTERN = /\b(is|are|was|were|has|have|had|began|begin|beginning|started|start|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|broke|break|broken|wounded|wound|redirected|redirect|deployed|deploy|sent|send|targeted|target|carried|carry|carrying|kill|kills|killed)\b/i;
+const VERB_PATTERN_GLOBAL = new RegExp(VERB_PATTERN.source, 'ig');
 const WEB_NOTE_SOURCE_KINDS = new Set(['explicit_url', 'web_search', 'official_search', 'challenge_search']);
 const QUERY_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'their', 'there', 'about', 'according', 'over', 'than']);
+const CONTRADICTION_PATTERNS = [
+  /\b(no official record|no evidence|not true|false|falsely|fabricated|debunked|denied|denies|deny|did not|didn't|not describe|never happened|unconfirmed|rumor)\b/i,
+  /\b(but|however|while)\b.{0,60}\b(not|never|denied|did not|didn't|no)\b/i,
+];
+const HIGH_AUTHORITY_PATTERNS = [
+  /(^|\/\/)(www\.)?(reuters|apnews|ap|axios|bbc|nytimes|washingtonpost|wsj|ft)\./i,
+];
 
 const searchCache = new Map();
 const fetchCache = new Map();
@@ -44,6 +52,12 @@ function normalizeClaimText(text = '') {
   return normalizeWhitespace(String(text || '').toLowerCase().replace(/https?:\/\/[^\s]+/g, ' ').replace(/[^a-z0-9\s]/g, ' '));
 }
 
+function clampUnit(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.min(1, numeric));
+}
+
 function tokenize(text = '') {
   return normalizeClaimText(text).split(' ').filter(Boolean);
 }
@@ -71,6 +85,50 @@ function cosineSimilarity(vecA = [], vecB = []) {
 function yearTokens(text = '') {
   const matches = String(text || '').match(/\b(19|20)\d{2}\b/g);
   return Array.isArray(matches) ? matches.map((item) => String(item)) : [];
+}
+
+function extractNamedEntityTerms(text = '') {
+  const raw = String(text || '');
+  const out = [];
+  const matches = raw.match(/\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}|[A-Z]{2,}|[A-Z][a-z]+-[A-Z0-9]+)\b/g);
+  (Array.isArray(matches) ? matches : []).forEach((item) => {
+    const normalized = normalizeWhitespace(item);
+    if (normalized && normalized.length >= 2) out.push(normalized);
+  });
+  return Array.from(new Set(out));
+}
+
+function namedEntityCoverageScore(claimText = '', passageText = '') {
+  const terms = extractNamedEntityTerms(claimText);
+  if (terms.length === 0) return 0.5;
+  const lowerPassage = String(passageText || '').toLowerCase();
+  const hits = terms.filter((term) => lowerPassage.includes(term.toLowerCase())).length;
+  return hits / terms.length;
+}
+
+function contradictionCueScore(claimText = '', passageText = '') {
+  const text = normalizeWhitespace(`${claimText} ${passageText}`);
+  if (!text) return 0;
+  let score = 0;
+  CONTRADICTION_PATTERNS.forEach((pattern) => {
+    if (pattern.test(text)) score += 0.34;
+  });
+  if (/\b(not|no|never|denied|false|rumor)\b/i.test(String(passageText || ''))) score += 0.22;
+  if (/\b(every|all|always|never|only)\b/i.test(String(claimText || '')) && /\b(in stages|staged|rather than|not every|not all|partial|phased|rollout happened in stages)\b/i.test(String(passageText || ''))) {
+    score += 0.48;
+  }
+  return clampUnit(score);
+}
+
+function exactnessScore(claimText = '', passageText = '') {
+  const normalizedClaim = normalizeClaimText(claimText);
+  const normalizedPassage = normalizeClaimText(passageText);
+  if (!normalizedClaim || !normalizedPassage) return 0;
+  if (normalizedPassage.includes(normalizedClaim)) return 1;
+  const claimTerms = tokenize(claimText).filter((item) => item.length >= 4);
+  const phrase = claimTerms.slice(0, 6).join(' ');
+  if (phrase && normalizedPassage.includes(phrase)) return 0.72;
+  return 0;
 }
 
 function lexicalOverlapScore(claimText = '', passageText = '') {
@@ -105,6 +163,30 @@ function chunkText(text = '', size = PASSAGE_CHUNK_SIZE, overlap = PASSAGE_OVERL
     start = Math.max(start + 1, end - overlap);
   }
   return out;
+}
+
+function sourceAuthorityScore(source = {}, claim = {}) {
+  const url = String((source && source.url) || '').trim();
+  const title = String((source && source.title) || '').trim();
+  const sourceKind = String((source && source.source_kind) || '').trim();
+  if (sourceKind === 'official_search' || sourceKind === 'explicit_url') return 0.95;
+  if (HIGH_AUTHORITY_PATTERNS.some((pattern) => pattern.test(url))) return 0.92;
+  if (/\b(reuters|associated press|ap news|axios|bbc|new york times|washington post|wall street journal|financial times)\b/i.test(title)) return 0.9;
+  if (isConflictClaim(String((claim && claim.claim_text) || ''))) return 0.4;
+  return 0.3;
+}
+
+function sourceFreshnessScore(source = {}, claim = {}) {
+  const ts = Number((source && source.published_at) || (source && source.fetched_at) || 0);
+  if (!ts) return 0.2;
+  const ageDays = Math.max(0, (nowTs() - ts) / DAY_MS);
+  const currentEvent = isConflictClaim(String((claim && claim.claim_text) || ''))
+    || /\b(now|today|currently|latest|ongoing)\b/i.test(String((claim && claim.claim_text) || ''));
+  if (!currentEvent) return ageDays <= 365 ? 0.45 : 0.25;
+  if (ageDays <= 7) return 1;
+  if (ageDays <= 30) return 0.78;
+  if (ageDays <= 90) return 0.52;
+  return 0.24;
 }
 
 function buildHash(value = '') {
@@ -206,12 +288,49 @@ function splitCompoundClaimSegments(sentenceText = '', startOffset = 0) {
   }
 
   walk(text, Number(startOffset) || 0);
-  return segments;
+  const derived = [];
+  const whenMatch = text.match(/\bwhen\s+(.+)$/i);
+  if (whenMatch && VERB_PATTERN.test(String(whenMatch[1] || ''))) {
+    const local = text.toLowerCase().indexOf(String(whenMatch[1] || '').toLowerCase());
+    if (local >= 0) {
+      derived.push({
+        start_offset: Number(startOffset) + local,
+        end_offset: Number(startOffset) + local + String(whenMatch[1] || '').trim().length,
+        claim_text: normalizeWhitespace(String(whenMatch[1] || '')),
+      });
+    }
+  }
+  const butMatch = text.match(/\bbut\s+(.+)$/i);
+  if (butMatch && VERB_PATTERN.test(String(butMatch[1] || ''))) {
+    const local = text.toLowerCase().indexOf(String(butMatch[1] || '').toLowerCase());
+    if (local >= 0) {
+      derived.push({
+        start_offset: Number(startOffset) + local,
+        end_offset: Number(startOffset) + local + String(butMatch[1] || '').trim().length,
+        claim_text: normalizeWhitespace(String(butMatch[1] || '')),
+      });
+    }
+  }
+  return dedupeBy(segments.concat(derived), (item) => `${item.start_offset}:${item.end_offset}:${normalizeClaimText(item.claim_text)}`);
 }
 
 function parseClaimStructure(claimText = '') {
   const normalized = normalizeWhitespace(claimText);
-  const verbMatch = normalized.match(VERB_PATTERN);
+  VERB_PATTERN_GLOBAL.lastIndex = 0;
+  const matches = Array.from(normalized.matchAll(VERB_PATTERN_GLOBAL));
+  const verbMatch = matches
+    .map((match) => {
+      const predicateText = String(match[0] || '').trim().toLowerCase();
+      let weight = 0.5;
+      if (/\b(kill|killed|kills|attack|attacked|attacking|strike|strikes|struck|bombed|acquired|released|launched|announced|sued)\b/i.test(predicateText)) weight = 1;
+      else if (/\b(began|begin|started|start|reported|reports|said|says|showed|shows|is|are|was|were)\b/i.test(predicateText)) weight = 0.2;
+      return {
+        value: match,
+        weight,
+        index: Number(match.index || 0),
+      };
+    })
+    .sort((a, b) => (b.weight - a.weight) || (b.index - a.index))[0];
   if (!verbMatch) {
     return {
       subject_text: normalized,
@@ -219,8 +338,8 @@ function parseClaimStructure(claimText = '') {
       object_text: '',
     };
   }
-  const predicateText = String(verbMatch[0] || '').trim();
-  const idx = verbMatch.index || 0;
+  const predicateText = String((verbMatch.value && verbMatch.value[0]) || '').trim();
+  const idx = Number((verbMatch.value && verbMatch.value.index) || 0);
   return {
     subject_text: normalizeWhitespace(normalized.slice(0, idx)),
     predicate_text: predicateText,
@@ -339,6 +458,12 @@ function buildPredicateTerms(claim = {}) {
   return buildCoverageTerms(predicate);
 }
 
+function buildHeadlineStyleQuery(claim = {}) {
+  const entities = extractNamedEntityTerms(String((claim && claim.claim_text) || '')).slice(0, 4);
+  const tokens = buildCoverageTerms(String((claim && claim.claim_text) || '')).slice(0, 10);
+  return normalizeWhitespace(entities.concat(tokens).join(' '));
+}
+
 function scoreSearchCandidate(claim = {}, plan = {}, result = {}) {
   const title = String((result && result.title) || '');
   const snippet = String((result && result.snippet) || '');
@@ -360,13 +485,15 @@ function scoreSearchCandidate(claim = {}, plan = {}, result = {}) {
   const objectCoverage = tokenCoverageScore(buildCoverageTerms(String((claim && claim.object_text) || '')), combined);
   const predicateCoverage = tokenCoverageScore(buildPredicateTerms(claim), combined);
   const timeScore = timeMatchScore(String((claim && claim.claim_text) || ''), combined);
+  const entityCoverage = namedEntityCoverageScore(String((claim && claim.claim_text) || ''), combined);
   const queryConfidence = Math.max(0, Math.min(1,
-    (0.24 * semanticScore)
-    + (0.18 * lexicalScore)
-    + (0.22 * subjectCoverage)
-    + (0.14 * objectCoverage)
-    + (0.12 * predicateCoverage)
-    + (0.10 * timeScore)
+    (0.22 * semanticScore)
+    + (0.16 * lexicalScore)
+    + (0.2 * subjectCoverage)
+    + (0.12 * objectCoverage)
+    + (0.1 * predicateCoverage)
+    + (0.1 * timeScore)
+    + (0.1 * entityCoverage)
   ));
   return {
     query_confidence: queryConfidence,
@@ -376,6 +503,7 @@ function scoreSearchCandidate(claim = {}, plan = {}, result = {}) {
     object_coverage: objectCoverage,
     predicate_coverage: predicateCoverage,
     time_score: timeScore,
+    entity_coverage: entityCoverage,
     source_kind: String((plan && plan.source_kind) || 'web_search'),
     search_intent: String((plan && plan.intent) || 'support'),
   };
@@ -429,9 +557,14 @@ function buildClaimSearchPlans(claim = {}) {
   if (subject || object) {
     pushPlan(`${subject} ${object} official announcement ${time}`, 'official_search', 'official', 0.36);
     pushPlan(`${subject} ${object} official blog ${time}`, 'official_search', 'official', 0.34);
+    pushPlan(`${subject} ${object} denied ${time}`, 'challenge_search', 'challenge', 0.3);
+    pushPlan(`${subject} ${predicate} ${object} false`, 'challenge_search', 'challenge', 0.28);
+    pushPlan(`${subject} ${object} rumor ${time}`, 'challenge_search', 'challenge', 0.28);
   }
   if (baseQuery) {
     pushPlan(baseQuery, 'web_search', 'support', 0.34);
+    pushPlan(claimText, 'web_search', 'support', 0.32);
+    pushPlan(buildHeadlineStyleQuery(claim), 'web_search', 'support', 0.3);
     pushPlan(`${subject} ${object} ${time}`, 'web_search', 'support', 0.32);
   }
   if (anchor && time) {
@@ -463,10 +596,79 @@ function summarizeAnalysis(claims = []) {
   return {
     claim_count: claims.length,
     supported_count: claims.filter((item) => item.status === 'supported').length,
-    contested_count: claims.filter((item) => item.status === 'contested').length,
-    uncertain_count: claims.filter((item) => item.status === 'uncertain').length,
-    no_evidence_count: claims.filter((item) => item.status === 'no_evidence').length,
+    contested_count: claims.filter((item) => item.status === 'mixed').length,
+    uncertain_count: claims.filter((item) => item.status === 'contradicted').length,
+    no_evidence_count: claims.filter((item) => item.status === 'insufficient_evidence').length,
   };
+}
+
+function firstSentence(text = '') {
+  const normalized = normalizeWhitespace(text);
+  if (!normalized) return '';
+  const match = normalized.match(/[^.!?]+[.!?]?/);
+  return normalizeWhitespace(String((match && match[0]) || normalized));
+}
+
+function buildClaimExplanation(claim = {}, topSupport = null, topContradict = null) {
+  const supportTitle = String((topSupport && topSupport.source && topSupport.source.title) || '').trim();
+  const contradictTitle = String((topContradict && topContradict.source && topContradict.source.title) || '').trim();
+  if (claim.status === 'supported') {
+    return supportTitle
+      ? `Multiple web sources support this wording, led by ${supportTitle}.`
+      : 'Multiple web sources support this wording.';
+  }
+  if (claim.status === 'contradicted') {
+    return contradictTitle
+      ? `Current reporting contradicts this wording, led by ${contradictTitle}.`
+      : 'Current reporting contradicts this wording.';
+  }
+  if (claim.status === 'mixed') {
+    return 'Supporting and contradicting sources both match parts of this claim.';
+  }
+  return 'The available web evidence is too weak or incomplete to confirm this wording yet.';
+}
+
+function buildRewriteSuggestions(claim = {}, topSupport = null, topContradict = null) {
+  const suggestions = [];
+  const claimText = String((claim && claim.claim_text) || '').trim();
+  if (!claimText) return suggestions;
+  if (claim.status === 'contradicted' && topContradict) {
+    const replacement = firstSentence(String((topContradict && topContradict.passage && topContradict.passage.passage_text) || (topContradict && topContradict.excerpt) || ''));
+    if (replacement) {
+      suggestions.push({
+        key: 'correct',
+        label: 'Use corrected wording',
+        description: 'Replace the claim with wording grounded in the strongest contradicting source.',
+        replacement,
+      });
+    }
+  }
+  if (claim.status === 'supported' && topSupport) {
+    const sourceTitle = String((topSupport && topSupport.source && topSupport.source.title) || 'the cited source').trim();
+    const replacement = /\baccording to\b/i.test(claimText)
+      ? ''
+      : `${claimText.replace(/\s+$/g, '').replace(/[.]+$/g, '')}, according to ${sourceTitle}.`;
+    if (replacement && replacement.length > claimText.length + 8) {
+      suggestions.push({
+        key: 'attribute',
+        label: 'Add attribution',
+        description: 'Tighten the sentence by tying it to the strongest supporting source.',
+        replacement,
+      });
+    }
+  }
+  if ((claim.status === 'mixed' || claim.status === 'insufficient_evidence') && topSupport) {
+    const replacement = firstSentence(String((topSupport && topSupport.passage && topSupport.passage.passage_text) || (topSupport && topSupport.excerpt) || ''));
+    if (replacement) {
+      suggestions.push({
+        key: 'narrow',
+        label: 'Use narrower wording',
+        description: 'Replace the claim with the strongest evidence-backed wording currently available.',
+        replacement,
+      });
+    }
+  }
+  return suggestions.slice(0, 3);
 }
 
 function createNoteAnalysisEngine(options = {}) {
@@ -529,9 +731,14 @@ function createNoteAnalysisEngine(options = {}) {
           ...structure,
           modality: factuality.modality,
           factuality: factuality.factuality,
-          status: 'no_evidence',
+          status: 'insufficient_evidence',
           top_score: 0,
           highlight_score: 0,
+          truth_confidence: 0,
+          support_confidence: 0,
+          contradict_confidence: 0,
+          explanation: '',
+          rewrite_suggestions: [],
         };
         return claim;
       }));
@@ -781,8 +988,13 @@ function createNoteAnalysisEngine(options = {}) {
           const semanticScore = cosineSimilarity(claimVector, entry.passageVector);
           const lexicalScore = lexicalOverlapScore(claim.claim_text, entry.passage.passage_text);
           const timeScore = timeMatchScore(claim.claim_text, entry.passage.passage_text);
+          const entityScore = namedEntityCoverageScore(claim.claim_text, entry.passage.passage_text);
+          const exactScore = exactnessScore(claim.claim_text, entry.passage.passage_text);
+          const contradictionScore = contradictionCueScore(claim.claim_text, entry.passage.passage_text);
           const searchIntent = getSearchIntentForSourceKind(entry.source && entry.source.source_kind);
           const queryConfidence = Number((entry.source && entry.source.query_confidence) || 0) || 0;
+          const authorityScore = sourceAuthorityScore(entry.source, claim);
+          const freshnessScore = sourceFreshnessScore(entry.source, claim);
           return {
             claim,
             source: entry.source,
@@ -792,13 +1004,18 @@ function createNoteAnalysisEngine(options = {}) {
             semantic_score: semanticScore,
             lexical_score: lexicalScore,
             time_score: timeScore,
+            entity_score: entityScore,
+            exact_score: exactScore,
+            contradiction_score: contradictionScore,
+            authority_score: authorityScore,
+            freshness_score: freshnessScore,
           };
         })
-        .filter((entry) => entry.source && (entry.semantic_score > 0.16 || entry.lexical_score > 0.1 || entry.query_confidence >= 0.58))
-        .sort((a, b) => ((b.query_confidence + b.semantic_score + b.lexical_score) - (a.query_confidence + a.semantic_score + a.lexical_score)) || a.passage.id.localeCompare(b.passage.id))
-        .slice(0, 8);
+        .filter((entry) => entry.source && (entry.semantic_score > 0.16 || entry.lexical_score > 0.1 || entry.query_confidence >= 0.52 || entry.contradiction_score >= 0.3))
+        .sort((a, b) => ((b.query_confidence + b.semantic_score + b.lexical_score + b.entity_score + b.exact_score) - (a.query_confidence + a.semantic_score + a.lexical_score + a.entity_score + a.exact_score)) || a.passage.id.localeCompare(b.passage.id))
+        .slice(0, 10);
       const supportRanked = ranked.filter((item) => item.search_intent !== 'challenge');
-      const challengeRanked = ranked.filter((item) => item.search_intent === 'challenge');
+      const challengeRanked = ranked.filter((item) => item.search_intent === 'challenge' || item.contradiction_score >= 0.34);
       const uniqueSupportCount = new Set(supportRanked.map((item) => String((item.source && item.source.canonical_url) || ''))).size;
       const uniqueChallengeCount = new Set(challengeRanked.map((item) => String((item.source && item.source.canonical_url) || ''))).size;
       sourceSupportCount.set(claim.id, {
@@ -851,53 +1068,96 @@ function createNoteAnalysisEngine(options = {}) {
       const supportCounts = sourceSupportCount.get(claim.id) || {};
       const supportCorroboration = Math.min(1, (Number(supportCounts.support || 0) / 3));
       const challengeCorroboration = Math.min(1, (Number(supportCounts.challenge || 0) / 2));
-      const scoreEntries = (entries = [], corroborationBase = 0, supportLabel = 'no_evidence') => entries
+      const scoreEntries = (entries = [], corroborationBase = 0, stance = 'support') => entries
         .map((entry) => {
           const temporalScore = Number(temporalScores.get(String((entry.source && entry.source.id) || '')) || 0) || 0;
-          const score = (0.32 * entry.semantic_score)
-            + (0.18 * entry.lexical_score)
-            + (0.12 * entry.time_score)
-            + (0.12 * corroborationBase)
-            + (0.10 * temporalScore)
-            + (0.16 * entry.query_confidence);
+          const score = stance === 'contradict'
+            ? ((0.16 * entry.semantic_score)
+              + (0.12 * entry.lexical_score)
+              + (0.1 * entry.time_score)
+              + (0.08 * corroborationBase)
+              + (0.08 * temporalScore)
+              + (0.12 * entry.query_confidence)
+              + (0.12 * entry.entity_score)
+              + (0.08 * entry.exact_score)
+              + (0.08 * entry.authority_score)
+              + (0.06 * entry.freshness_score)
+              + (0.24 * entry.contradiction_score)
+              + (entry.search_intent === 'challenge' ? 0.08 : 0))
+            : ((0.24 * entry.semantic_score)
+              + (0.16 * entry.lexical_score)
+              + (0.12 * entry.time_score)
+              + (0.1 * corroborationBase)
+              + (0.08 * temporalScore)
+              + (0.14 * entry.query_confidence)
+              + (0.08 * entry.entity_score)
+              + (0.12 * entry.exact_score)
+              + (0.08 * entry.authority_score)
+              + (0.08 * entry.freshness_score)
+              - (0.12 * entry.contradiction_score));
           return {
             source: entry.source,
             passage: entry.passage,
             search_intent: entry.search_intent,
-            support_label: supportLabel,
-            score,
+            support_label: stance,
+            stance,
+            score: clampUnit(score),
             query_confidence: entry.query_confidence,
             semantic_score: entry.semantic_score,
             lexical_score: entry.lexical_score,
             time_score: entry.time_score,
             corroboration_score: corroborationBase,
             temporal_score: temporalScore,
+            contradiction_score: entry.contradiction_score,
+            entity_score: entry.entity_score,
+            exact_score: entry.exact_score,
+            authority_score: entry.authority_score,
+            freshness_score: entry.freshness_score,
             excerpt: entry.passage.passage_text.slice(0, 340),
           };
         })
         .sort((a, b) => (b.score - a.score) || String((a.passage && a.passage.id) || '').localeCompare(String((b.passage && b.passage.id) || '')));
       const scoredSupport = scoreEntries(supportRanked, supportCorroboration);
-      const scoredChallenge = scoreEntries(challengeRanked, challengeCorroboration, 'challenge');
+      const scoredChallenge = scoreEntries(challengeRanked, challengeCorroboration, 'contradict');
       const topSupport = scoredSupport[0] || null;
       const topChallenge = scoredChallenge[0] || null;
-      let status = 'no_evidence';
-      if (topSupport && topSupport.score >= HIGHLIGHT_THRESHOLD) {
-        status = 'supported';
-      } else if (topSupport && topSupport.score >= 0.56) {
-        status = 'uncertain';
-      }
+      const supportConfidence = Number((topSupport && topSupport.score) || 0) || 0;
+      const contradictConfidence = Number((topChallenge && topChallenge.score) || 0) || 0;
+      const absolutistClaim = /\b(every|all|always|never|entire|completely|only)\b/i.test(String(claim.claim_text || ''));
+      let status = 'insufficient_evidence';
       if (
-        topSupport
-        && topChallenge
-        && topSupport.score >= 0.64
-        && topChallenge.score >= 0.56
-        && Math.abs(topSupport.score - topChallenge.score) <= 0.08
+        supportConfidence >= 0.62
+        && contradictConfidence >= 0.48
+        && Math.abs(supportConfidence - contradictConfidence) <= 0.22
       ) {
-        status = 'contested';
+        status = 'mixed';
+      } else if (topChallenge && contradictConfidence >= 0.58 && contradictConfidence >= supportConfidence + 0.08) {
+        status = 'contradicted';
+      } else if (topSupport && supportConfidence >= HIGHLIGHT_THRESHOLD && supportConfidence >= contradictConfidence + 0.06) {
+        status = 'supported';
+      } else if ((topSupport && supportConfidence >= 0.56) || (topChallenge && contradictConfidence >= 0.56)) {
+        status = 'mixed';
+      }
+      if (status === 'supported' && absolutistClaim && topSupport && Number(topSupport.contradiction_score || 0) >= 0.28) {
+        status = 'mixed';
       }
       claim.status = status;
-      claim.top_score = Math.max(Number((topSupport && topSupport.score) || 0), Number((topChallenge && topChallenge.score) || 0));
-      claim.highlight_score = claim.top_score;
+      claim.verdict = status;
+      claim.support_confidence = supportConfidence;
+      claim.contradict_confidence = contradictConfidence;
+      claim.truth_confidence = clampUnit(
+        status === 'supported'
+          ? supportConfidence * (1 - (contradictConfidence * 0.35))
+          : status === 'contradicted'
+            ? contradictConfidence * (1 - (supportConfidence * 0.35))
+            : status === 'mixed'
+              ? Math.max(supportConfidence, contradictConfidence) * 0.84
+              : Math.max(supportConfidence, contradictConfidence) * 0.55
+      );
+      claim.top_score = claim.truth_confidence;
+      claim.highlight_score = claim.truth_confidence;
+      claim.explanation = buildClaimExplanation(claim, topSupport, topChallenge);
+      claim.rewrite_suggestions = buildRewriteSuggestions(claim, topSupport, topChallenge);
       const storedCitations = dedupeBy(
         scoredSupport.slice(0, 3).concat(scoredChallenge.slice(0, 2)),
         (item) => `${String((item.source && item.source.id) || '')}:${String((item.passage && item.passage.id) || '')}`
@@ -911,7 +1171,7 @@ function createNoteAnalysisEngine(options = {}) {
           source_id: String((item.source && item.source.id) || ''),
           passage_id: String((item.passage && item.passage.id) || ''),
           citation_index: idx,
-          support_label: item.search_intent === 'challenge' ? 'challenge' : status,
+          support_label: item.stance,
           score: item.score,
           semantic_score: item.semantic_score,
           lexical_score: item.lexical_score,

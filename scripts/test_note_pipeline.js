@@ -25,7 +25,7 @@ function makeFixtureEngine() {
     webSearch: async ({ query }) => {
       const normalized = String(query || '').toLowerCase();
       if (normalized.includes('novaai acquired nasa')) {
-        if (normalized.includes('rumor') || normalized.includes('criticism')) {
+        if (normalized.includes('rumor') || normalized.includes('criticism') || normalized.includes('false') || normalized.includes('denied')) {
           return {
             results: [{
               title: 'No acquisition announcement',
@@ -160,12 +160,12 @@ async function main() {
     {
       name: 'False claim',
       body: 'NovaAI acquired NASA in 2025.',
-      expectedStatus: 'no_evidence',
+      expectedStatus: 'contradicted',
     },
     {
       name: 'Partial claim',
       body: 'NovaAI released Atlas-7 to every enterprise team in 2025.',
-      expectedStatus: 'uncertain',
+      expectedStatus: 'mixed',
     },
     {
       name: 'Correct claim',

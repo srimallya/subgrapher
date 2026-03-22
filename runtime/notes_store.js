@@ -35,6 +35,21 @@ function ensureDirForFile(filePath = '') {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+function hasTableColumn(db, tableName = '', columnName = '') {
+  const table = String(tableName || '').trim();
+  const column = String(columnName || '').trim();
+  if (!table || !column) return false;
+  const result = db.exec(`PRAGMA table_info(${table})`);
+  const rows = result && result[0] && Array.isArray(result[0].values) ? result[0].values : [];
+  return rows.some((row) => String((row && row[1]) || '').trim() === column);
+}
+
+function ensureTableColumn(db, tableName = '', columnName = '', columnSpec = '') {
+  if (!tableName || !columnName || !columnSpec) return;
+  if (hasTableColumn(db, tableName, columnName)) return;
+  db.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnSpec}`);
+}
+
 async function getSqlModule() {
   if (!sqlModulePromise) {
     const initSqlJs = require('sql.js');
@@ -164,6 +179,11 @@ function ensureSchema(db) {
       FOREIGN KEY (analysis_run_id) REFERENCES analysis_runs(id) ON DELETE CASCADE
     );
   `);
+  ensureTableColumn(db, 'note_claims', 'support_confidence', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'contradict_confidence', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'truth_confidence', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'explanation', "TEXT NOT NULL DEFAULT ''");
+  ensureTableColumn(db, 'note_claims', 'rewrite_suggestions', "TEXT NOT NULL DEFAULT '[]'");
   db.run(`
     CREATE TABLE IF NOT EXISTS note_sources (
       id TEXT PRIMARY KEY,
@@ -284,14 +304,11 @@ function getProvenanceLabelForSourceKind(sourceKind = '') {
 function getRelevanceReasonForCitation(citation = {}) {
   const sourceKind = String((citation && citation.source && citation.source.source_kind) || '').trim();
   const intent = getSearchIntentForSourceKind(sourceKind);
-  const supportLabel = String((citation && citation.support_label) || '').trim();
+  const stance = String((citation && citation.stance) || (citation && citation.support_label) || '').trim();
   if (sourceKind === 'explicit_url') return 'This source came from a URL already present in the note.';
   if (intent === 'official') return 'This result came from an official-source search for the claim.';
-  if (intent === 'challenge') return 'This result may challenge or narrow part of the claim.';
-  if (supportLabel === 'supported') return 'This source appears to support the claim directly.';
-  if (supportLabel === 'contested') return 'This source overlaps with the claim, but competing evidence also exists.';
-  if (supportLabel === 'uncertain') return 'This source overlaps with the claim, but the match is still weak.';
-  return 'This result shares terms with the claim but is not a strong evidence match yet.';
+  if (intent === 'challenge' || stance === 'contradict') return 'This source contradicts or narrows part of the claim.';
+  return 'This source supports the claim wording.';
 }
 
 function decorateAnalysisSummary(summary = null) {
@@ -299,6 +316,9 @@ function decorateAnalysisSummary(summary = null) {
   return {
     ...summary,
     evidence_mode: NOTE_EVIDENCE_MODE,
+    contradicted_count: clampNumber(summary.uncertain_count, 0, Number.MAX_SAFE_INTEGER, 0),
+    mixed_count: clampNumber(summary.contested_count, 0, Number.MAX_SAFE_INTEGER, 0),
+    insufficient_evidence_count: clampNumber(summary.no_evidence_count, 0, Number.MAX_SAFE_INTEGER, 0),
   };
 }
 
@@ -409,9 +429,22 @@ function queryClaimsForAnalysis(db, analysisRunId = '') {
     time_text: String(row.time_text || ''),
     modality: String(row.modality || ''),
     factuality: String(row.factuality || ''),
-    status: String(row.status || 'no_evidence'),
+    status: String(row.status || 'insufficient_evidence'),
+    verdict: String(row.status || 'insufficient_evidence'),
     top_score: Number(row.top_score || 0) || 0,
     highlight_score: Number(row.highlight_score || 0) || 0,
+    truth_confidence: Number(row.truth_confidence || row.highlight_score || row.top_score || 0) || 0,
+    support_confidence: Number(row.support_confidence || 0) || 0,
+    contradict_confidence: Number(row.contradict_confidence || 0) || 0,
+    explanation: String(row.explanation || ''),
+    rewrite_suggestions: (() => {
+      try {
+        const parsed = JSON.parse(String(row.rewrite_suggestions || '[]'));
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        return [];
+      }
+    })(),
   }));
 }
 
@@ -441,7 +474,8 @@ function queryCitationsForClaim(db, claimId = '') {
     source_id: String(row.source_id || '').trim(),
     passage_id: String(row.passage_id || '').trim(),
     citation_index: clampNumber(row.citation_index, 0, Number.MAX_SAFE_INTEGER, 0),
-    support_label: String(row.support_label || 'no_evidence'),
+    support_label: String(row.support_label || 'support'),
+    stance: String(row.support_label || 'support') === 'contradict' ? 'contradict' : 'support',
     score: Number(row.score || 0) || 0,
     semantic_score: Number(row.semantic_score || 0) || 0,
     lexical_score: Number(row.lexical_score || 0) || 0,
@@ -466,6 +500,26 @@ function queryCitationsForClaim(db, claimId = '') {
       provenance_label: getProvenanceLabelForSourceKind(citation.source && citation.source.source_kind),
       relevance_reason: getRelevanceReasonForCitation(citation),
     }));
+}
+
+function resolveClaimForLookup(claims = [], claimId = '', claimInput = {}) {
+  const items = Array.isArray(claims) ? claims : [];
+  const targetId = String(claimId || '').trim();
+  if (targetId) {
+    const byId = items.find((item) => String((item && item.id) || '').trim() === targetId);
+    if (byId) return byId;
+  }
+  const start = Number((claimInput && claimInput.start_offset) || -1);
+  const end = Number((claimInput && claimInput.end_offset) || -1);
+  if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start) {
+    const byRange = items.find((item) => Number((item && item.start_offset) || -1) === start && Number((item && item.end_offset) || -1) === end);
+    if (byRange) return byRange;
+  }
+  const targetText = String((claimInput && claimInput.claim_text) || '').trim().toLowerCase();
+  if (targetText) {
+    return items.find((item) => String((item && item.claim_text) || '').trim().toLowerCase() === targetText) || null;
+  }
+  return null;
 }
 
 function deleteAnalysisRows(db, noteId = '') {
@@ -589,9 +643,9 @@ function createNotesStore(options = {}) {
         const citations = Array.isArray(payload.citations) ? payload.citations : [];
         const counts = {
           supported: claims.filter((item) => String((item && item.status) || '') === 'supported').length,
-          contested: claims.filter((item) => String((item && item.status) || '') === 'contested').length,
-          uncertain: claims.filter((item) => String((item && item.status) || '') === 'uncertain').length,
-          noEvidence: claims.filter((item) => String((item && item.status) || '') === 'no_evidence').length,
+          mixed: claims.filter((item) => String((item && item.status) || '') === 'mixed').length,
+          contradicted: claims.filter((item) => String((item && item.status) || '') === 'contradicted').length,
+          insufficient: claims.filter((item) => String((item && item.status) || '') === 'insufficient_evidence').length,
         };
 
         const runStmt = db.prepare(`
@@ -609,9 +663,9 @@ function createNotesStore(options = {}) {
           String(payload.status || 'completed'),
           claims.length,
           counts.supported,
-          counts.contested,
-          counts.uncertain,
-          counts.noEvidence,
+          counts.mixed,
+          counts.contradicted,
+          counts.insufficient,
           String(payload.message || ''),
         ]);
         runStmt.step();
@@ -619,8 +673,8 @@ function createNotesStore(options = {}) {
 
         const claimStmt = db.prepare(`
           INSERT INTO note_claims (
-            id, note_id, analysis_run_id, claim_index, start_offset, end_offset, claim_text, normalized_claim_text, subject_text, predicate_text, object_text, time_text, modality, factuality, status, top_score, highlight_score
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, note_id, analysis_run_id, claim_index, start_offset, end_offset, claim_text, normalized_claim_text, subject_text, predicate_text, object_text, time_text, modality, factuality, status, top_score, highlight_score, support_confidence, contradict_confidence, truth_confidence, explanation, rewrite_suggestions
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         claims.forEach((item, idx) => {
           claimStmt.bind([
@@ -638,9 +692,14 @@ function createNotesStore(options = {}) {
             String((item && item.time_text) || ''),
             String((item && item.modality) || ''),
             String((item && item.factuality) || ''),
-            String((item && item.status) || 'no_evidence'),
-            Number((item && item.top_score) || 0) || 0,
-            Number((item && item.highlight_score) || 0) || 0,
+            String((item && item.status) || 'insufficient_evidence'),
+            Number((item && item.top_score) || (item && item.truth_confidence) || 0) || 0,
+            Number((item && item.highlight_score) || (item && item.truth_confidence) || 0) || 0,
+            Number((item && item.support_confidence) || 0) || 0,
+            Number((item && item.contradict_confidence) || 0) || 0,
+            Number((item && item.truth_confidence) || (item && item.highlight_score) || (item && item.top_score) || 0) || 0,
+            String((item && item.explanation) || ''),
+            JSON.stringify(Array.isArray(item && item.rewrite_suggestions) ? item.rewrite_suggestions : []),
           ]);
           claimStmt.step();
           claimStmt.reset();
@@ -707,7 +766,7 @@ function createNotesStore(options = {}) {
             String((item && item.source_id) || ''),
             String((item && item.passage_id) || ''),
             clampNumber((item && item.citation_index), 0, Number.MAX_SAFE_INTEGER, idx),
-            String((item && item.support_label) || 'no_evidence'),
+            String((item && item.support_label) || (item && item.stance) || 'support'),
             Number((item && item.score) || 0) || 0,
             Number((item && item.semantic_score) || 0) || 0,
             Number((item && item.lexical_score) || 0) || 0,
@@ -748,14 +807,17 @@ function createNotesStore(options = {}) {
       });
     },
 
-    async getCitations(noteId = '', claimId = '') {
+    async getCitations(noteId = '', claimId = '', options = {}) {
       return runWithDb(async (db) => {
         const note = queryNoteById(db, noteId);
         if (!note) return { ok: false, message: 'Note not found.' };
         const summary = queryLatestAnalysisSummary(db, note.id);
         if (!summary) return { ok: true, note, claim: null, citations: [] };
         const claims = queryClaimsForAnalysis(db, summary.analysis_run_id);
-        const claim = claims.find((item) => String(item.id || '').trim() === String(claimId || '').trim()) || null;
+        const claimInput = (options && typeof options === 'object')
+          ? ((options.claim && typeof options.claim === 'object') ? options.claim : options)
+          : {};
+        const claim = resolveClaimForLookup(claims, claimId, claimInput);
         if (!claim) return { ok: false, message: 'Claim not found.' };
         return {
           ok: true,

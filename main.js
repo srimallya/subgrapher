@@ -20364,17 +20364,36 @@ ipcMain.handle('notes:delete', async (_event, payload) => {
 
 ipcMain.handle('notes:get_analysis', async (_event, payload) => {
   const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
-  const fresh = await ensureFreshNoteAnalysis(noteId);
-  if (!fresh || fresh.ok === false) return fresh;
-  return getNotesStore().getAnalysis(noteId);
+  const res = await getNotesStore().getAnalysis(noteId);
+  if (!res || res.ok === false) return res;
+  const analysisState = noteNeedsFreshAnalysis(res.note, res.analysis_summary || null) ? 'refreshing' : 'ready';
+  if (analysisState === 'refreshing') scheduleNoteAnalysis(noteId, 100);
+  return {
+    ...res,
+    analysis_state: analysisState,
+  };
 });
 
 ipcMain.handle('notes:get_citations', async (_event, payload) => {
   const noteId = String((payload && payload.noteId) || '').trim();
   const claimId = String((payload && payload.claimId) || '').trim();
-  const fresh = await ensureFreshNoteAnalysis(noteId);
-  if (!fresh || fresh.ok === false) return fresh;
-  return getNotesStore().getCitations(noteId, claimId);
+  const noteRes = await getNotesStore().getNote(noteId);
+  if (!noteRes || noteRes.ok === false) return noteRes;
+  const analysisState = noteNeedsFreshAnalysis(noteRes.note, noteRes.analysis_summary || null) ? 'refreshing' : 'ready';
+  if (analysisState === 'refreshing') scheduleNoteAnalysis(noteId, 100);
+  const res = await getNotesStore().getCitations(noteId, claimId, { claim: payload && payload.claim && typeof payload.claim === 'object' ? payload.claim : null });
+  if (!res || res.ok === false) {
+    return {
+      ...(res || { ok: false, message: 'Unable to load citations.' }),
+      analysis_state: analysisState,
+      analysis_summary: noteRes.analysis_summary || null,
+    };
+  }
+  return {
+    ...res,
+    analysis_state: analysisState,
+    analysis_summary: noteRes.analysis_summary || null,
+  };
 });
 
 ipcMain.handle('notes:create_reference', async (_event, payload) => {

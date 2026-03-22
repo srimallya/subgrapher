@@ -61,6 +61,16 @@ test('notes store supports CRUD and analysis persistence', async () => {
       modality: 'statement',
       factuality: 'factual',
       status: 'supported',
+      truth_confidence: 0.82,
+      support_confidence: 0.82,
+      contradict_confidence: 0.08,
+      explanation: 'Multiple web sources support this wording.',
+      rewrite_suggestions: [{
+        key: 'attribute',
+        label: 'Add attribution',
+        description: 'Tie the wording to the strongest source.',
+        replacement: 'OpenAI released GPT-5 in 2025, according to OpenAI Announcement.',
+      }],
       top_score: 0.82,
       highlight_score: 0.82,
     }],
@@ -90,7 +100,7 @@ test('notes store supports CRUD and analysis persistence', async () => {
       source_id: 'src_1',
       passage_id: 'passage_1',
       citation_index: 0,
-      support_label: 'supported',
+      support_label: 'support',
       score: 0.82,
       semantic_score: 0.88,
       lexical_score: 0.7,
@@ -108,6 +118,10 @@ test('notes store supports CRUD and analysis persistence', async () => {
   assert.equal(analysisRes.ok, true);
   assert.equal(analysisRes.claims.length, 1);
   assert.equal(analysisRes.claims[0].status, 'supported');
+  assert.equal(analysisRes.claims[0].truth_confidence, 0.82);
+  assert.equal(analysisRes.claims[0].support_confidence, 0.82);
+  assert.equal(analysisRes.claims[0].contradict_confidence, 0.08);
+  assert.equal(analysisRes.claims[0].rewrite_suggestions.length, 1);
   assert.equal(analysisRes.analysis_summary.evidence_mode, 'web_only');
 
   const citationsRes = await store.getCitations(noteId, 'claim_1');
@@ -115,6 +129,7 @@ test('notes store supports CRUD and analysis persistence', async () => {
   assert.equal(citationsRes.citations.length, 1);
   assert.equal(citationsRes.citations[0].source.title, 'OpenAI Announcement');
   assert.equal(citationsRes.citations[0].search_intent, 'support');
+  assert.equal(citationsRes.citations[0].stance, 'support');
   assert.equal(citationsRes.citations[0].provenance_label, 'from web search');
   assert.match(citationsRes.citations[0].relevance_reason, /support/i);
 
@@ -184,7 +199,10 @@ test('notes citations filter out local evidence rows and keep web provenance', a
       time_text: '2025',
       modality: 'statement',
       factuality: 'factual',
-      status: 'uncertain',
+      status: 'mixed',
+      truth_confidence: 0.58,
+      support_confidence: 0.58,
+      contradict_confidence: 0.31,
       top_score: 0.58,
       highlight_score: 0.58,
     }],
@@ -224,7 +242,7 @@ test('notes citations filter out local evidence rows and keep web provenance', a
       source_id: 'src_web',
       passage_id: 'passage_web',
       citation_index: 0,
-      support_label: 'uncertain',
+      support_label: 'support',
       score: 0.58,
       semantic_score: 0.61,
       lexical_score: 0.55,
@@ -238,7 +256,7 @@ test('notes citations filter out local evidence rows and keep web provenance', a
       source_id: 'src_local',
       passage_id: 'passage_local',
       citation_index: 1,
-      support_label: 'uncertain',
+      support_label: 'support',
       score: 0.9,
       semantic_score: 0.9,
       lexical_score: 0.9,
@@ -257,4 +275,78 @@ test('notes citations filter out local evidence rows and keep web provenance', a
   assert.equal(citationsRes.citations[0].source.title, 'Web Source');
   assert.equal(citationsRes.citations[0].search_intent, 'support');
   assert.equal(citationsRes.citations[0].provenance_label, 'from web search');
+});
+
+test('notes citations can resolve stored claims by text and range when ids change', async () => {
+  const userDataPath = makeTempDir();
+  const store = createNotesStore({ userDataPath });
+  const createRes = await store.createNote({
+    title: 'Fallback Claim Lookup',
+    body_markdown: 'OpenAI released GPT-5 in 2025.',
+  });
+  const noteId = String(createRes.note.id || '').trim();
+  await store.saveAnalysis(noteId, {
+    analysis_run_id: 'analysis_lookup',
+    note_revision: createRes.note.analysis_revision,
+    claims: [{
+      id: 'claim_lookup',
+      claim_index: 0,
+      start_offset: 0,
+      end_offset: 31,
+      claim_text: 'OpenAI released GPT-5 in 2025.',
+      normalized_claim_text: 'openai released gpt 5 in 2025',
+      subject_text: 'OpenAI',
+      predicate_text: 'released',
+      object_text: 'GPT-5',
+      time_text: '2025',
+      modality: 'statement',
+      factuality: 'factual',
+      status: 'supported',
+      truth_confidence: 0.8,
+      support_confidence: 0.8,
+      contradict_confidence: 0.1,
+      top_score: 0.8,
+      highlight_score: 0.8,
+    }],
+    sources: [{
+      id: 'src_lookup',
+      source_kind: 'web_search',
+      source_query: 'OpenAI released GPT-5 2025',
+      url: 'https://example.com/openai',
+      canonical_url: 'https://example.com/openai',
+      title: 'OpenAI Announcement',
+    }],
+    passages: [{
+      id: 'passage_lookup',
+      source_id: 'src_lookup',
+      passage_index: 0,
+      passage_text: 'OpenAI released GPT-5 in 2025.',
+      passage_start: 0,
+      passage_end: 31,
+    }],
+    citations: [{
+      id: 'citation_lookup',
+      claim_id: 'claim_lookup',
+      source_id: 'src_lookup',
+      passage_id: 'passage_lookup',
+      citation_index: 0,
+      support_label: 'support',
+      score: 0.8,
+      semantic_score: 0.8,
+      lexical_score: 0.8,
+      time_score: 1,
+      corroboration_score: 0.2,
+      temporal_score: 0.1,
+      excerpt: 'OpenAI released GPT-5 in 2025.',
+    }],
+  });
+
+  const citationsRes = await store.getCitations(noteId, 'missing_claim_id', {
+    claim_text: 'OpenAI released GPT-5 in 2025.',
+    start_offset: 0,
+    end_offset: 31,
+  });
+  assert.equal(citationsRes.ok, true);
+  assert.equal(citationsRes.claim.id, 'claim_lookup');
+  assert.equal(citationsRes.citations.length, 1);
 });
