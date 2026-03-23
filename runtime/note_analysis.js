@@ -269,9 +269,13 @@ function normalizeNotePolicy(input = {}) {
     staleness_ttl_minutes: Math.max(30, Math.min(60 * 24 * 14, Number(src.staleness_ttl_minutes || DEFAULT_NOTE_POLICY.staleness_ttl_minutes) || DEFAULT_NOTE_POLICY.staleness_ttl_minutes)),
     prefer_recent_window_days: Math.max(1, Math.min(3650, Number(src.prefer_recent_window_days || DEFAULT_NOTE_POLICY.prefer_recent_window_days) || DEFAULT_NOTE_POLICY.prefer_recent_window_days)),
     analysis_source: String(src.analysis_source || DEFAULT_NOTE_POLICY.analysis_source).trim() || DEFAULT_NOTE_POLICY.analysis_source,
+    analysis_detail: String(src.analysis_detail || '').trim(),
+    fallback_reason: String(src.fallback_reason || '').trim(),
     schema_version: Number(src.schema_version || DEFAULT_NOTE_POLICY.schema_version) || DEFAULT_NOTE_POLICY.schema_version,
     classified_at: Number(src.classified_at || 0) || 0,
     model_id: String(src.model_id || '').trim(),
+    model_name: String(src.model_name || '').trim(),
+    prompt_version: Number(src.prompt_version || 0) || 0,
   };
 }
 

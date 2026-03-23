@@ -1,11 +1,24 @@
 {
   "bundled": true,
-  "backend": "heuristic",
-  "model_id": "subgrapher-policy-fallback-v1",
+  "backend": "llama.cpp-cli",
+  "model_id": "qwen3.5-0.8b-q8_0",
+  "model_name": "Qwen3.5 0.8B Q8_0",
   "description": "Bundled small-model policy and article cleanup runtime for Notes freshness routing and Status feed summaries.",
   "tasks": [
     "note_policy_classification",
     "rss_article_cleanup_summary"
   ],
-  "schema_version": 1
+  "schema_version": 1,
+  "prompt_versions": {
+    "note_policy_classification": 1,
+    "rss_article_cleanup_summary": 1
+  },
+  "executable_rel_path": {
+    "default": "engine/llama/llama-cli",
+    "win32": "engine/llama/llama-cli.exe"
+  },
+  "model_rel_path": "models/Qwen3.5-0.8B-Q8_0.gguf",
+  "timeout_ms": 60000,
+  "ctx_size": 2048,
+  "seed": 7
 }

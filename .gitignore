@@ -2,6 +2,7 @@ node_modules/
 .DS_Store
 npm-debug.log*
 build/bundled-python/
+build/bundled-llm/
 dist/
 sandbox/
 .claude/

@@ -2433,6 +2433,8 @@ function computeNoteStatusText() {
   if (state.noteAnalysisPending) return getNoteAnalysisStageLabel(state.noteAnalysisStage);
   if (String(state.noteFreshnessState || '').trim() === 'refreshing') return 'Refreshing evidence';
   if (String(state.noteFreshnessState || '').trim() === 'stale') return 'Evidence may be stale';
+  if (String(state.noteFreshnessState || '').trim() === 'fallback_unavailable') return 'Bundled LLM unavailable';
+  if (String(state.noteFreshnessState || '').trim() === 'fallback_error') return 'Bundled LLM failed';
   if (String(state.noteFreshnessState || '').trim() === 'fallback_policy') return 'Using fallback policy';
   const summary = state.activeNoteAnalysis;
   if (summary && Number(summary.claim_count || 0) <= 0) {
@@ -13144,12 +13146,14 @@ function renderSettingsDiagnostics() {
       ? diag.bundled_small_llm
       : {};
     const lines = [];
-    lines.push(`model: ${String(llm.model_id || 'Unknown').trim() || 'Unknown'}`);
+    lines.push(`model: ${String(llm.model_name || llm.model_id || 'Unknown').trim() || 'Unknown'}`);
+    lines.push(`availability: ${String(llm.available ? 'ready' : 'missing').trim()}`);
     lines.push(`state: ${String(llm.state || 'idle').trim() || 'idle'}`);
     lines.push(`progress: ${Math.max(0, Math.min(100, Number(llm.progress_percent || 0) || 0))}%`);
     lines.push(`pending tasks: ${Number(llm.pending_tasks || 0)}`);
     lines.push(`completed tasks: ${Number(llm.completed_tasks || 0)}`);
     if (llm.current_label) lines.push(`current: ${String(llm.current_label || '').trim()}`);
+    if (llm.unavailable_reason) lines.push(`unavailable: ${String(llm.unavailable_reason || '').trim()}`);
     if (llm.last_error) lines.push(`last error: ${String(llm.last_error || '').trim()}`);
     bundledLlm.textContent = lines.join('\n');
   }

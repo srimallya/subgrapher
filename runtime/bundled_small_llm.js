@@ -1,10 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 const MANIFEST_FILENAME = 'policy_manifest.json';
+const ASSET_MANIFEST_FILENAME = 'runtime-manifest.json';
 const NOTE_POLICY_SCHEMA_VERSION = 1;
 const FEED_SUMMARY_SCHEMA_VERSION = 1;
+const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_CTX_SIZE = 2048;
+const DEFAULT_SEED = 7;
 
 function nowTs() {
   return Date.now();
@@ -33,6 +38,24 @@ function clampNumber(value, min, max, fallback) {
   if (n < min) return min;
   if (n > max) return max;
   return n;
+}
+
+function listUnique(items = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    const normalized = normalizeWhitespace(item);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function pickPlatformValue(value, platform = process.platform) {
+  if (typeof value === 'string') return normalizeWhitespace(value);
+  if (!value || typeof value !== 'object') return '';
+  return normalizeWhitespace(value[platform] || value.default || '');
 }
 
 function detectNamedEntities(text = '', limit = 8) {
@@ -84,6 +107,95 @@ function coerceTopicList(value = [], fallback = []) {
     out.push(normalized);
   });
   return out.length ? out.slice(0, 8) : fallback.slice(0, 8);
+}
+
+function truncateText(value = '', maxChars = 8000) {
+  return String(value || '').slice(0, Math.max(0, Number(maxChars) || 0));
+}
+
+function extractFirstJsonObject(text = '') {
+  const src = String(text || '');
+  const start = src.indexOf('{');
+  if (start < 0) throw new Error('bundled llm output did not contain JSON');
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error('bundled llm returned incomplete JSON');
+}
+
+function buildTaskPrompt(taskType = '', payload = {}) {
+  if (taskType === 'note_policy_classification') {
+    const title = truncateText(normalizeWhitespace(payload.title || ''), 240);
+    const body = truncateText(String(payload.body_markdown || ''), 6000);
+    return [
+      'You are Subgrapher local policy router.',
+      'Read the note and output one JSON object only.',
+      'No prose. No markdown. No code fences.',
+      'Choose exactly one note_mode from: live_update, background_brief, historical_summary, analysis_opinion, mixed.',
+      'Choose exactly one freshness_bias from: low, medium, high.',
+      'Choose exactly one source_mix from: latest_news, official_sources, reference_background, mixed.',
+      'Choose contradiction_scan as true or false.',
+      'Set result_budget between 3 and 10.',
+      'Set staleness_ttl_minutes between 30 and 20160.',
+      'Set prefer_recent_window_days between 1 and 3650.',
+      'Favor live_update with high freshness when the note says today, latest, current, ongoing, or as of a recent date.',
+      'Output schema:',
+      '{"note_mode":"","freshness_bias":"","source_mix":"","contradiction_scan":true,"result_budget":5,"staleness_ttl_minutes":1440,"prefer_recent_window_days":14}',
+      '',
+      `Title: ${title || '[untitled]'}`,
+      'Body:',
+      body || '[empty]',
+      '',
+      'JSON:',
+    ].join('\n');
+  }
+  const title = truncateText(normalizeWhitespace(payload.title || ''), 240);
+  const raw = truncateText(String(payload.raw_content_text || payload.content_text || ''), 6000);
+  const sourceName = truncateText(normalizeWhitespace(payload.source_name || ''), 160);
+  const url = truncateText(normalizeWhitespace(payload.url || ''), 400);
+  return [
+    'You are Subgrapher local feed cleanup summarizer.',
+    'Read the fetched article text and output one JSON object only.',
+    'No prose. No markdown. No code fences.',
+    'Remove scraper noise, nav text, subscribe prompts, repeated headlines, and legal boilerplate.',
+    'Write a concise factual summary in 2 to 4 sentences.',
+    'Write a short excerpt under 220 characters.',
+    'Return entities as a short list of names.',
+    'Return topics as a short list of lowercase tags.',
+    'Choose content_quality from: clean, noisy, fragmented.',
+    'Output schema:',
+    '{"summary":"","excerpt":"","entities":[],"topics":[],"content_quality":"clean"}',
+    '',
+    `Title: ${title || '[untitled]'}`,
+    `Source: ${sourceName || '[unknown]'}`,
+    `URL: ${url || '[unknown]'}`,
+    'Raw article text:',
+    raw || '[empty]',
+    '',
+    'JSON:',
+  ].join('\n');
 }
 
 function buildFallbackNotePolicy(note = {}) {
@@ -156,6 +268,8 @@ function buildFallbackNotePolicy(note = {}) {
     staleness_ttl_minutes: defaults.staleness_ttl_minutes,
     prefer_recent_window_days: defaults.prefer_recent_window_days,
     analysis_source: 'fallback',
+    analysis_detail: 'fallback_heuristic',
+    fallback_reason: '',
     schema_version: NOTE_POLICY_SCHEMA_VERSION,
   };
 }
@@ -178,47 +292,144 @@ function buildFallbackFeedSummary(article = {}) {
     topics: coerceTopicList(topics, ['other']),
     content_quality: rawText.length < 80 ? 'fragmented' : (/\b(cookie|subscribe|sign up|javascript)\b/i.test(rawText) ? 'noisy' : 'clean'),
     analysis_source: 'fallback',
+    analysis_detail: 'fallback_heuristic',
+    fallback_reason: '',
     schema_version: FEED_SUMMARY_SCHEMA_VERSION,
   };
 }
 
 class BundledSmallLlmRuntime {
   constructor(options = {}) {
-    this.projectRoot = String(options.projectRoot || process.cwd());
+    this.projectRoot = path.resolve(String(options.projectRoot || process.cwd()));
+    this.app = options.app || null;
+    this.bundledRootDir = options.bundledRootDir ? path.resolve(String(options.bundledRootDir)) : '';
     this.manifest = null;
     this.lastPolicyError = '';
     this.lastFeedError = '';
     this.activeTasks = new Map();
   }
 
+  _isPackaged() {
+    return !!(this.app && this.app.isPackaged);
+  }
+
+  _bundledRootDir() {
+    if (this.bundledRootDir) return this.bundledRootDir;
+    if (process.env.SUBGRAPHER_BUNDLED_LLM_ROOT) return String(process.env.SUBGRAPHER_BUNDLED_LLM_ROOT);
+    if (this._isPackaged()) return path.join(process.resourcesPath, 'llm');
+    return path.join(this.projectRoot, 'build', 'bundled-llm', 'current');
+  }
+
   _manifestPath() {
     return path.join(this.projectRoot, 'runtime', 'models', MANIFEST_FILENAME);
   }
 
+  _assetManifestPath() {
+    return path.join(this._bundledRootDir(), ASSET_MANIFEST_FILENAME);
+  }
+
+  _defaultManifest() {
+    return {
+      bundled: true,
+      backend: 'llama.cpp-cli',
+      model_id: 'qwen3.5-0.8b-q8_0',
+      model_name: 'Qwen3.5 0.8B Q8_0',
+      tasks: ['note_policy_classification', 'rss_article_cleanup_summary'],
+      schema_version: 1,
+      prompt_versions: {
+        note_policy_classification: NOTE_POLICY_SCHEMA_VERSION,
+        rss_article_cleanup_summary: FEED_SUMMARY_SCHEMA_VERSION,
+      },
+      executable_rel_path: process.platform === 'win32'
+        ? 'engine/llama/llama-cli.exe'
+        : 'engine/llama/llama-cli',
+      model_rel_path: 'models/Qwen3.5-0.8B-Q8_0.gguf',
+      timeout_ms: DEFAULT_TIMEOUT_MS,
+      ctx_size: DEFAULT_CTX_SIZE,
+      seed: DEFAULT_SEED,
+    };
+  }
+
   _loadManifest() {
     if (!this.manifest) {
-      this.manifest = readJsonSafe(this._manifestPath()) || {
-        bundled: true,
-        backend: 'heuristic',
-        model_id: 'subgrapher-policy-fallback-v1',
-        tasks: ['note_policy_classification', 'rss_article_cleanup_summary'],
-        schema_version: 1,
+      const projectManifest = readJsonSafe(this._manifestPath()) || {};
+      const assetManifest = readJsonSafe(this._assetManifestPath()) || {};
+      this.manifest = {
+        ...this._defaultManifest(),
+        ...projectManifest,
+        ...assetManifest,
+        prompt_versions: {
+          ...(this._defaultManifest().prompt_versions || {}),
+          ...((projectManifest && projectManifest.prompt_versions) || {}),
+          ...((assetManifest && assetManifest.prompt_versions) || {}),
+        },
       };
     }
     return this.manifest;
   }
 
+  _resolveExecutablePath(manifest = {}) {
+    const envPath = normalizeWhitespace(process.env.SUBGRAPHER_BUNDLED_LLM_BIN || '');
+    if (envPath) return envPath;
+    const relPath = pickPlatformValue(manifest.executable_rel_path, process.platform);
+    if (!relPath) return '';
+    return path.join(this._bundledRootDir(), relPath);
+  }
+
+  _resolveModelPath(manifest = {}) {
+    const envPath = normalizeWhitespace(process.env.SUBGRAPHER_BUNDLED_LLM_MODEL || '');
+    if (envPath) return envPath;
+    const relPath = pickPlatformValue(manifest.model_rel_path, process.platform);
+    if (!relPath) return '';
+    return path.join(this._bundledRootDir(), relPath);
+  }
+
+  _resolveBundledAvailability(manifest = {}) {
+    const bundledRoot = this._bundledRootDir();
+    const assetManifestPath = this._assetManifestPath();
+    const executablePath = this._resolveExecutablePath(manifest);
+    const modelPath = this._resolveModelPath(manifest);
+    const errors = [];
+    if (!fs.existsSync(bundledRoot)) {
+      errors.push(`bundled llm resources missing at ${bundledRoot}`);
+    }
+    if (!fs.existsSync(assetManifestPath)) {
+      errors.push(`runtime manifest missing at ${assetManifestPath}`);
+    }
+    if (!executablePath || !fs.existsSync(executablePath)) {
+      errors.push(`runtime binary missing at ${executablePath || '[unset]'}`);
+    }
+    if (!modelPath || !fs.existsSync(modelPath)) {
+      errors.push(`model file missing at ${modelPath || '[unset]'}`);
+    }
+    return {
+      available: errors.length === 0,
+      reason: errors.join(' | '),
+      bundled_root: bundledRoot,
+      asset_manifest_path: assetManifestPath,
+      executable_path: executablePath,
+      model_path: modelPath,
+    };
+  }
+
   diagnostics() {
     const manifest = this._loadManifest();
+    const availability = this._resolveBundledAvailability(manifest);
     const activeTasks = Array.from(this.activeTasks.values());
     return {
       ok: true,
       bundled: !!manifest.bundled,
-      available: true,
-      backend: String(manifest.backend || 'heuristic'),
-      model_id: String(manifest.model_id || 'subgrapher-policy-fallback-v1'),
+      available: availability.available,
+      backend: String(manifest.backend || 'bundled-cli'),
+      model_id: String(manifest.model_id || ''),
+      model_name: String(manifest.model_name || manifest.model_id || ''),
       tasks: Array.isArray(manifest.tasks) ? manifest.tasks.slice() : [],
       manifest_path: this._manifestPath(),
+      asset_manifest_path: availability.asset_manifest_path,
+      bundled_root: availability.bundled_root,
+      executable_path: availability.executable_path,
+      model_path: availability.model_path,
+      unavailable_reason: availability.available ? '' : availability.reason,
       active_count: activeTasks.length,
       active_tasks: activeTasks,
       last_policy_error: String(this.lastPolicyError || ''),
@@ -241,27 +452,191 @@ class BundledSmallLlmRuntime {
     this.activeTasks.delete(String(taskId || '').trim());
   }
 
+  _validateNotePolicyPayload(payload = {}) {
+    const src = (payload && typeof payload === 'object') ? payload : {};
+    const noteMode = String(src.note_mode || '').trim();
+    const freshnessBias = String(src.freshness_bias || '').trim();
+    const sourceMix = String(src.source_mix || '').trim();
+    if (!['live_update', 'background_brief', 'historical_summary', 'analysis_opinion', 'mixed'].includes(noteMode)) {
+      throw new Error(`invalid note_mode: ${noteMode || '[empty]'}`);
+    }
+    if (!['low', 'medium', 'high'].includes(freshnessBias)) {
+      throw new Error(`invalid freshness_bias: ${freshnessBias || '[empty]'}`);
+    }
+    if (!['latest_news', 'official_sources', 'reference_background', 'mixed'].includes(sourceMix)) {
+      throw new Error(`invalid source_mix: ${sourceMix || '[empty]'}`);
+    }
+    return {
+      note_mode: noteMode,
+      freshness_bias: freshnessBias,
+      source_mix: sourceMix,
+      contradiction_scan: src.contradiction_scan !== false,
+      result_budget: clampNumber(src.result_budget, 3, 10, 5),
+      staleness_ttl_minutes: clampNumber(src.staleness_ttl_minutes, 30, 60 * 24 * 14, 1440),
+      prefer_recent_window_days: clampNumber(src.prefer_recent_window_days, 1, 3650, 14),
+      schema_version: NOTE_POLICY_SCHEMA_VERSION,
+    };
+  }
+
+  _validateFeedSummaryPayload(payload = {}) {
+    const src = (payload && typeof payload === 'object') ? payload : {};
+    const summary = normalizeWhitespace(src.summary || '');
+    const excerpt = normalizeWhitespace(src.excerpt || '');
+    if (!summary) throw new Error('summary is required');
+    return {
+      summary: summary.slice(0, 1200),
+      excerpt: (excerpt || firstSentences(summary, 2, 220)).slice(0, 320),
+      entities: Array.isArray(src.entities)
+        ? src.entities.map((item) => normalizeWhitespace(item)).filter(Boolean).slice(0, 12)
+        : [],
+      topics: coerceTopicList(src.topics, ['other']),
+      content_quality: ['clean', 'noisy', 'fragmented'].includes(String(src.content_quality || '').trim())
+        ? String(src.content_quality || '').trim()
+        : 'clean',
+      schema_version: FEED_SUMMARY_SCHEMA_VERSION,
+    };
+  }
+
+  _runBundledTask(taskType = '', payload = {}) {
+    const manifest = this._loadManifest();
+    const availability = this._resolveBundledAvailability(manifest);
+    if (!availability.available) {
+      const error = new Error(availability.reason || 'bundled llm unavailable');
+      error.code = 'BUNDLED_LLM_UNAVAILABLE';
+      throw error;
+    }
+    const timeoutMs = clampNumber(manifest.timeout_ms, 1_000, 180_000, DEFAULT_TIMEOUT_MS);
+    const schemaVersion = taskType === 'note_policy_classification'
+      ? NOTE_POLICY_SCHEMA_VERSION
+      : FEED_SUMMARY_SCHEMA_VERSION;
+    const promptVersion = Number((manifest.prompt_versions && manifest.prompt_versions[taskType]) || schemaVersion) || schemaVersion;
+    const backend = String(manifest.backend || 'llama.cpp-cli').trim() || 'llama.cpp-cli';
+    return new Promise((resolve, reject) => {
+      const args = backend === 'llama.cpp-cli'
+        ? [
+          '-m',
+          availability.model_path,
+          '-no-cnv',
+          '-st',
+          '--reasoning',
+          'off',
+          '--log-disable',
+          '--no-perf',
+          '--ctx-size',
+          String(clampNumber(manifest.ctx_size, 1024, 32768, DEFAULT_CTX_SIZE)),
+          '--seed',
+          String(clampNumber(manifest.seed, 0, 2147483647, DEFAULT_SEED)),
+          '--temp',
+          '0',
+          '--top-p',
+          '0.1',
+          '-n',
+          String(taskType === 'note_policy_classification' ? 96 : 220),
+          '-p',
+          buildTaskPrompt(taskType, payload),
+        ]
+        : [
+          '--task',
+          String(taskType || '').trim(),
+          '--schema-version',
+          String(schemaVersion),
+          '--prompt-version',
+          String(promptVersion),
+          '--model',
+          availability.model_path,
+        ];
+      const child = spawn(availability.executable_path, args, {
+        cwd: path.dirname(availability.executable_path) || availability.bundled_root,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill('SIGKILL');
+        reject(new Error(`bundled llm timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      child.stdout.on('data', (chunk) => {
+        stdout += String(chunk || '');
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk || '');
+      });
+      child.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(err);
+      });
+      child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (code !== 0) {
+          reject(new Error(`bundled llm exited with code ${code}: ${normalizeWhitespace(stderr).slice(0, 400)}`));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(backend === 'llama.cpp-cli' ? extractFirstJsonObject(stdout) : stdout);
+          resolve({
+            payload: parsed,
+            stderr: normalizeWhitespace(stderr),
+            prompt_version: promptVersion,
+          });
+        } catch (err) {
+          reject(new Error(`bundled llm returned invalid JSON: ${err.message}`));
+        }
+      });
+      if (backend === 'llama.cpp-cli') {
+        child.stdin.end();
+      } else {
+        child.stdin.write(JSON.stringify(payload));
+        child.stdin.end();
+      }
+    });
+  }
+
   async classifyNotePolicy(note = {}) {
     const taskId = this._beginTask('note_policy_classification', {
       label: String((note && note.title) || 'note').trim(),
     });
     try {
       const manifest = this._loadManifest();
-      const policy = buildFallbackNotePolicy(note);
+      const result = await this._runBundledTask('note_policy_classification', {
+        id: String((note && note.id) || '').trim(),
+        title: String((note && note.title) || ''),
+        body_markdown: String((note && note.body_markdown) || ''),
+      });
+      const policy = this._validateNotePolicyPayload(result.payload);
+      this.lastPolicyError = '';
       return {
         ok: true,
         ...policy,
-        model_id: String(manifest.model_id || 'subgrapher-policy-fallback-v1'),
+        analysis_source: 'llm',
+        analysis_detail: 'bundled_llm',
+        fallback_reason: '',
+        model_id: String(manifest.model_id || ''),
+        model_name: String(manifest.model_name || manifest.model_id || ''),
+        prompt_version: Number(result.prompt_version || NOTE_POLICY_SCHEMA_VERSION) || NOTE_POLICY_SCHEMA_VERSION,
         classified_at: nowTs(),
       };
     } catch (err) {
-      this.lastPolicyError = String((err && err.message) || 'note_policy_failed');
+      const reason = String((err && err.message) || 'note_policy_failed');
+      this.lastPolicyError = reason;
+      const unavailable = err && err.code === 'BUNDLED_LLM_UNAVAILABLE';
       const policy = buildFallbackNotePolicy(note);
       return {
         ok: true,
         ...policy,
+        model_id: String(this._loadManifest().model_id || ''),
+        model_name: String(this._loadManifest().model_name || this._loadManifest().model_id || ''),
         classified_at: nowTs(),
-        error: this.lastPolicyError,
+        error: reason,
+        analysis_detail: unavailable ? 'bundled_llm_unavailable' : 'bundled_llm_error',
+        fallback_reason: reason,
       };
     } finally {
       this._finishTask(taskId);
@@ -274,22 +649,40 @@ class BundledSmallLlmRuntime {
     });
     try {
       const manifest = this._loadManifest();
-      const payload = buildFallbackFeedSummary(article);
+      const result = await this._runBundledTask('rss_article_cleanup_summary', {
+        id: String((article && article.id) || '').trim(),
+        title: String((article && article.title) || ''),
+        raw_content_text: String((article && article.raw_content_text) || (article && article.content_text) || ''),
+        source_name: String((article && article.source_name) || ''),
+        source_domain: String((article && article.source_domain) || ''),
+        url: String((article && article.url) || ''),
+      });
+      const payload = this._validateFeedSummaryPayload(result.payload);
+      this.lastFeedError = '';
       return {
         ok: true,
         ...payload,
-        model_id: String(manifest.model_id || 'subgrapher-policy-fallback-v1'),
+        analysis_source: 'llm',
+        analysis_detail: 'bundled_llm',
+        fallback_reason: '',
+        model_id: String(manifest.model_id || ''),
+        model_name: String(manifest.model_name || manifest.model_id || ''),
+        prompt_version: Number(result.prompt_version || FEED_SUMMARY_SCHEMA_VERSION) || FEED_SUMMARY_SCHEMA_VERSION,
         generated_at: nowTs(),
         content_hash: hashText(String((article && article.raw_content_text) || (article && article.content_text) || '')),
       };
     } catch (err) {
-      this.lastFeedError = String((err && err.message) || 'feed_summary_failed');
+      const reason = String((err && err.message) || 'feed_summary_failed');
+      this.lastFeedError = reason;
+      const unavailable = err && err.code === 'BUNDLED_LLM_UNAVAILABLE';
       const payload = buildFallbackFeedSummary(article);
       return {
         ok: true,
         ...payload,
         generated_at: nowTs(),
-        error: this.lastFeedError,
+        error: reason,
+        analysis_detail: unavailable ? 'bundled_llm_unavailable' : 'bundled_llm_error',
+        fallback_reason: reason,
       };
     } finally {
       this._finishTask(taskId);

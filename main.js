@@ -6359,6 +6359,7 @@ function getBundledSmallLlmRuntime() {
   if (!bundledSmallLlmRuntime) {
     bundledSmallLlmRuntime = createBundledSmallLlmRuntime({
       projectRoot: __dirname,
+      app,
     });
   }
   return bundledSmallLlmRuntime;
@@ -6446,7 +6447,15 @@ function deriveNoteFreshnessState(note = null, summary = null, analysisJob = nul
   if (nextRefreshAt > 0 && nextRefreshAt <= nowTs() && note && String(note.body_markdown || '').trim()) {
     return 'stale';
   }
-  if (String(normalizedSummary.analysis_source || '').trim() === 'fallback') return 'fallback_policy';
+  if (String(normalizedSummary.analysis_source || '').trim() === 'fallback') {
+    const notePolicy = (normalizedSummary.note_policy && typeof normalizedSummary.note_policy === 'object')
+      ? normalizedSummary.note_policy
+      : {};
+    const analysisDetail = String(notePolicy.analysis_detail || '').trim();
+    if (analysisDetail === 'bundled_llm_unavailable') return 'fallback_unavailable';
+    if (analysisDetail === 'bundled_llm_error') return 'fallback_error';
+    return 'fallback_policy';
+  }
   return 'stable';
 }
 
