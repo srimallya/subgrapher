@@ -52,6 +52,7 @@ const { createMailStore } = require('./runtime/mail_store');
 const { createDashboardStore } = require('./runtime/dashboard_store');
 const { createNotesStore } = require('./runtime/notes_store');
 const { createNoteAnalysisEngine, NOTE_EVIDENCE_MODE } = require('./runtime/note_analysis');
+const { createNoteAnalysisScheduler } = require('./runtime/note_analysis_scheduler');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -286,7 +287,7 @@ let mailSyncManager = null;
 let dashboardStore = null;
 let notesStore = null;
 let noteAnalysisEngine = null;
-const noteAnalysisTimers = new Map();
+let noteAnalysisScheduler = null;
 const pathBMetrics = {
   pathb_reuse_count: 0,
   pathb_create_count: 0,
@@ -6358,17 +6359,100 @@ function getNoteAnalysisEngine() {
   return noteAnalysisEngine;
 }
 
-async function runNoteAnalysis(noteId = '') {
+function getNoteAnalysisScheduler() {
+  if (!noteAnalysisScheduler) {
+    noteAnalysisScheduler = createNoteAnalysisScheduler({
+      runAnalysis: async (noteId, revision, controls = {}) => runNoteAnalysis(noteId, {
+        expectedRevision: revision,
+        setStage: controls && typeof controls.setStage === 'function' ? controls.setStage : null,
+      }),
+    });
+  }
+  return noteAnalysisScheduler;
+}
+
+function getNoteAnalysisJobMetadata(noteId = '', note = null, summary = null) {
+  const targetId = String(noteId || '').trim();
+  if (!targetId) return null;
+  const scheduler = getNoteAnalysisScheduler();
+  const job = scheduler.getJob(targetId);
+  const noteRevision = Number((note && note.analysis_revision) || 0) || 0;
+  const needsRefresh = !!(note && noteNeedsFreshAnalysis(note, summary));
+  if (job && (job.latest_scheduled_revision > 0 || job.running_revision > 0 || job.stage !== 'queued' || job.completed_at > 0 || job.started_at > 0 || job.last_error)) {
+    if (needsRefresh && Number(job.latest_scheduled_revision || 0) < noteRevision) {
+      return {
+        ...job,
+        latest_scheduled_revision: noteRevision,
+        queued_revision: Math.max(Number(job.queued_revision || 0) || 0, noteRevision),
+        stage: job.running_revision > 0 ? String(job.stage || 'detecting_claims') : (String(job.stage || '').trim() === 'error' ? 'error' : 'queued'),
+      };
+    }
+    return job;
+  }
+  if (needsRefresh) {
+    return {
+      note_id: targetId,
+      latest_scheduled_revision: noteRevision,
+      queued_revision: noteRevision,
+      running_revision: 0,
+      stage: 'queued',
+      started_at: 0,
+      completed_at: Number((summary && summary.completed_at) || 0) || 0,
+      last_error: '',
+    };
+  }
+  if (!note) return null;
+  return {
+    note_id: targetId,
+    latest_scheduled_revision: noteRevision,
+    queued_revision: noteRevision,
+    running_revision: 0,
+    stage: 'ready',
+    started_at: Number((summary && summary.started_at) || 0) || 0,
+    completed_at: Number((summary && summary.completed_at) || (note && note.last_analyzed_at) || 0) || 0,
+    last_error: '',
+  };
+}
+
+function ensureScheduledNoteAnalysis(noteId = '', note = null, summary = null, delayMs = 1200) {
+  const targetId = String(noteId || '').trim();
+  if (!targetId || !note) return getNoteAnalysisJobMetadata(targetId, note, summary);
+  if (!noteNeedsFreshAnalysis(note, summary)) {
+    return getNoteAnalysisJobMetadata(targetId, note, summary);
+  }
+  const revision = Number((note && note.analysis_revision) || 0) || 0;
+  const existingJob = getNoteAnalysisScheduler().getJob(targetId);
+  const shouldRetry = !existingJob
+    || Number(existingJob.latest_scheduled_revision || 0) < revision;
+  if (shouldRetry) {
+    scheduleNoteAnalysis(targetId, delayMs, revision);
+  }
+  return getNoteAnalysisJobMetadata(targetId, note, summary);
+}
+
+async function runNoteAnalysis(noteId = '', options = {}) {
   const targetId = String(noteId || '').trim();
   if (!targetId) return { ok: false, message: 'noteId is required.' };
+  const expectedRevision = Number((options && options.expectedRevision) || 0) || 0;
+  const setStage = (options && typeof options.setStage === 'function') ? options.setStage : null;
   const store = getNotesStore();
+  if (setStage) setStage('detecting_claims');
   const noteRes = await store.getNote(targetId);
   if (!noteRes || !noteRes.ok || !noteRes.note) {
     return { ok: false, message: (noteRes && noteRes.message) || 'Note not found.' };
   }
   const note = noteRes.note;
+  if (expectedRevision > 0 && Number(note.analysis_revision || 0) !== expectedRevision) {
+    return {
+      ok: false,
+      stale: true,
+      message: 'Note analysis is stale.',
+      note_revision: Number(note.analysis_revision || 0) || 0,
+    };
+  }
   if (!String(note.body_markdown || '').trim()) {
     const engine = getNoteAnalysisEngine();
+    if (setStage) setStage('scoring_evidence');
     return store.saveAnalysis(targetId, {
       analysis_run_id: makeId('analysis'),
       note_revision: Number(note.analysis_revision || 0),
@@ -6384,28 +6468,22 @@ async function runNoteAnalysis(noteId = '') {
       citations: [],
     });
   }
+  if (setStage) setStage('retrieving_sources');
   const analysisRes = await getNoteAnalysisEngine().analyze(note, {});
   if (!analysisRes || analysisRes.ok === false) {
     return { ok: false, message: String((analysisRes && analysisRes.message) || 'Note analysis failed.') };
   }
+  if (setStage) setStage('scoring_evidence');
   return store.saveAnalysis(targetId, analysisRes);
 }
 
-function scheduleNoteAnalysis(noteId = '', delayMs = 1200) {
+function scheduleNoteAnalysis(noteId = '', delayMs = 1200, revision = 0) {
   const targetId = String(noteId || '').trim();
-  if (!targetId) return;
-  if (noteAnalysisTimers.has(targetId)) {
-    clearTimeout(noteAnalysisTimers.get(targetId));
-  }
-  const timer = setTimeout(async () => {
-    noteAnalysisTimers.delete(targetId);
-    try {
-      await runNoteAnalysis(targetId);
-    } catch (_) {
-      // noop
-    }
-  }, Math.max(100, Math.round(Number(delayMs) || 1200)));
-  noteAnalysisTimers.set(targetId, timer);
+  const targetRevision = Number(revision || 0) || 0;
+  if (!targetId || targetRevision <= 0) return null;
+  return getNoteAnalysisScheduler().schedule(targetId, targetRevision, {
+    delayMs: Math.max(100, Math.round(Number(delayMs) || 1200)),
+  });
 }
 
 function noteNeedsFreshAnalysis(note = null, summary = null) {
@@ -6431,7 +6509,7 @@ async function ensureFreshNoteAnalysis(noteId = '') {
   const summary = noteRes.analysis_summary || null;
   const needsRefresh = noteNeedsFreshAnalysis(note, summary);
   if (!needsRefresh) return noteRes;
-  await runNoteAnalysis(targetId);
+  await runNoteAnalysis(targetId, { expectedRevision: Number(note.analysis_revision || 0) || 0 });
   return store.getNote(targetId);
 }
 
@@ -20355,35 +20433,66 @@ ipcMain.handle('notes:list', async () => getNotesStore().listNotes());
 
 ipcMain.handle('notes:create', async (_event, payload) => {
   const res = await getNotesStore().createNote(payload || {});
-  if (res && res.ok && res.note) scheduleNoteAnalysis(String(res.note.id || '').trim(), 1200);
+  if (res && res.ok && res.note) {
+    return {
+      ...res,
+      analysis_job: ensureScheduledNoteAnalysis(
+        String(res.note.id || '').trim(),
+        res.note,
+        res.analysis_summary || null,
+        1200,
+      ),
+    };
+  }
   return res;
 });
 
 ipcMain.handle('notes:get', async (_event, payload) => {
   const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  console.log('[notes-main] notes:get:start', { noteId });
   const res = await getNotesStore().getNote(noteId);
-  if (res && res.ok && res.note && noteNeedsFreshAnalysis(res.note, res.analysis_summary || null)) {
-    scheduleNoteAnalysis(noteId, 100);
-  }
-  return res;
+  const analysisJob = (res && res.ok && res.note)
+    ? ensureScheduledNoteAnalysis(noteId, res.note, res.analysis_summary || null, 100)
+    : null;
+  console.log('[notes-main] notes:get:done', {
+    noteId,
+    ok: !!(res && res.ok),
+    title: String((res && res.note && res.note.title) || ''),
+  });
+  return (res && res.ok)
+    ? { ...res, analysis_job: analysisJob }
+    : res;
 });
 
 ipcMain.handle('notes:update', async (_event, payload) => {
   const noteId = String((payload && payload.noteId) || '').trim();
   const patch = (payload && payload.patch && typeof payload.patch === 'object') ? payload.patch : {};
+  console.log('[notes-main] notes:update:start', {
+    noteId,
+    patchKeys: Object.keys(patch || {}),
+  });
   const res = await getNotesStore().updateNote(noteId, patch);
-  if (res && res.ok && res.note && Object.prototype.hasOwnProperty.call(patch, 'body_markdown')) {
-    scheduleNoteAnalysis(String(res.note.id || '').trim(), 1200);
+  console.log('[notes-main] notes:update:done', {
+    noteId,
+    ok: !!(res && res.ok),
+    title: String((res && res.note && res.note.title) || ''),
+    active_mode: String((res && res.note && res.note.active_mode) || ''),
+  });
+  if (res && res.ok && res.note) {
+    const analysisJob = Object.prototype.hasOwnProperty.call(patch, 'body_markdown')
+      ? ensureScheduledNoteAnalysis(String(res.note.id || '').trim(), res.note, res.analysis_summary || null, 1200)
+      : getNoteAnalysisJobMetadata(String(res.note.id || '').trim(), res.note, res.analysis_summary || null);
+    return {
+      ...res,
+      analysis_job: analysisJob,
+    };
   }
   return res;
 });
 
 ipcMain.handle('notes:delete', async (_event, payload) => {
   const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
-  if (noteAnalysisTimers.has(noteId)) {
-    clearTimeout(noteAnalysisTimers.get(noteId));
-    noteAnalysisTimers.delete(noteId);
-  }
+  getNoteAnalysisScheduler().clear(noteId);
   return getNotesStore().deleteNote(noteId);
 });
 
@@ -20391,12 +20500,13 @@ ipcMain.handle('notes:get_analysis', async (_event, payload) => {
   const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
   const res = await getNotesStore().getAnalysis(noteId);
   if (!res || res.ok === false) return res;
-  const analysisState = noteNeedsFreshAnalysis(res.note, res.analysis_summary || null) ? 'refreshing' : 'ready';
-  if (analysisState === 'refreshing') scheduleNoteAnalysis(noteId, 100);
+  const analysisJob = ensureScheduledNoteAnalysis(noteId, res.note, res.analysis_summary || null, 100);
+  const analysisState = String((analysisJob && analysisJob.stage) || 'ready').trim() || 'ready';
   return {
     ...res,
+    analysis_job: analysisJob,
     analysis_state: analysisState,
-    analysis_stage: analysisState === 'refreshing' ? 'retrieving_sources' : 'stable',
+    analysis_stage: analysisState === 'ready' ? 'stable' : analysisState,
   };
 });
 
@@ -20404,12 +20514,13 @@ ipcMain.handle('notes:get_evidence_feed', async (_event, payload) => {
   const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
   const res = await getNotesStore().getEvidenceFeed(noteId);
   if (!res || res.ok === false) return res;
-  const analysisState = noteNeedsFreshAnalysis(res.note, res.analysis_summary || null) ? 'refreshing' : 'ready';
-  if (analysisState === 'refreshing') scheduleNoteAnalysis(noteId, 100);
+  const analysisJob = ensureScheduledNoteAnalysis(noteId, res.note, res.analysis_summary || null, 100);
+  const analysisState = String((analysisJob && analysisJob.stage) || 'ready').trim() || 'ready';
   return {
     ...res,
+    analysis_job: analysisJob,
     analysis_state: analysisState,
-    analysis_stage: analysisState === 'refreshing' ? 'retrieving_sources' : 'stable',
+    analysis_stage: analysisState === 'ready' ? 'stable' : analysisState,
   };
 });
 
@@ -20418,19 +20529,21 @@ ipcMain.handle('notes:get_citations', async (_event, payload) => {
   const claimId = String((payload && payload.claimId) || '').trim();
   const noteRes = await getNotesStore().getNote(noteId);
   if (!noteRes || noteRes.ok === false) return noteRes;
-  const analysisState = noteNeedsFreshAnalysis(noteRes.note, noteRes.analysis_summary || null) ? 'refreshing' : 'ready';
-  if (analysisState === 'refreshing') scheduleNoteAnalysis(noteId, 100);
+  const analysisJob = ensureScheduledNoteAnalysis(noteId, noteRes.note, noteRes.analysis_summary || null, 100);
+  const analysisState = String((analysisJob && analysisJob.stage) || 'ready').trim() || 'ready';
   const res = await getNotesStore().getCitations(noteId, claimId, { claim: payload && payload.claim && typeof payload.claim === 'object' ? payload.claim : null });
   if (!res || res.ok === false) {
     return {
       ...(res || { ok: false, message: 'Unable to load citations.' }),
       analysis_state: analysisState,
+      analysis_job: analysisJob,
       analysis_summary: noteRes.analysis_summary || null,
     };
   }
   return {
     ...res,
     analysis_state: analysisState,
+    analysis_job: analysisJob,
     analysis_summary: noteRes.analysis_summary || null,
   };
 });

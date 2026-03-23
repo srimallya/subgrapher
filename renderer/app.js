@@ -99,8 +99,14 @@ const state = {
   noteDraftTitle: '',
   noteDraftBody: '',
   noteSaveTimer: null,
+  noteLoadSeq: 0,
+  noteSaveSeq: 0,
+  noteModeSeq: 0,
+  noteAnalysisSeq: 0,
   noteAnalysisRefreshTimer: null,
   notePreviewRenderSeq: 0,
+  notePendingSwitchTargetId: '',
+  noteAnalysisJob: null,
   noteSaveState: 'idle',
   noteAnalysisPending: false,
   zenMode: false,
@@ -1559,6 +1565,67 @@ function logNotesDebug(message = '', extra = null) {
   } catch (_) {}
 }
 
+function normalizeWhitespace(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function logRendererError(scope = '', err = null, extra = null) {
+  const parts = [`[renderer-error] ${String(scope || 'renderer').trim() || 'renderer'}`];
+  const message = String((err && err.message) || err || '').trim();
+  if (message) parts.push(message);
+  try {
+    if (extra === null || typeof extra === 'undefined') {
+      console.error(parts.join(': '));
+      return;
+    }
+    console.error(parts.join(': '), extra);
+  } catch (_) {}
+}
+
+async function runNotesUiAction(scope = '', task = null) {
+  try {
+    if (typeof task !== 'function') return null;
+    return await task();
+  } catch (err) {
+    logRendererError(scope, err);
+    return null;
+  }
+}
+
+function normalizeNoteAnalysisJob(job = null, noteId = '') {
+  if (!job || typeof job !== 'object') return null;
+  const targetId = String(noteId || (job && job.note_id) || '').trim();
+  if (!targetId) return null;
+  const stage = String((job && job.stage) || '').trim();
+  return {
+    note_id: targetId,
+    latest_scheduled_revision: Number((job && job.latest_scheduled_revision) || 0) || 0,
+    queued_revision: Number((job && job.queued_revision) || 0) || 0,
+    running_revision: Number((job && job.running_revision) || 0) || 0,
+    stage: ['queued', 'detecting_claims', 'retrieving_sources', 'scoring_evidence', 'ready', 'error'].includes(stage) ? stage : 'queued',
+    started_at: Number((job && job.started_at) || 0) || 0,
+    completed_at: Number((job && job.completed_at) || 0) || 0,
+    last_error: String((job && job.last_error) || ''),
+  };
+}
+
+function getNoteAnalysisRevision(summary = null) {
+  return Number((summary && summary.note_revision) || 0) || 0;
+}
+
+function isNoteAnalysisJobPending(job = null, note = null, summary = null) {
+  const normalizedJob = normalizeNoteAnalysisJob(job, String((note && note.id) || ''));
+  if (normalizedJob && ['queued', 'detecting_claims', 'retrieving_sources', 'scoring_evidence'].includes(String(normalizedJob.stage || ''))) {
+    const noteRevision = Number((note && note.analysis_revision) || 0) || 0;
+    return noteRevision <= 0 || Number(normalizedJob.latest_scheduled_revision || 0) >= noteRevision;
+  }
+  return !!(
+    note
+    && String((note && note.body_markdown) || '').trim()
+    && getNoteAnalysisRevision(summary) < Number((note && note.analysis_revision) || 0)
+  );
+}
+
 function getFilteredNotes() {
   const query = normalizeNotesSearchQuery(state.notesSearchQuery || '');
   const list = Array.isArray(state.notes) ? state.notes : [];
@@ -1663,6 +1730,53 @@ function buildProvisionalNoteRegions(markdown = '') {
     weak_count: 1,
     provisional: true,
   }));
+}
+
+function computeProvisionalClaimWeight(claim = {}) {
+  const text = String((claim && claim.claim_text) || '').trim();
+  const lower = text.toLowerCase();
+  if (/\b(19|20)\d{2}\b/.test(text)) return 1.3;
+  if (/\b\d+([.,]\d+)?(%| percent| people| troops| marines| million| billion| thousand)?\b/i.test(text)) return 1.3;
+  if (/\b(started|began|launched|released|announced|killed|attacked|redirected|deployed|wounded|retaliated|fighting|fight|war|conflict|invaded|bombed|struck)\b/.test(lower)) return 1.3;
+  if (/\baccording to\b/.test(lower)) return 1.0;
+  return 1.0;
+}
+
+function computeProvisionalClaimRisk(claim = {}) {
+  const text = String((claim && claim.claim_text) || '').trim();
+  const lower = text.toLowerCase();
+  let risk = 0.54;
+  if (/\b(now|today|currently|ongoing|current|latest)\b/.test(lower)) risk += 0.12;
+  if (/\b(war|conflict|fight|fighting|attack|attacking|invasion|invade|invading|missile|airstrike|ceasefire|troops|military)\b/.test(lower)) risk += 0.14;
+  if (/\b(all|always|never|only|every|entirely|completely)\b/.test(lower)) risk += 0.09;
+  if (/\b(according to|report|reported|reports)\b/.test(lower)) risk -= 0.08;
+  if (/\b(19|20)\d{2}\b/.test(text)) risk -= 0.04;
+  return clamp(risk, 0.28, 0.9);
+}
+
+function computeProvisionalNoteMetrics(markdown = '') {
+  const claims = buildProvisionalNoteClaims(markdown);
+  if (!claims.length) {
+    return { note_score: 0, risk_level: 'needs_review', claim_count: 0 };
+  }
+  const totalWeight = claims.reduce((sum, claim) => sum + computeProvisionalClaimWeight(claim), 0) || 1;
+  const weightedReliability = claims.reduce((sum, claim) => {
+    const weight = computeProvisionalClaimWeight(claim);
+    const reliability = clamp(0.44 - (computeProvisionalClaimRisk(claim) * 0.28), 0.08, 0.42);
+    return sum + (reliability * weight);
+  }, 0) / totalWeight;
+  const instability = claims.reduce((sum, claim) => {
+    const weight = computeProvisionalClaimWeight(claim);
+    return sum + (computeProvisionalClaimRisk(claim) * weight);
+  }, 0) / totalWeight;
+  const logFactor = Math.min(1, Math.log2(1 + claims.length) / 4);
+  const rawScore = ((0.7 * weightedReliability) + (0.08 * logFactor) - (0.24 * instability)) * (0.72 + (0.18 * logFactor));
+  const noteScore = clamp(Math.round(clamp(rawScore, 0.08, 0.42) * 100), 0, 100);
+  return {
+    note_score: noteScore,
+    risk_level: instability >= 0.62 || noteScore < 26 ? 'high_contradiction_risk' : 'needs_review',
+    claim_count: claims.length,
+  };
 }
 
 function shouldShowProvisionalNoteAnalysis() {
@@ -1992,25 +2106,37 @@ function getNoteRiskChipConfig(riskLevel = '') {
 
 function getNoteAnalysisStageLabel(stage = '') {
   const normalized = String(stage || '').trim();
+  if (normalized === 'queued') return 'Queued';
   if (normalized === 'detecting_claims') return 'Detecting claims';
   if (normalized === 'retrieving_sources') return 'Retrieving sources';
   if (normalized === 'scoring_evidence') return 'Scoring evidence';
+  if (normalized === 'error') return 'Evidence stalled';
   return 'Stable';
 }
 
 function getDisplayedNoteScore() {
   const explicit = clamp(Math.round(Number(state.noteScore || 0) || 0), 0, 100);
-  if (explicit > 0 || !shouldShowProvisionalNoteAnalysis()) return explicit;
-  const regions = getRenderableNoteRegions();
-  if (!regions.length) return explicit;
-  const average = regions.reduce((sum, region) => sum + (Number((region && region.region_score) || 0.34) || 0.34), 0) / regions.length;
-  return clamp(Math.round(average * 100), 0, 100);
+  const summaryRevision = getNoteAnalysisRevision(state.activeNoteAnalysis);
+  const noteRevision = Number((state.activeNote && state.activeNote.analysis_revision) || 0) || 0;
+  const verifiedCurrent = !shouldShowProvisionalNoteAnalysis()
+    || (explicit > 0 && summaryRevision >= noteRevision && !isNoteAnalysisJobPending(state.noteAnalysisJob, state.activeNote, state.activeNoteAnalysis));
+  if (verifiedCurrent) return explicit;
+  const provisional = computeProvisionalNoteMetrics(getActiveNoteDraftBody());
+  if (provisional.note_score > 0) return provisional.note_score;
+  return explicit;
 }
 
 function getDisplayedNoteRiskLevel() {
   const explicit = String(state.noteRiskLevel || '').trim();
+  if (!shouldShowProvisionalNoteAnalysis()) {
+    if (explicit && explicit !== 'clean') return explicit;
+    if (getRenderableNoteRegions().length > 0) return 'needs_review';
+    return explicit || 'needs_review';
+  }
+  const provisional = computeProvisionalNoteMetrics(getActiveNoteDraftBody());
+  if (provisional.risk_level) return provisional.risk_level;
   if (explicit && explicit !== 'clean') return explicit;
-  if (shouldShowProvisionalNoteAnalysis() || getRenderableNoteRegions().length > 0) return 'needs_review';
+  if (getRenderableNoteRegions().length > 0) return 'needs_review';
   return explicit || 'needs_review';
 }
 
@@ -2255,6 +2381,10 @@ function computeNoteStatusText() {
   if (!state.activeNote) return 'No note selected';
   if (state.noteSaveState === 'saving') return 'Saving';
   if (state.noteSaveState === 'edited') return 'Edited';
+  const analysisJob = normalizeNoteAnalysisJob(state.noteAnalysisJob, String((state.activeNote && state.activeNote.id) || ''));
+  if (analysisJob && String(analysisJob.stage || '').trim() === 'error') {
+    return analysisJob.last_error ? 'Evidence stalled' : 'Analysis stalled';
+  }
   if (state.noteAnalysisPending) return getNoteAnalysisStageLabel(state.noteAnalysisStage);
   const summary = state.activeNoteAnalysis;
   if (summary && Number(summary.claim_count || 0) <= 0) {
@@ -2543,48 +2673,58 @@ async function refreshActiveNoteAnalysis(options = {}) {
   if (!notesApi) return;
   const targetId = String((options && options.noteId) || state.activeNoteId || '').trim();
   if (!targetId) return;
-  const res = await notesApi.getAnalysis(targetId);
-  if (!res || !res.ok) return;
-  if (String(state.activeNoteId || '').trim() !== targetId) return;
-  state.activeNoteAnalysis = res.analysis_summary || null;
-  state.activeNoteClaims = Array.isArray(res.claims) ? res.claims : [];
-  state.activeNoteRegions = Array.isArray(res.regions) ? res.regions : [];
-  state.activeNoteEvidenceFeed = Array.isArray(res.evidence_feed) ? res.evidence_feed : [];
-  state.noteScore = clamp(Math.round(Number(res.note_score || (res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
-  state.noteRiskLevel = String(res.risk_level || (res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
-  state.noteAnalysisStage = String(res.analysis_stage || '').trim() || 'stable';
-  const noteRevision = Number((state.activeNote && state.activeNote.analysis_revision) || 0);
-  const analyzedRevision = Number((res.analysis_summary && res.analysis_summary.note_revision) || 0);
-  if (noteRevision > 0 && analyzedRevision < noteRevision && String((state.activeNote && state.activeNote.body_markdown) || '').trim()) {
-    state.noteAnalysisPending = true;
-    state.noteAnalysisStage = state.activeNoteClaims.length > 0 ? 'retrieving_sources' : 'detecting_claims';
-    if (options.allowReschedule !== false) {
-      clearNoteAnalysisRefreshTimer();
-      state.noteAnalysisRefreshTimer = setTimeout(() => {
-        state.noteAnalysisRefreshTimer = null;
-        void refreshActiveNoteAnalysis({ noteId: targetId, allowReschedule: true });
-      }, Math.max(1200, Number((options && options.delayMs) || 1800)));
-    }
-  } else {
-    state.noteAnalysisPending = false;
-    if (state.activeNoteClaims.length > 0 && state.activeNoteEvidenceFeed.length === 0) {
-      state.noteAnalysisStage = 'scoring_evidence';
-    } else if (!String(state.noteAnalysisStage || '').trim()) {
-      state.noteAnalysisStage = 'stable';
-    }
-    clearNoteAnalysisRefreshTimer();
-  }
-  renderNotesSurface();
-  if (state.noteCitationPopover && state.noteCitationPopover.open) {
-    const activeRegion = getActiveNoteRegionById(state.activeEvidenceRegionId);
-    if (activeRegion) {
-      focusNoteEvidenceRegion(String(activeRegion.region_id || '').trim(), {
-        claimId: String((state.noteCitationPopover && state.noteCitationPopover.claimId) || '').trim(),
-        scroll: false,
-      });
+  const requestSeq = Number(state.noteAnalysisSeq || 0) + 1;
+  state.noteAnalysisSeq = requestSeq;
+  try {
+    const res = await notesApi.getAnalysis(targetId);
+    if (!res || !res.ok) return;
+    if (requestSeq !== Number(state.noteAnalysisSeq || 0)) return;
+    if (String(state.activeNoteId || '').trim() !== targetId) return;
+    state.activeNoteAnalysis = res.analysis_summary || null;
+    state.activeNoteClaims = Array.isArray(res.claims) ? res.claims : [];
+    state.activeNoteRegions = Array.isArray(res.regions) ? res.regions : [];
+    state.activeNoteEvidenceFeed = Array.isArray(res.evidence_feed) ? res.evidence_feed : [];
+    state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, targetId);
+    state.noteScore = clamp(Math.round(Number(res.note_score || (res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
+    state.noteRiskLevel = String(res.risk_level || (res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
+    const normalizedStage = String(res.analysis_stage || (state.noteAnalysisJob && state.noteAnalysisJob.stage) || '').trim() || 'stable';
+    state.noteAnalysisStage = normalizedStage === 'ready' ? 'stable' : normalizedStage;
+    state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, state.activeNote, state.activeNoteAnalysis);
+    if (state.noteAnalysisPending) {
+      if (!String(state.noteAnalysisStage || '').trim() || state.noteAnalysisStage === 'stable') {
+        state.noteAnalysisStage = state.activeNoteClaims.length > 0 ? 'retrieving_sources' : 'detecting_claims';
+      }
+      if (options.allowReschedule !== false) {
+        clearNoteAnalysisRefreshTimer();
+        state.noteAnalysisRefreshTimer = setTimeout(() => {
+          state.noteAnalysisRefreshTimer = null;
+          void refreshActiveNoteAnalysis({ noteId: targetId, allowReschedule: true });
+        }, Math.max(1200, Number((options && options.delayMs) || 1800)));
+      }
     } else {
-      closeNoteCitationPopover();
+      if (String((state.noteAnalysisJob && state.noteAnalysisJob.stage) || '').trim() === 'error') {
+        state.noteAnalysisStage = 'error';
+      } else if (state.activeNoteClaims.length > 0 && state.activeNoteEvidenceFeed.length === 0) {
+        state.noteAnalysisStage = 'scoring_evidence';
+      } else if (!String(state.noteAnalysisStage || '').trim() || state.noteAnalysisStage === 'ready') {
+        state.noteAnalysisStage = 'stable';
+      }
+      clearNoteAnalysisRefreshTimer();
     }
+    renderNotesSurface();
+    if (state.noteCitationPopover && state.noteCitationPopover.open) {
+      const activeRegion = getActiveNoteRegionById(state.activeEvidenceRegionId);
+      if (activeRegion) {
+        focusNoteEvidenceRegion(String(activeRegion.region_id || '').trim(), {
+          claimId: String((state.noteCitationPopover && state.noteCitationPopover.claimId) || '').trim(),
+          scroll: false,
+        });
+      } else {
+        closeNoteCitationPopover();
+      }
+    }
+  } catch (err) {
+    logRendererError('notes:refreshActiveNoteAnalysis', err, { noteId: targetId });
   }
 }
 
@@ -2604,34 +2744,56 @@ async function saveActiveNote(options = {}) {
   if (title === currentTitle && body === currentBody && state.noteSaveState !== 'edited') {
     return { ok: true, note: state.activeNote };
   }
+  const requestSeq = Number(state.noteSaveSeq || 0) + 1;
+  state.noteSaveSeq = requestSeq;
   state.noteSaveState = 'saving';
   renderNotesSurface();
-  const res = await notesApi.update(noteId, {
-    title,
-    body_markdown: body,
-    active_mode: currentMode,
-  });
-  if (!res || !res.ok || !res.note) {
-    state.noteSaveState = 'edited';
-    renderNotesSurface();
-    if (!options.silent) window.alert((res && res.message) || 'Unable to save note.');
-    return res || { ok: false, message: 'Unable to save note.' };
+  try {
+    const res = await notesApi.update(noteId, {
+      title,
+      body_markdown: body,
+      active_mode: currentMode,
+    });
+    if (!res || !res.ok || !res.note) {
+      if (requestSeq === Number(state.noteSaveSeq || 0) && String(state.activeNoteId || '').trim() === noteId) {
+        state.noteSaveState = 'edited';
+        renderNotesSurface();
+      }
+      if (!options.silent) window.alert((res && res.message) || 'Unable to save note.');
+      return res || { ok: false, message: 'Unable to save note.' };
+    }
+    const savedNoteId = String(res.note.id || '').trim();
+    const isCurrentNote = String(state.activeNoteId || '').trim() === savedNoteId;
+    if (requestSeq === Number(state.noteSaveSeq || 0) && isCurrentNote) {
+      state.activeNote = res.note;
+      state.activeNoteId = savedNoteId;
+      state.noteDraftTitle = String(res.note.title || '');
+      state.noteDraftBody = String(res.note.body_markdown || '');
+      state.noteSaveState = 'saved';
+      state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, savedNoteId);
+      state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, res.note, state.activeNoteAnalysis);
+      const saveStage = String((state.noteAnalysisJob && state.noteAnalysisJob.stage) || 'detecting_claims').trim() || 'detecting_claims';
+      state.noteAnalysisStage = state.noteAnalysisPending
+        ? saveStage
+        : (saveStage === 'error' ? 'error' : 'stable');
+      renderNotesSurface();
+      clearNoteAnalysisRefreshTimer();
+      state.noteAnalysisRefreshTimer = setTimeout(() => {
+        state.noteAnalysisRefreshTimer = null;
+        void refreshActiveNoteAnalysis({ noteId: savedNoteId, allowReschedule: true });
+      }, 1800);
+    }
+    upsertLocalNoteSummary(res.note);
+    return res;
+  } catch (err) {
+    if (requestSeq === Number(state.noteSaveSeq || 0) && String(state.activeNoteId || '').trim() === noteId) {
+      state.noteSaveState = 'edited';
+      renderNotesSurface();
+    }
+    logRendererError('notes:saveActiveNote', err, { noteId });
+    if (!options.silent) window.alert('Unable to save note.');
+    return { ok: false, message: String((err && err.message) || 'Unable to save note.') };
   }
-  state.activeNote = res.note;
-  state.activeNoteId = String(res.note.id || '').trim();
-  state.noteDraftTitle = String(res.note.title || '');
-  state.noteDraftBody = String(res.note.body_markdown || '');
-  upsertLocalNoteSummary(res.note);
-  state.noteSaveState = 'saved';
-  state.noteAnalysisPending = true;
-  state.noteAnalysisStage = 'detecting_claims';
-  renderNotesSurface();
-  clearNoteAnalysisRefreshTimer();
-  state.noteAnalysisRefreshTimer = setTimeout(() => {
-    state.noteAnalysisRefreshTimer = null;
-    void refreshActiveNoteAnalysis({ noteId: String(res.note.id || '').trim(), allowReschedule: true });
-  }, 1800);
-  return res;
 }
 
 function scheduleActiveNoteSave(delayMs = 800) {
@@ -2646,78 +2808,127 @@ function scheduleActiveNoteSave(delayMs = 800) {
 async function setActiveNoteMode(mode = 'edit') {
   if (!notesApi || !state.activeNote) return;
   const nextMode = String(mode || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
+  const noteId = String((state.activeNote && state.activeNote.id) || '').trim();
   logNotesDebug('setActiveNoteMode:start', {
     current: String((state.activeNote && state.activeNote.active_mode) || 'edit'),
     next: nextMode,
-    noteId: String((state.activeNote && state.activeNote.id) || ''),
+    noteId,
   });
   if (String((state.activeNote && state.activeNote.active_mode) || 'edit').trim() === nextMode) {
     renderNotesSurface();
     logNotesDebug('setActiveNoteMode:no-op', { next: nextMode });
     return;
   }
+  const previousMode = String((state.activeNote && state.activeNote.active_mode) || 'edit').trim();
+  const requestSeq = Number(state.noteModeSeq || 0) + 1;
+  state.noteModeSeq = requestSeq;
   state.activeNote = {
     ...state.activeNote,
     active_mode: nextMode,
   };
   upsertLocalNoteSummary(state.activeNote);
   renderNotesSurface();
-  const res = await notesApi.update(String(state.activeNote.id || '').trim(), { active_mode: nextMode });
-  if (res && res.ok && res.note && String(state.activeNoteId || '').trim() === String(res.note.id || '').trim()) {
-    state.activeNote = res.note;
-    upsertLocalNoteSummary(res.note);
-    renderNotesSurface();
+  try {
+    const res = await notesApi.update(noteId, { active_mode: nextMode });
+    if (!res || !res.ok || !res.note) {
+      if (requestSeq === Number(state.noteModeSeq || 0) && String(state.activeNoteId || '').trim() === noteId) {
+        state.activeNote = {
+          ...state.activeNote,
+          active_mode: previousMode,
+        };
+        upsertLocalNoteSummary(state.activeNote);
+        renderNotesSurface();
+      }
+      if (res && res.message) window.alert(res.message);
+      return;
+    }
+    if (requestSeq === Number(state.noteModeSeq || 0) && String(state.activeNoteId || '').trim() === String(res.note.id || '').trim()) {
+      state.activeNote = res.note;
+      state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, noteId) || state.noteAnalysisJob;
+      upsertLocalNoteSummary(res.note);
+      renderNotesSurface();
+    } else {
+      upsertLocalNoteSummary(res.note);
+    }
+    logNotesDebug('setActiveNoteMode:done', {
+      next: nextMode,
+      ok: !!(res && res.ok),
+      noteId: String((res && res.note && res.note.id) || state.activeNoteId || ''),
+    });
+  } catch (err) {
+    if (requestSeq === Number(state.noteModeSeq || 0) && String(state.activeNoteId || '').trim() === noteId) {
+      state.activeNote = {
+        ...state.activeNote,
+        active_mode: previousMode,
+      };
+      upsertLocalNoteSummary(state.activeNote);
+      renderNotesSurface();
+    }
+    logRendererError('notes:setActiveNoteMode', err, { noteId, nextMode });
+    window.alert('Unable to switch note mode.');
   }
-  logNotesDebug('setActiveNoteMode:done', {
-    next: nextMode,
-    ok: !!(res && res.ok),
-    noteId: String((res && res.note && res.note.id) || state.activeNoteId || ''),
-  });
 }
 
 async function loadNoteRecord(noteId = '', options = {}) {
   if (!notesApi) return;
   const targetId = String(noteId || '').trim();
   if (!targetId) return;
+  const requestSeq = Number(state.noteLoadSeq || 0) + 1;
+  state.noteLoadSeq = requestSeq;
+  state.notePendingSwitchTargetId = targetId;
   logNotesDebug('loadNoteRecord:start', {
     targetId,
     activeId: String(state.activeNoteId || ''),
     saveState: String(state.noteSaveState || ''),
   });
-  if (!options.skipSave && state.activeNote && String(state.activeNoteId || '').trim() !== targetId && state.noteSaveState === 'edited') {
-    await saveActiveNote({ silent: true });
+  try {
+    if (!options.skipSave && state.activeNote && String(state.activeNoteId || '').trim() !== targetId && state.noteSaveState === 'edited') {
+      const saveRes = await saveActiveNote({ silent: true });
+      if (saveRes && saveRes.ok === false) return;
+    }
+    const res = await notesApi.get(targetId);
+    if (!res || !res.ok || !res.note) {
+      logNotesDebug('loadNoteRecord:error', { targetId, message: String((res && res.message) || '') });
+      if (!options.silent) window.alert((res && res.message) || 'Unable to load note.');
+      return;
+    }
+    if (requestSeq !== Number(state.noteLoadSeq || 0)) return;
+    closeNoteCitationPopover();
+    clearNoteAnalysisRefreshTimer();
+    state.activeNoteId = String(res.note.id || '').trim();
+    state.activeNote = res.note;
+    state.activeNoteAnalysis = res.analysis_summary || null;
+    state.activeNoteClaims = [];
+    state.activeNoteRegions = [];
+    state.activeNoteEvidenceFeed = [];
+    state.activeEvidenceRegionId = '';
+    state.noteDraftTitle = String(res.note.title || '');
+    state.noteDraftBody = String(res.note.body_markdown || '');
+    state.noteSaveState = 'saved';
+    state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, targetId);
+    state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, res.note, res.analysis_summary || null);
+    state.noteScore = clamp(Math.round(Number((res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
+    state.noteRiskLevel = String((res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
+    const loadStage = String((state.noteAnalysisJob && state.noteAnalysisJob.stage) || 'detecting_claims').trim() || 'detecting_claims';
+    state.noteAnalysisStage = state.noteAnalysisPending
+      ? loadStage
+      : (loadStage === 'error' ? 'error' : 'stable');
+    upsertLocalNoteSummary(res.note);
+    renderNotesSurface();
+    void refreshActiveNoteAnalysis({ noteId: state.activeNoteId, allowReschedule: true });
+    logNotesDebug('loadNoteRecord:done', {
+      targetId,
+      activeId: String(state.activeNoteId || ''),
+      title: String((res.note && res.note.title) || ''),
+    });
+  } catch (err) {
+    logRendererError('notes:loadNoteRecord', err, { targetId });
+    if (!options.silent) window.alert('Unable to load note.');
+  } finally {
+    if (requestSeq === Number(state.noteLoadSeq || 0)) {
+      state.notePendingSwitchTargetId = '';
+    }
   }
-  const res = await notesApi.get(targetId);
-  if (!res || !res.ok || !res.note) {
-    logNotesDebug('loadNoteRecord:error', { targetId, message: String((res && res.message) || '') });
-    if (!options.silent) window.alert((res && res.message) || 'Unable to load note.');
-    return;
-  }
-  closeNoteCitationPopover();
-  clearNoteAnalysisRefreshTimer();
-  state.activeNoteId = String(res.note.id || '').trim();
-  state.activeNote = res.note;
-  state.activeNoteAnalysis = res.analysis_summary || null;
-  state.activeNoteClaims = [];
-  state.activeNoteRegions = [];
-  state.activeNoteEvidenceFeed = [];
-  state.activeEvidenceRegionId = '';
-  state.noteDraftTitle = String(res.note.title || '');
-  state.noteDraftBody = String(res.note.body_markdown || '');
-  state.noteSaveState = 'saved';
-  state.noteAnalysisPending = !!(String(res.note.body_markdown || '').trim()
-    && Number((res.analysis_summary && res.analysis_summary.note_revision) || 0) < Number(res.note.analysis_revision || 0));
-  state.noteScore = clamp(Math.round(Number((res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
-  state.noteRiskLevel = String((res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
-  state.noteAnalysisStage = state.noteAnalysisPending ? 'detecting_claims' : 'stable';
-  upsertLocalNoteSummary(res.note);
-  renderNotesSurface();
-  await refreshActiveNoteAnalysis({ noteId: state.activeNoteId, allowReschedule: true });
-  logNotesDebug('loadNoteRecord:done', {
-    targetId,
-    activeId: String(state.activeNoteId || ''),
-    title: String((res.note && res.note.title) || ''),
-  });
 }
 
 async function loadNotesList(options = {}) {
@@ -2751,6 +2962,7 @@ async function loadNotesList(options = {}) {
   state.noteDraftBody = '';
   state.noteScore = 0;
   state.noteRiskLevel = 'needs_review';
+  state.noteAnalysisJob = null;
   state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
   state.noteAnalysisPending = false;
@@ -2802,6 +3014,7 @@ async function deleteActiveNote() {
   state.noteDraftBody = '';
   state.noteScore = 0;
   state.noteRiskLevel = 'needs_review';
+  state.noteAnalysisJob = null;
   state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
   state.noteAnalysisPending = false;
@@ -14319,7 +14532,9 @@ function bindControls() {
   noteTitleInput?.addEventListener('keydown', async (event) => {
     if ((event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 's') {
       event.preventDefault();
-      await saveActiveNote();
+      await runNotesUiAction('notes:title-input:save', async () => {
+        await saveActiveNote();
+      });
     }
   });
   noteInput?.addEventListener('input', () => {
@@ -14369,30 +14584,44 @@ function bindControls() {
   noteInput?.addEventListener('keydown', async (event) => {
     if ((event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 's') {
       event.preventDefault();
-      await saveActiveNote();
+      await runNotesUiAction('notes:body-input:save', async () => {
+        await saveActiveNote();
+      });
     }
   });
 
   e('notes-new-btn')?.addEventListener('click', async () => {
-    await createNewNote();
+    await runNotesUiAction('notes:new', async () => {
+      await createNewNote();
+    });
   });
   e('notes-save-btn')?.addEventListener('click', async () => {
-    await saveActiveNote();
+    await runNotesUiAction('notes:save', async () => {
+      await saveActiveNote();
+    });
   });
   e('notes-delete-btn')?.addEventListener('click', async () => {
-    await deleteActiveNote();
+    await runNotesUiAction('notes:delete', async () => {
+      await deleteActiveNote();
+    });
   });
   e('notes-create-reference-btn')?.addEventListener('click', async () => {
-    await createReferenceFromActiveNote();
+    await runNotesUiAction('notes:create-reference', async () => {
+      await createReferenceFromActiveNote();
+    });
   });
   e('notes-mode-edit-btn')?.addEventListener('click', async () => {
-    logNotesDebug('click:notes-mode-edit-btn');
-    await setActiveNoteMode('edit');
-    e('notes-input')?.focus();
+    await runNotesUiAction('notes:mode-edit', async () => {
+      logNotesDebug('click:notes-mode-edit-btn');
+      await setActiveNoteMode('edit');
+      e('notes-input')?.focus();
+    });
   });
   e('notes-mode-view-btn')?.addEventListener('click', async () => {
-    logNotesDebug('click:notes-mode-view-btn');
-    await setActiveNoteMode('view');
+    await runNotesUiAction('notes:mode-view', async () => {
+      logNotesDebug('click:notes-mode-view-btn');
+      await setActiveNoteMode('view');
+    });
   });
   e('notes-search')?.addEventListener('input', (event) => {
     state.notesSearchQuery = String(event.target && event.target.value ? event.target.value : '');
@@ -14405,27 +14634,29 @@ function bindControls() {
     renderNotesList();
   });
   e('notes-list')?.addEventListener('click', async (event) => {
-    logNotesDebug('click:notes-list', {
-      target: event.target instanceof Element ? event.target.outerHTML.slice(0, 120) : String(event.target),
-    });
-    const deleteButton = event.target instanceof Element ? event.target.closest('[data-note-delete]') : null;
-    if (deleteButton) {
-      event.preventDefault();
-      event.stopPropagation();
-      const noteId = String(deleteButton.getAttribute('data-note-delete') || '').trim();
-      if (!noteId) return;
-      if (String(state.activeNoteId || '').trim() !== noteId) {
-        await loadNoteRecord(noteId, { silent: true });
+    await runNotesUiAction('notes:list-click', async () => {
+      logNotesDebug('click:notes-list', {
+        target: event.target instanceof Element ? event.target.outerHTML.slice(0, 120) : String(event.target),
+      });
+      const deleteButton = event.target instanceof Element ? event.target.closest('[data-note-delete]') : null;
+      if (deleteButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        const noteId = String(deleteButton.getAttribute('data-note-delete') || '').trim();
+        if (!noteId) return;
+        if (String(state.activeNoteId || '').trim() !== noteId) {
+          await loadNoteRecord(noteId, { silent: true });
+        }
+        await deleteActiveNote();
+        return;
       }
-      await deleteActiveNote();
-      return;
-    }
-    const button = event.target instanceof Element ? event.target.closest('[data-note-id]') : null;
-    if (!button) return;
-    const noteId = String(button.getAttribute('data-note-id') || '').trim();
-    logNotesDebug('click:notes-list:item', { noteId, activeId: String(state.activeNoteId || '') });
-    if (!noteId || noteId === String(state.activeNoteId || '').trim()) return;
-    await loadNoteRecord(noteId);
+      const button = event.target instanceof Element ? event.target.closest('[data-note-id]') : null;
+      if (!button) return;
+      const noteId = String(button.getAttribute('data-note-id') || '').trim();
+      logNotesDebug('click:notes-list:item', { noteId, activeId: String(state.activeNoteId || '') });
+      if (!noteId || noteId === String(state.activeNoteId || '').trim()) return;
+      await loadNoteRecord(noteId);
+    });
   });
   e('notes-citation-body')?.addEventListener('click', (event) => {
     const actionButton = event.target instanceof Element ? event.target.closest('[data-claim-action]') : null;
