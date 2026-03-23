@@ -15952,6 +15952,7 @@ async function createReferenceFromNote(noteId = '') {
   const note = noteRes.note;
   const analysisRes = await store.getAnalysis(targetId);
   const claims = Array.isArray(analysisRes && analysisRes.claims) ? analysisRes.claims : [];
+  const evidenceFeed = Array.isArray(analysisRes && analysisRes.evidence_feed) ? analysisRes.evidence_feed : [];
 
   const associatedUrls = [];
   const seenUrls = new Set();
@@ -16010,6 +16011,30 @@ async function createReferenceFromNote(noteId = '') {
       title: String(note.title || 'Note').trim() || 'Note',
       type: 'markdown',
       content: String(note.body_markdown || ''),
+    }),
+    createArtifact({
+      title: `${String(note.title || 'Note').trim() || 'Note'} Evidence Summary`,
+      type: 'markdown',
+      content: [
+        `# ${String(note.title || 'Note').trim() || 'Note'} Evidence Summary`,
+        '',
+        `Evidence reliability: ${Number((analysisRes && analysisRes.note_score) || 0) || 0}/100`,
+        `Risk: ${String((analysisRes && analysisRes.risk_level) || 'needs_review').replace(/_/g, ' ')}`,
+        '',
+        ...evidenceFeed.flatMap((region) => {
+          const supportItems = Array.isArray(region && region.support_items) ? region.support_items : [];
+          const contradictionItems = Array.isArray(region && region.contradiction_items) ? region.contradiction_items : [];
+          return [
+            `## ${String((region && region.region_text) || '').trim() || 'Region'}`,
+            '',
+            `Status: ${String((region && region.region_status) || 'weak_evidence').replace(/_/g, ' ')}`,
+            '',
+            ...(supportItems.slice(0, 2).map((item) => `- Support: ${String((item && item.source && item.source.title) || (item && item.source && item.source.url) || 'Source')} - ${String((item && item.source && item.source.url) || '').trim()}`)),
+            ...(contradictionItems.slice(0, 1).map((item) => `- Contradiction: ${String((item && item.source && item.source.title) || (item && item.source && item.source.url) || 'Source')} - ${String((item && item.source && item.source.url) || '').trim()}`)),
+            '',
+          ];
+        }),
+      ].join('\n'),
     }),
   ];
   const nextTabs = associatedUrls
@@ -20371,6 +20396,20 @@ ipcMain.handle('notes:get_analysis', async (_event, payload) => {
   return {
     ...res,
     analysis_state: analysisState,
+    analysis_stage: analysisState === 'refreshing' ? 'retrieving_sources' : 'stable',
+  };
+});
+
+ipcMain.handle('notes:get_evidence_feed', async (_event, payload) => {
+  const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  const res = await getNotesStore().getEvidenceFeed(noteId);
+  if (!res || res.ok === false) return res;
+  const analysisState = noteNeedsFreshAnalysis(res.note, res.analysis_summary || null) ? 'refreshing' : 'ready';
+  if (analysisState === 'refreshing') scheduleNoteAnalysis(noteId, 100);
+  return {
+    ...res,
+    analysis_state: analysisState,
+    analysis_stage: analysisState === 'refreshing' ? 'retrieving_sources' : 'stable',
   };
 });
 
@@ -20432,6 +20471,12 @@ function createMainWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const text = String(message || '').trim();
+    if (!text) return;
+    if (!/\[notes-debug\]|\[renderer-error\]/.test(text)) return;
+    console.log(`[renderer:${level}] ${text} (${sourceId || 'renderer'}:${line || 0})`);
+  });
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('closed', () => {
     mainWindow = null;

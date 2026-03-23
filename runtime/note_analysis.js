@@ -226,25 +226,123 @@ function extractExplicitUrls(markdown = '') {
   return dedupeBy(out, (item) => item.canonical_url);
 }
 
+function isMarkdownHeadingLine(line = '') {
+  const text = String(line || '').trim();
+  return !!text && (
+    /^\s{0,3}#{1,6}\s+/.test(text)
+    || /^\*\*[^*]+\*\*$/.test(text)
+    || /^__[^_]+__$/.test(text)
+  );
+}
+
+function isMarkdownListLine(line = '') {
+  return /^(\s*)([-+*]|\d+\.)\s+/.test(String(line || ''));
+}
+
+function isMarkdownSeparatorLine(line = '') {
+  return /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(String(line || ''));
+}
+
 function splitClaims(markdown = '') {
   const text = String(markdown || '');
   const out = [];
-  const re = /[^.!?\n]+[.!?]?/g;
-  let match = re.exec(text);
-  while (match) {
-    const chunk = String(match[0] || '');
-    const trimmed = chunk.trim();
-    if (!trimmed) {
-      match = re.exec(text);
-      continue;
+  let offset = 0;
+  text.split('\n').forEach((lineRaw) => {
+    const line = String(lineRaw || '');
+    const trimmed = line.trim();
+    if (!trimmed || isMarkdownHeadingLine(line) || isMarkdownSeparatorLine(line) || isMarkdownListLine(line)) {
+      offset += line.length + 1;
+      return;
     }
-    const startTrim = chunk.indexOf(trimmed);
-    const start = match.index + Math.max(0, startTrim);
-    const end = start + trimmed.length;
-    splitCompoundClaimSegments(trimmed, start).forEach((segment) => out.push(segment));
-    match = re.exec(text);
-  }
+    const re = /[^.!?]+[.!?]?/g;
+    let match = re.exec(line);
+    while (match) {
+      const chunk = String(match[0] || '');
+      const sentence = chunk.trim();
+      if (sentence) {
+        const startTrim = chunk.indexOf(sentence);
+        const start = offset + match.index + Math.max(0, startTrim);
+        splitCompoundClaimSegments(sentence, start).forEach((segment) => out.push(segment));
+      }
+      match = re.exec(line);
+    }
+    offset += line.length + 1;
+  });
   return out;
+}
+
+function classifyClaimType(claim = {}) {
+  const claimText = normalizeWhitespace(String((claim && claim.claim_text) || ''));
+  const lower = claimText.toLowerCase();
+  if (!claimText) return 'normative_opinion';
+  if (/\b(i think|in my view|should|must|ought|better|worse|best|worst|need to)\b/i.test(lower)) return 'normative_opinion';
+  if (/\b(thesis|paradigm|fundamental departure|represents|points the way|demonstrates the viability|significant cognitive benefits)\b/i.test(lower)) return 'broad_interpretation';
+  if (/\baccording to\b/i.test(lower)) return 'attribution';
+  if (/\b(19|20)\d{2}\b/.test(claimText)) return 'date_time';
+  if (/\b\d+([.,]\d+)?(%| percent| people| troops| marines| million| billion| thousand)?\b/i.test(claimText)) return 'numeric_stat';
+  if (/\b(is down|is up|grew|fell|increase|decrease|dominance|trend|already in the region)\b/i.test(lower)) return 'state_trend';
+  if (/\b(started|began|launched|released|announced|killed|attacked|redirected|deployed|wounded|retaliated)\b/i.test(lower)) return 'event';
+  return 'state_trend';
+}
+
+function getClaimTypeWeight(claimType = '') {
+  const type = String(claimType || '').trim();
+  if (['numeric_stat', 'date_time', 'event'].includes(type)) return 1.3;
+  if (['state_trend', 'attribution'].includes(type)) return 1.0;
+  if (type === 'broad_interpretation') return 0.5;
+  return 0;
+}
+
+function isHardScoredClaimType(claimType = '') {
+  return getClaimTypeWeight(claimType) > 0;
+}
+
+function buildNoteAggregate(claims = []) {
+  const items = (Array.isArray(claims) ? claims : []).filter(Boolean);
+  const weighted = items.filter((claim) => getClaimTypeWeight(claim.claim_type) > 0);
+  if (weighted.length === 0) {
+    return {
+      note_score: 0,
+      coverage_score: 0,
+      risk_level: 'needs_review',
+    };
+  }
+  const totalWeight = weighted.reduce((sum, claim) => sum + getClaimTypeWeight(claim.claim_type), 0) || 1;
+  const weightedMean = weighted.reduce((sum, claim) => sum + ((Number(claim.claim_reliability || 0) || 0) * getClaimTypeWeight(claim.claim_type)), 0) / totalWeight;
+  const coverageScore = weighted.reduce((sum, claim) => {
+    const weight = getClaimTypeWeight(claim.claim_type);
+    const coverage = Math.max(Number(claim.support_confidence || 0) || 0, Number(claim.contradict_confidence || 0) || 0);
+    return sum + (coverage * weight);
+  }, 0) / totalWeight;
+  const corroborationScore = weighted.reduce((sum, claim) => sum + ((Number(claim.corroboration || 0) || 0) * getClaimTypeWeight(claim.claim_type)), 0) / totalWeight;
+  const contradictionPenalty = weighted.reduce((sum, claim) => {
+    const weight = getClaimTypeWeight(claim.claim_type);
+    const severity = String(claim.status || '') === 'contradicted' ? 1 : 0.45;
+    return sum + ((Number(claim.contradict_confidence || 0) || 0) * severity * weight);
+  }, 0) / totalWeight;
+  const supportedCount = weighted.filter((claim) => ['supported', 'mostly_supported'].includes(String(claim.status || ''))).length;
+  const densityBonus = Math.tanh(supportedCount / 12) * 0.1;
+  const stability = Math.min(1, Math.log2(1 + weighted.length) / 4);
+  const rawScore = ((0.72 * weightedMean)
+    + (0.12 * coverageScore)
+    + (0.06 * corroborationScore)
+    + densityBonus
+    - (0.28 * contradictionPenalty)) * (0.78 + (0.22 * stability));
+  const noteScore = Math.round(clampUnit(rawScore) * 100);
+  const highRisk = weighted.some((claim) => {
+    const weight = getClaimTypeWeight(claim.claim_type);
+    const support = Number(claim.support_confidence || 0) || 0;
+    const contradict = Number(claim.contradict_confidence || 0) || 0;
+    return weight >= 1
+      && contradict >= 0.72
+      && contradict >= support + 0.08;
+  });
+  const weakOrContradicted = weighted.filter((claim) => ['contradicted', 'weak_evidence', 'mixed'].includes(String(claim.status || ''))).length / Math.max(1, weighted.length);
+  return {
+    note_score: noteScore,
+    coverage_score: Number(coverageScore.toFixed(4)),
+    risk_level: highRisk ? 'high_contradiction_risk' : (weakOrContradicted >= 0.28 || noteScore < 72 ? 'needs_review' : 'clean'),
+  };
 }
 
 function splitCompoundClaimSegments(sentenceText = '', startOffset = 0) {
@@ -391,6 +489,10 @@ function detectFactualClaim(claimText = '') {
   const hasConflictCue = /\b(war|conflict|fight|fighting|attack|attacking|invasion|invade|invading|missile|airstrike|ceasefire|troops|military)\b/.test(lower);
   const concreteTerms = tokenize(text).filter((item) => item.length >= 3 && !QUERY_STOPWORDS.has(item));
   const hasConcreteTopic = concreteTerms.length >= 2;
+  const claimType = classifyClaimType({ claim_text: text });
+  if (!isHardScoredClaimType(claimType)) {
+    return { factuality: 'non_factual', modality: 'statement' };
+  }
   if (hasVerb && (hasYear || hasNumber || hasEntity || hasConflictCue || (hasCurrentCue && hasConcreteTopic))) {
     return { factuality: 'factual', modality: 'statement' };
   }
@@ -595,10 +697,10 @@ function buildClaimSearchPlans(claim = {}) {
 function summarizeAnalysis(claims = []) {
   return {
     claim_count: claims.length,
-    supported_count: claims.filter((item) => item.status === 'supported').length,
+    supported_count: claims.filter((item) => ['supported', 'mostly_supported'].includes(item.status)).length,
     contested_count: claims.filter((item) => item.status === 'mixed').length,
     uncertain_count: claims.filter((item) => item.status === 'contradicted').length,
-    no_evidence_count: claims.filter((item) => item.status === 'insufficient_evidence').length,
+    no_evidence_count: claims.filter((item) => item.status === 'weak_evidence').length,
   };
 }
 
@@ -657,7 +759,7 @@ function buildRewriteSuggestions(claim = {}, topSupport = null, topContradict = 
       });
     }
   }
-  if ((claim.status === 'mixed' || claim.status === 'insufficient_evidence') && topSupport) {
+  if ((claim.status === 'mixed' || claim.status === 'weak_evidence') && topSupport) {
     const replacement = firstSentence(String((topSupport && topSupport.passage && topSupport.passage.passage_text) || (topSupport && topSupport.excerpt) || ''));
     if (replacement) {
       suggestions.push({
@@ -729,17 +831,24 @@ function createNoteAnalysisEngine(options = {}) {
           normalized_claim_text: normalizedClaim,
           time_text: yearTokens(item.claim_text).join(' '),
           ...structure,
+          claim_type: classifyClaimType({ claim_text: item.claim_text, ...structure }),
+          claim_weight: 0,
           modality: factuality.modality,
           factuality: factuality.factuality,
-          status: 'insufficient_evidence',
+          status: 'weak_evidence',
           top_score: 0,
           highlight_score: 0,
           truth_confidence: 0,
           support_confidence: 0,
           contradict_confidence: 0,
+          corroboration: 0,
+          authority: 0,
+          freshness: 0,
+          claim_reliability: 0,
           explanation: '',
           rewrite_suggestions: [],
         };
+        claim.claim_weight = getClaimTypeWeight(claim.claim_type);
         return claim;
       }));
     const claims = rawClaims.filter((item) => item.factuality === 'factual');
@@ -1124,7 +1233,7 @@ function createNoteAnalysisEngine(options = {}) {
       const supportConfidence = Number((topSupport && topSupport.score) || 0) || 0;
       const contradictConfidence = Number((topChallenge && topChallenge.score) || 0) || 0;
       const absolutistClaim = /\b(every|all|always|never|entire|completely|only)\b/i.test(String(claim.claim_text || ''));
-      let status = 'insufficient_evidence';
+      let status = 'weak_evidence';
       if (
         supportConfidence >= 0.62
         && contradictConfidence >= 0.48
@@ -1133,21 +1242,28 @@ function createNoteAnalysisEngine(options = {}) {
         status = 'mixed';
       } else if (topChallenge && contradictConfidence >= 0.58 && contradictConfidence >= supportConfidence + 0.08) {
         status = 'contradicted';
-      } else if (topSupport && supportConfidence >= HIGHLIGHT_THRESHOLD && supportConfidence >= contradictConfidence + 0.06) {
+      } else if (topSupport && supportConfidence >= 0.82 && supportConfidence >= contradictConfidence + 0.08) {
         status = 'supported';
+      } else if (topSupport && supportConfidence >= HIGHLIGHT_THRESHOLD && supportConfidence >= contradictConfidence + 0.06) {
+        status = 'mostly_supported';
       } else if ((topSupport && supportConfidence >= 0.56) || (topChallenge && contradictConfidence >= 0.56)) {
         status = 'mixed';
       }
-      if (status === 'supported' && absolutistClaim && topSupport && Number(topSupport.contradiction_score || 0) >= 0.28) {
+      if ((status === 'supported' || status === 'mostly_supported') && absolutistClaim && topSupport && Number(topSupport.contradiction_score || 0) >= 0.28) {
         status = 'mixed';
       }
       claim.status = status;
       claim.verdict = status;
       claim.support_confidence = supportConfidence;
       claim.contradict_confidence = contradictConfidence;
+      claim.corroboration = Math.max(supportCorroboration, challengeCorroboration);
+      claim.authority = Math.max(Number((topSupport && topSupport.authority_score) || 0) || 0, Number((topChallenge && topChallenge.authority_score) || 0) || 0);
+      claim.freshness = Math.max(Number((topSupport && topSupport.freshness_score) || 0) || 0, Number((topChallenge && topChallenge.freshness_score) || 0) || 0);
       claim.truth_confidence = clampUnit(
         status === 'supported'
           ? supportConfidence * (1 - (contradictConfidence * 0.35))
+          : status === 'mostly_supported'
+            ? supportConfidence * (1 - (contradictConfidence * 0.42))
           : status === 'contradicted'
             ? contradictConfidence * (1 - (supportConfidence * 0.35))
             : status === 'mixed'
@@ -1156,6 +1272,12 @@ function createNoteAnalysisEngine(options = {}) {
       );
       claim.top_score = claim.truth_confidence;
       claim.highlight_score = claim.truth_confidence;
+      claim.claim_reliability = clampUnit(
+        0.5
+        + (0.55 * supportConfidence)
+        - (0.75 * contradictConfidence)
+        + (0.1 * claim.corroboration)
+      );
       claim.explanation = buildClaimExplanation(claim, topSupport, topChallenge);
       claim.rewrite_suggestions = buildRewriteSuggestions(claim, topSupport, topChallenge);
       const storedCitations = dedupeBy(
@@ -1184,6 +1306,7 @@ function createNoteAnalysisEngine(options = {}) {
     });
 
     const summary = summarizeAnalysis(claims);
+    const aggregate = buildNoteAggregate(claims);
     return {
       ok: true,
       analysis_run_id: analysisRunId,
@@ -1199,6 +1322,9 @@ function createNoteAnalysisEngine(options = {}) {
       passages,
       citations,
       summary,
+      note_score: aggregate.note_score,
+      coverage_score: aggregate.coverage_score,
+      risk_level: aggregate.risk_level,
       explicit_urls: explicitUrls,
     };
   }

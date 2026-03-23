@@ -77,9 +77,11 @@ test('note analysis extracts URLs, finds factual claims, and ranks evidence', as
   assert.ok(result.sources.every((source) => source.source_kind !== 'local_evidence'));
   assert.ok(result.passages.length >= 1);
   assert.ok(result.citations.length >= 1);
-  assert.ok(['supported', 'contradicted', 'mixed', 'insufficient_evidence'].includes(result.claims[0].status));
+  assert.ok(['supported', 'mostly_supported', 'contradicted', 'mixed', 'weak_evidence'].includes(result.claims[0].status));
   assert.ok(Number(result.claims[0].top_score || 0) > 0);
   assert.ok(Number(result.claims[0].truth_confidence || 0) > 0);
+  assert.ok(Number(result.note_score || 0) >= 0);
+  assert.ok(['clean', 'needs_review', 'high_contradiction_risk'].includes(String(result.risk_level || '')));
 });
 
 test('compound factual sentences are split into smaller claim spans', async () => {
@@ -145,6 +147,42 @@ test('note analysis ignores non-factual and speculative-only notes', async () =>
   assert.equal(result.sources.length, 0);
   assert.equal(result.citations.length, 0);
   assert.equal(result.message, 'No factual claims detected.');
+});
+
+test('note analysis ignores markdown headings while keeping factual body lines', async () => {
+  const engine = createNoteAnalysisEngine({
+    webSearch: async () => ({
+      results: [{
+        title: 'Reference',
+        url: 'https://example.com/reference',
+        snippet: 'OpenAI released GPT-5 in 2025 according to the company announcement.',
+      }],
+    }),
+    fetchUrl: async () => ({
+      ok: true,
+      title: 'Reference',
+      markdown: 'OpenAI released GPT-5 in 2025 according to the company announcement.',
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_heading_filter',
+    analysis_revision: 1,
+    body_markdown: [
+      '## How it started',
+      '',
+      'OpenAI released GPT-5 in 2025.',
+    ].join('\n'),
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.claims.length, 1);
+  assert.equal(result.claims[0].claim_text, 'OpenAI released GPT-5 in 2025.');
 });
 
 test('note analysis uses orthogonal queries and snippet fallback when fetch fails', async () => {

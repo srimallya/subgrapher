@@ -60,10 +60,14 @@ test('notes store supports CRUD and analysis persistence', async () => {
       time_text: '2025',
       modality: 'statement',
       factuality: 'factual',
+      claim_type: 'date_time',
       status: 'supported',
       truth_confidence: 0.82,
       support_confidence: 0.82,
       contradict_confidence: 0.08,
+      corroboration: 0.6,
+      authority: 0.9,
+      freshness: 0.6,
       explanation: 'Multiple web sources support this wording.',
       rewrite_suggestions: [{
         key: 'attribute',
@@ -123,6 +127,16 @@ test('notes store supports CRUD and analysis persistence', async () => {
   assert.equal(analysisRes.claims[0].contradict_confidence, 0.08);
   assert.equal(analysisRes.claims[0].rewrite_suggestions.length, 1);
   assert.equal(analysisRes.analysis_summary.evidence_mode, 'web_only');
+  assert.equal(analysisRes.claims[0].claim_type, 'date_time');
+  assert.ok(analysisRes.note_score > 0);
+  assert.ok(analysisRes.coverage_score > 0);
+  assert.ok(['clean', 'needs_review', 'high_contradiction_risk'].includes(analysisRes.risk_level));
+  assert.equal(Array.isArray(analysisRes.regions), true);
+  assert.equal(Array.isArray(analysisRes.evidence_feed), true);
+  assert.equal(analysisRes.regions.length, 1);
+  assert.equal(analysisRes.evidence_feed.length, 1);
+  assert.equal(analysisRes.evidence_feed[0].region_text, 'OpenAI released GPT-5 in 2025.');
+  assert.equal(analysisRes.evidence_feed[0].support_items.length, 1);
 
   const citationsRes = await store.getCitations(noteId, 'claim_1');
   assert.equal(citationsRes.ok, true);
@@ -132,6 +146,11 @@ test('notes store supports CRUD and analysis persistence', async () => {
   assert.equal(citationsRes.citations[0].stance, 'support');
   assert.equal(citationsRes.citations[0].provenance_label, 'from web search');
   assert.match(citationsRes.citations[0].relevance_reason, /support/i);
+
+  const evidenceFeedRes = await store.getEvidenceFeed(noteId);
+  assert.equal(evidenceFeedRes.ok, true);
+  assert.equal(evidenceFeedRes.evidence_feed.length, 1);
+  assert.equal(evidenceFeedRes.evidence_feed[0].region_status, 'supported');
 
   const deleteRes = await store.deleteNote(noteId);
   assert.equal(deleteRes.ok, true);
@@ -199,6 +218,7 @@ test('notes citations filter out local evidence rows and keep web provenance', a
       time_text: '2025',
       modality: 'statement',
       factuality: 'factual',
+      claim_type: 'date_time',
       status: 'mixed',
       truth_confidence: 0.58,
       support_confidence: 0.58,
@@ -301,6 +321,7 @@ test('notes citations can resolve stored claims by text and range when ids chang
       time_text: '2025',
       modality: 'statement',
       factuality: 'factual',
+      claim_type: 'date_time',
       status: 'supported',
       truth_confidence: 0.8,
       support_confidence: 0.8,

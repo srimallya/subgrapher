@@ -12,6 +12,12 @@ function nowTs() {
   return Date.now();
 }
 
+function clampUnit(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.min(1, numeric));
+}
+
 function clampNumber(value, min, max, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -152,6 +158,9 @@ function ensureSchema(db) {
       contested_count INTEGER NOT NULL DEFAULT 0,
       uncertain_count INTEGER NOT NULL DEFAULT 0,
       no_evidence_count INTEGER NOT NULL DEFAULT 0,
+      note_score REAL NOT NULL DEFAULT 0,
+      coverage_score REAL NOT NULL DEFAULT 0,
+      risk_level TEXT NOT NULL DEFAULT 'needs_review',
       message TEXT NOT NULL DEFAULT '',
       FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
     );
@@ -182,8 +191,17 @@ function ensureSchema(db) {
   ensureTableColumn(db, 'note_claims', 'support_confidence', 'REAL NOT NULL DEFAULT 0');
   ensureTableColumn(db, 'note_claims', 'contradict_confidence', 'REAL NOT NULL DEFAULT 0');
   ensureTableColumn(db, 'note_claims', 'truth_confidence', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'claim_type', "TEXT NOT NULL DEFAULT 'state_trend'");
+  ensureTableColumn(db, 'note_claims', 'claim_weight', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'claim_reliability', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'corroboration', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'authority', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'note_claims', 'freshness', 'REAL NOT NULL DEFAULT 0');
   ensureTableColumn(db, 'note_claims', 'explanation', "TEXT NOT NULL DEFAULT ''");
   ensureTableColumn(db, 'note_claims', 'rewrite_suggestions', "TEXT NOT NULL DEFAULT '[]'");
+  ensureTableColumn(db, 'analysis_runs', 'note_score', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'analysis_runs', 'coverage_score', 'REAL NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'analysis_runs', 'risk_level', "TEXT NOT NULL DEFAULT 'needs_review'");
   db.run(`
     CREATE TABLE IF NOT EXISTS note_sources (
       id TEXT PRIMARY KEY,
@@ -316,10 +334,183 @@ function decorateAnalysisSummary(summary = null) {
   return {
     ...summary,
     evidence_mode: NOTE_EVIDENCE_MODE,
+    note_score: clampNumber(summary.note_score, 0, 100, 0),
+    coverage_score: clampUnit(summary.coverage_score),
+    risk_level: String(summary.risk_level || 'needs_review').trim() || 'needs_review',
     contradicted_count: clampNumber(summary.uncertain_count, 0, Number.MAX_SAFE_INTEGER, 0),
     mixed_count: clampNumber(summary.contested_count, 0, Number.MAX_SAFE_INTEGER, 0),
     insufficient_evidence_count: clampNumber(summary.no_evidence_count, 0, Number.MAX_SAFE_INTEGER, 0),
   };
+}
+
+function normalizeClaimStatus(value = '') {
+  const status = String(value || '').trim();
+  if (status === 'insufficient_evidence') return 'weak_evidence';
+  if (['supported', 'mostly_supported', 'mixed', 'weak_evidence', 'contradicted'].includes(status)) return status;
+  return 'weak_evidence';
+}
+
+function getClaimTypeWeight(claimType = '') {
+  const type = String(claimType || '').trim();
+  if (['numeric_stat', 'date_time', 'event'].includes(type)) return 1.3;
+  if (['state_trend', 'attribution'].includes(type)) return 1.0;
+  if (type === 'broad_interpretation') return 0.5;
+  return 0;
+}
+
+function computeClaimReliability(claim = {}) {
+  const explicit = Number((claim && claim.claim_reliability) || 0);
+  if (explicit > 0) return clampUnit(explicit);
+  const support = clampUnit(Number((claim && claim.support_confidence) || 0));
+  const contradict = clampUnit(Number((claim && claim.contradict_confidence) || 0));
+  const corroboration = clampUnit(Number((claim && claim.corroboration) || 0));
+  return clampUnit(0.5 + (0.55 * support) - (0.75 * contradict) + (0.1 * corroboration));
+}
+
+function computeAggregateMetrics(claims = []) {
+  const weighted = (Array.isArray(claims) ? claims : []).filter((claim) => getClaimTypeWeight(claim && claim.claim_type) > 0);
+  if (weighted.length === 0) {
+    return { note_score: 0, coverage_score: 0, risk_level: 'needs_review' };
+  }
+  const totalWeight = weighted.reduce((sum, claim) => sum + getClaimTypeWeight(claim.claim_type), 0) || 1;
+  const weightedMean = weighted.reduce((sum, claim) => sum + (computeClaimReliability(claim) * getClaimTypeWeight(claim.claim_type)), 0) / totalWeight;
+  const coverageScore = weighted.reduce((sum, claim) => {
+    const coverage = Math.max(Number((claim && claim.support_confidence) || 0) || 0, Number((claim && claim.contradict_confidence) || 0) || 0);
+    return sum + (coverage * getClaimTypeWeight(claim.claim_type));
+  }, 0) / totalWeight;
+  const corroborationScore = weighted.reduce((sum, claim) => sum + ((Number((claim && claim.corroboration) || 0) || 0) * getClaimTypeWeight(claim.claim_type)), 0) / totalWeight;
+  const contradictionPenalty = weighted.reduce((sum, claim) => {
+    const severity = normalizeClaimStatus(claim && claim.status) === 'contradicted' ? 1 : 0.45;
+    return sum + ((Number((claim && claim.contradict_confidence) || 0) || 0) * severity * getClaimTypeWeight(claim.claim_type));
+  }, 0) / totalWeight;
+  const supportedCount = weighted.filter((claim) => ['supported', 'mostly_supported'].includes(normalizeClaimStatus(claim && claim.status))).length;
+  const densityBonus = Math.tanh(supportedCount / 12) * 0.1;
+  const stability = Math.min(1, Math.log2(1 + weighted.length) / 4);
+  const rawScore = ((0.72 * weightedMean)
+    + (0.12 * coverageScore)
+    + (0.06 * corroborationScore)
+    + densityBonus
+    - (0.28 * contradictionPenalty)) * (0.78 + (0.22 * stability));
+  const noteScore = Math.round(clampUnit(rawScore) * 100);
+  const highRisk = weighted.some((claim) => {
+    const weight = getClaimTypeWeight(claim.claim_type);
+    const support = Number((claim && claim.support_confidence) || 0) || 0;
+    const contradict = Number((claim && claim.contradict_confidence) || 0) || 0;
+    return weight >= 1 && contradict >= 0.72 && contradict >= support + 0.08;
+  });
+  const weakMass = weighted.filter((claim) => ['contradicted', 'weak_evidence', 'mixed'].includes(normalizeClaimStatus(claim && claim.status))).length / Math.max(1, weighted.length);
+  return {
+    note_score: noteScore,
+    coverage_score: Number(coverageScore.toFixed(4)),
+    risk_level: highRisk ? 'high_contradiction_risk' : (weakMass >= 0.28 || noteScore < 72 ? 'needs_review' : 'clean'),
+  };
+}
+
+function buildSentenceRegions(bodyMarkdown = '', claims = []) {
+  const text = String(bodyMarkdown || '');
+  const scored = [];
+  let offset = 0;
+  let paragraphIndex = 0;
+  text.split('\n').forEach((lineRaw) => {
+    const line = String(lineRaw || '');
+    const trimmed = line.trim();
+    const isHeading = !!trimmed && (/^\s{0,3}#{1,6}\s+/.test(trimmed) || /^\*\*[^*]+\*\*$/.test(trimmed) || /^__[^_]+__$/.test(trimmed));
+    const isSeparator = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(trimmed);
+    const isList = /^(\s*)([-+*]|\d+\.)\s+/.test(line);
+    if (!trimmed || isHeading || isSeparator || isList) {
+      offset += line.length + 1;
+      if (!trimmed) paragraphIndex += 1;
+      return;
+    }
+    const re = /[^.!?]+[.!?]?/g;
+    let match = re.exec(line);
+    while (match) {
+      const chunk = String(match[0] || '');
+      const sentence = chunk.trim();
+      if (sentence) {
+        const localStart = match.index + chunk.indexOf(sentence);
+        const start = offset + localStart;
+        const end = start + sentence.length;
+        const linkedClaims = (Array.isArray(claims) ? claims : []).filter((claim) => {
+          const claimStart = Number((claim && claim.start_offset) ?? -1);
+          const claimEnd = Number((claim && claim.end_offset) ?? -1);
+          return claimStart >= 0 && claimEnd > claimStart && claimEnd > start && claimStart < end;
+        });
+        if (linkedClaims.length > 0) {
+          const totalWeight = linkedClaims.reduce((sum, claim) => sum + Math.max(0.2, getClaimTypeWeight(claim.claim_type)), 0) || 1;
+          const average = linkedClaims.reduce((sum, claim) => sum + (computeClaimReliability(claim) * Math.max(0.2, getClaimTypeWeight(claim.claim_type))), 0) / totalWeight;
+          const hardContradiction = linkedClaims.some((claim) => normalizeClaimStatus(claim.status) === 'contradicted' && Number((claim && claim.contradict_confidence) || 0) >= 0.72);
+          const hasMixed = linkedClaims.some((claim) => normalizeClaimStatus(claim.status) === 'mixed');
+          const hasWeak = linkedClaims.some((claim) => normalizeClaimStatus(claim.status) === 'weak_evidence');
+          scored.push({
+            region_id: `region_${scored.length}_${start}_${end}`,
+            start_offset: start,
+            end_offset: end,
+            paragraph_index: paragraphIndex,
+            region_text: sentence,
+            region_score: Number(average.toFixed(4)),
+            region_status: hardContradiction ? 'contradicted' : (average >= 0.82 ? 'supported' : (average >= 0.68 ? 'mostly_supported' : (hasMixed ? 'mixed' : (hasWeak ? 'weak_evidence' : 'weak_evidence')))),
+            claim_ids: linkedClaims.map((claim) => String((claim && claim.id) || '').trim()).filter(Boolean),
+            support_count: linkedClaims.filter((claim) => ['supported', 'mostly_supported'].includes(normalizeClaimStatus(claim.status))).length,
+            contradict_count: linkedClaims.filter((claim) => normalizeClaimStatus(claim.status) === 'contradicted').length,
+            weak_count: linkedClaims.filter((claim) => ['mixed', 'weak_evidence'].includes(normalizeClaimStatus(claim.status))).length,
+          });
+        }
+      }
+      match = re.exec(line);
+    }
+    offset += line.length + 1;
+    paragraphIndex += 1;
+  });
+  const merged = [];
+  scored.forEach((region) => {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.paragraph_index === region.paragraph_index && prev.region_status === region.region_status && Math.abs(prev.end_offset - region.start_offset) <= 2) {
+      prev.end_offset = region.end_offset;
+      prev.region_text = `${prev.region_text} ${region.region_text}`.trim();
+      prev.region_score = Number((((prev.region_score + region.region_score) / 2)).toFixed(4));
+      prev.claim_ids = Array.from(new Set(prev.claim_ids.concat(region.claim_ids)));
+      prev.support_count += region.support_count;
+      prev.contradict_count += region.contradict_count;
+      prev.weak_count += region.weak_count;
+      return;
+    }
+    merged.push({ ...region });
+  });
+  return merged;
+}
+
+function buildEvidenceFeed(regions = [], claims = [], citationsByClaimId = new Map()) {
+  return (Array.isArray(regions) ? regions : []).map((region) => {
+    const linkedClaims = (Array.isArray(claims) ? claims : []).filter((claim) => region.claim_ids.includes(String((claim && claim.id) || '').trim()));
+    const allCitations = linkedClaims.flatMap((claim) => citationsByClaimId.get(String((claim && claim.id) || '').trim()) || []);
+    const supportItems = allCitations.filter((item) => String((item && item.stance) || '') !== 'contradict').slice(0, 2);
+    const contradictionItems = allCitations.filter((item) => String((item && item.stance) || '') === 'contradict').slice(0, 2);
+    const contextItems = allCitations
+      .filter((item) => String((item && item.stance) || '') !== 'contradict')
+      .sort((a, b) => Number((b && b.score) || 0) - Number((a && a.score) || 0))
+      .slice(0, 2);
+    const leadClaim = linkedClaims
+      .slice()
+      .sort((a, b) => Math.max(Number((b && b.contradict_confidence) || 0), Number((b && b.support_confidence) || 0)) - Math.max(Number((a && a.contradict_confidence) || 0), Number((a && a.support_confidence) || 0)))[0] || null;
+    const rewrite = Array.isArray(leadClaim && leadClaim.rewrite_suggestions) ? leadClaim.rewrite_suggestions[0] || null : null;
+    return {
+      region_id: region.region_id,
+      start_offset: region.start_offset,
+      end_offset: region.end_offset,
+      region_status: region.region_status,
+      region_score: region.region_score,
+      region_text: region.region_text,
+      claim_ids: region.claim_ids.slice(),
+      support_count: region.support_count,
+      contradict_count: region.contradict_count,
+      weak_count: region.weak_count,
+      support_items: supportItems,
+      contradiction_items: contradictionItems,
+      context_items: contextItems,
+      suggested_rewrite: rewrite,
+    };
+  });
 }
 
 function readAllRows(stmt) {
@@ -377,7 +568,7 @@ function queryNoteById(db, noteId = '') {
 
 function queryLatestAnalysisSummary(db, noteId = '') {
   const stmt = db.prepare(`
-    SELECT id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, message
+    SELECT id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, note_score, coverage_score, risk_level, message
     FROM analysis_runs
     WHERE note_id = ?
     ORDER BY started_at DESC
@@ -402,6 +593,9 @@ function queryLatestAnalysisSummary(db, noteId = '') {
     contested_count: clampNumber(row.contested_count, 0, Number.MAX_SAFE_INTEGER, 0),
     uncertain_count: clampNumber(row.uncertain_count, 0, Number.MAX_SAFE_INTEGER, 0),
     no_evidence_count: clampNumber(row.no_evidence_count, 0, Number.MAX_SAFE_INTEGER, 0),
+    note_score: clampNumber(row.note_score, 0, 100, 0),
+    coverage_score: clampUnit(row.coverage_score),
+    risk_level: String(row.risk_level || 'needs_review').trim() || 'needs_review',
     message: String(row.message || '').trim(),
   };
 }
@@ -429,13 +623,19 @@ function queryClaimsForAnalysis(db, analysisRunId = '') {
     time_text: String(row.time_text || ''),
     modality: String(row.modality || ''),
     factuality: String(row.factuality || ''),
-    status: String(row.status || 'insufficient_evidence'),
-    verdict: String(row.status || 'insufficient_evidence'),
+    claim_type: String(row.claim_type || 'state_trend').trim() || 'state_trend',
+    claim_weight: Number(row.claim_weight || 0) || getClaimTypeWeight(row.claim_type),
+    status: normalizeClaimStatus(row.status),
+    verdict: normalizeClaimStatus(row.status),
     top_score: Number(row.top_score || 0) || 0,
     highlight_score: Number(row.highlight_score || 0) || 0,
     truth_confidence: Number(row.truth_confidence || row.highlight_score || row.top_score || 0) || 0,
     support_confidence: Number(row.support_confidence || 0) || 0,
     contradict_confidence: Number(row.contradict_confidence || 0) || 0,
+    claim_reliability: Number(row.claim_reliability || 0) || 0,
+    corroboration: Number(row.corroboration || 0) || 0,
+    authority: Number(row.authority || 0) || 0,
+    freshness: Number(row.freshness || 0) || 0,
     explanation: String(row.explanation || ''),
     rewrite_suggestions: (() => {
       try {
@@ -509,10 +709,10 @@ function resolveClaimForLookup(claims = [], claimId = '', claimInput = {}) {
     const byId = items.find((item) => String((item && item.id) || '').trim() === targetId);
     if (byId) return byId;
   }
-  const start = Number((claimInput && claimInput.start_offset) || -1);
-  const end = Number((claimInput && claimInput.end_offset) || -1);
+  const start = Number((claimInput && claimInput.start_offset) ?? -1);
+  const end = Number((claimInput && claimInput.end_offset) ?? -1);
   if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start) {
-    const byRange = items.find((item) => Number((item && item.start_offset) || -1) === start && Number((item && item.end_offset) || -1) === end);
+    const byRange = items.find((item) => Number((item && item.start_offset) ?? -1) === start && Number((item && item.end_offset) ?? -1) === end);
     if (byRange) return byRange;
   }
   const targetText = String((claimInput && claimInput.claim_text) || '').trim().toLowerCase();
@@ -642,16 +842,17 @@ function createNotesStore(options = {}) {
         const passages = Array.isArray(payload.passages) ? payload.passages : [];
         const citations = Array.isArray(payload.citations) ? payload.citations : [];
         const counts = {
-          supported: claims.filter((item) => String((item && item.status) || '') === 'supported').length,
+          supported: claims.filter((item) => ['supported', 'mostly_supported'].includes(normalizeClaimStatus(item && item.status))).length,
           mixed: claims.filter((item) => String((item && item.status) || '') === 'mixed').length,
           contradicted: claims.filter((item) => String((item && item.status) || '') === 'contradicted').length,
-          insufficient: claims.filter((item) => String((item && item.status) || '') === 'insufficient_evidence').length,
+          insufficient: claims.filter((item) => normalizeClaimStatus(item && item.status) === 'weak_evidence').length,
         };
+        const aggregate = computeAggregateMetrics(claims);
 
         const runStmt = db.prepare(`
           INSERT INTO analysis_runs (
-            id, note_id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, message
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, note_id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, note_score, coverage_score, risk_level, message
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         runStmt.bind([
           analysisRunId,
@@ -666,6 +867,9 @@ function createNotesStore(options = {}) {
           counts.mixed,
           counts.contradicted,
           counts.insufficient,
+          clampNumber(payload.note_score, 0, 100, aggregate.note_score),
+          clampUnit(Object.prototype.hasOwnProperty.call(payload, 'coverage_score') ? payload.coverage_score : aggregate.coverage_score),
+          String((payload && payload.risk_level) || aggregate.risk_level || 'needs_review'),
           String(payload.message || ''),
         ]);
         runStmt.step();
@@ -673,8 +877,8 @@ function createNotesStore(options = {}) {
 
         const claimStmt = db.prepare(`
           INSERT INTO note_claims (
-            id, note_id, analysis_run_id, claim_index, start_offset, end_offset, claim_text, normalized_claim_text, subject_text, predicate_text, object_text, time_text, modality, factuality, status, top_score, highlight_score, support_confidence, contradict_confidence, truth_confidence, explanation, rewrite_suggestions
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, note_id, analysis_run_id, claim_index, start_offset, end_offset, claim_text, normalized_claim_text, subject_text, predicate_text, object_text, time_text, modality, factuality, status, top_score, highlight_score, support_confidence, contradict_confidence, truth_confidence, claim_type, claim_weight, claim_reliability, corroboration, authority, freshness, explanation, rewrite_suggestions
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         claims.forEach((item, idx) => {
           claimStmt.bind([
@@ -692,12 +896,18 @@ function createNotesStore(options = {}) {
             String((item && item.time_text) || ''),
             String((item && item.modality) || ''),
             String((item && item.factuality) || ''),
-            String((item && item.status) || 'insufficient_evidence'),
+            normalizeClaimStatus(item && item.status),
             Number((item && item.top_score) || (item && item.truth_confidence) || 0) || 0,
             Number((item && item.highlight_score) || (item && item.truth_confidence) || 0) || 0,
             Number((item && item.support_confidence) || 0) || 0,
             Number((item && item.contradict_confidence) || 0) || 0,
             Number((item && item.truth_confidence) || (item && item.highlight_score) || (item && item.top_score) || 0) || 0,
+            String((item && item.claim_type) || 'state_trend'),
+            Number((item && item.claim_weight) || getClaimTypeWeight(item && item.claim_type) || 0) || 0,
+            Number((item && item.claim_reliability) || 0) || 0,
+            Number((item && item.corroboration) || 0) || 0,
+            Number((item && item.authority) || 0) || 0,
+            Number((item && item.freshness) || 0) || 0,
             String((item && item.explanation) || ''),
             JSON.stringify(Array.isArray(item && item.rewrite_suggestions) ? item.rewrite_suggestions : []),
           ]);
@@ -798,11 +1008,40 @@ function createNotesStore(options = {}) {
         if (!note) return { ok: false, message: 'Note not found.' };
         const summary = queryLatestAnalysisSummary(db, note.id);
         const claims = summary ? queryClaimsForAnalysis(db, summary.analysis_run_id) : [];
+        const metrics = summary ? {
+          note_score: Number(summary.note_score || 0) || 0,
+          coverage_score: Number(summary.coverage_score || 0) || 0,
+          risk_level: String(summary.risk_level || 'needs_review').trim() || 'needs_review',
+        } : computeAggregateMetrics(claims);
+        const citationsByClaimId = new Map(claims.map((claim) => [String((claim && claim.id) || '').trim(), queryCitationsForClaim(db, String((claim && claim.id) || '').trim())]));
+        const regions = buildSentenceRegions(note.body_markdown, claims);
         return {
           ok: true,
           note,
           analysis_summary: decorateAnalysisSummary(summary),
           claims,
+          note_score: metrics.note_score,
+          coverage_score: metrics.coverage_score,
+          risk_level: metrics.risk_level,
+          regions,
+          evidence_feed: buildEvidenceFeed(regions, claims, citationsByClaimId),
+        };
+      });
+    },
+
+    async getEvidenceFeed(noteId = '') {
+      return runWithDb(async (db) => {
+        const note = queryNoteById(db, noteId);
+        if (!note) return { ok: false, message: 'Note not found.' };
+        const summary = queryLatestAnalysisSummary(db, note.id);
+        const claims = summary ? queryClaimsForAnalysis(db, summary.analysis_run_id) : [];
+        const citationsByClaimId = new Map(claims.map((claim) => [String((claim && claim.id) || '').trim(), queryCitationsForClaim(db, String((claim && claim.id) || '').trim())]));
+        const regions = buildSentenceRegions(note.body_markdown, claims);
+        return {
+          ok: true,
+          note,
+          analysis_summary: decorateAnalysisSummary(summary),
+          evidence_feed: buildEvidenceFeed(regions, claims, citationsByClaimId),
         };
       });
     },

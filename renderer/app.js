@@ -90,6 +90,12 @@ const state = {
   activeNote: null,
   activeNoteAnalysis: null,
   activeNoteClaims: [],
+  activeNoteRegions: [],
+  activeNoteEvidenceFeed: [],
+  activeEvidenceRegionId: '',
+  noteScore: 0,
+  noteRiskLevel: 'needs_review',
+  noteAnalysisStage: 'stable',
   noteDraftTitle: '',
   noteDraftBody: '',
   noteSaveTimer: null,
@@ -1543,6 +1549,16 @@ function removeLocalNoteSummary(noteId = '') {
     .filter((item) => String((item && item.id) || '').trim() !== targetId);
 }
 
+function logNotesDebug(message = '', extra = null) {
+  try {
+    if (extra === null || typeof extra === 'undefined') {
+      console.log(`[notes-debug] ${String(message || '')}`);
+      return;
+    }
+    console.log(`[notes-debug] ${String(message || '')}`, extra);
+  } catch (_) {}
+}
+
 function getFilteredNotes() {
   const query = normalizeNotesSearchQuery(state.notesSearchQuery || '');
   const list = Array.isArray(state.notes) ? state.notes : [];
@@ -1591,8 +1607,8 @@ function buildProvisionalNoteClaims(markdown = '') {
           claim_text: trimmed,
           start_offset: start,
           end_offset: end,
-          status: 'insufficient_evidence',
-          verdict: 'insufficient_evidence',
+          status: 'weak_evidence',
+          verdict: 'weak_evidence',
           highlight_score: 0.34,
           top_score: 0.34,
           truth_confidence: 0.34,
@@ -1605,6 +1621,65 @@ function buildProvisionalNoteClaims(markdown = '') {
   return out;
 }
 
+function normalizeNoteEvidenceStatus(value = '') {
+  const status = String(value || '').trim();
+  if (status === 'insufficient_evidence') return 'weak_evidence';
+  if (['supported', 'mostly_supported', 'mixed', 'weak_evidence', 'contradicted', 'checking'].includes(status)) return status;
+  return 'weak_evidence';
+}
+
+function getNoteEvidenceTone(status = '', options = {}) {
+  const normalized = normalizeNoteEvidenceStatus(status);
+  const pending = !!options.pending || normalized === 'checking';
+  if (pending) {
+    return { label: 'Checking', className: 'checking', guidance: 'Evidence retrieval is still running for this section.' };
+  }
+  if (normalized === 'supported') {
+    return { label: 'Supported', className: 'supported', guidance: 'Current web evidence supports this wording.' };
+  }
+  if (normalized === 'mostly_supported') {
+    return { label: 'Mostly supported', className: 'mostly-supported', guidance: 'The claim is largely supported, but stronger attribution or nuance would help.' };
+  }
+  if (normalized === 'contradicted') {
+    return { label: 'Contradicted', className: 'contradicted', guidance: 'Current web evidence contradicts this wording.' };
+  }
+  if (normalized === 'mixed') {
+    return { label: 'Mixed', className: 'mixed', guidance: 'Supporting and contradicting evidence both apply to this wording.' };
+  }
+  return { label: 'Weak evidence', className: 'weak-evidence', guidance: 'The available web evidence is not strong enough to confirm this wording yet.' };
+}
+
+function buildProvisionalNoteRegions(markdown = '') {
+  return buildProvisionalNoteClaims(markdown).map((claim, index) => ({
+    region_id: `preview_region_${index}_${Number((claim && claim.start_offset) || 0)}_${Number((claim && claim.end_offset) || 0)}`,
+    start_offset: Number((claim && claim.start_offset) || 0),
+    end_offset: Number((claim && claim.end_offset) || 0),
+    region_text: String((claim && claim.claim_text) || ''),
+    region_score: 0.34,
+    region_status: 'checking',
+    claim_ids: [String((claim && claim.id) || '').trim()].filter(Boolean),
+    support_count: 0,
+    contradict_count: 0,
+    weak_count: 1,
+    provisional: true,
+  }));
+}
+
+function shouldShowProvisionalNoteAnalysis() {
+  if (!state.activeNote) return false;
+  const draft = String(getActiveNoteDraftBody() || '');
+  const saved = String((state.activeNote && state.activeNote.body_markdown) || '');
+  if (!draft.trim()) return false;
+  const provisionalClaims = buildProvisionalNoteClaims(draft);
+  if (!provisionalClaims.length) return false;
+  if (state.noteAnalysisPending) return true;
+  if (draft !== saved) return true;
+  if (!state.activeNoteAnalysis) return true;
+  if (Number((state.activeNoteAnalysis && state.activeNoteAnalysis.claim_count) || 0) <= 0) return true;
+  if (Number(state.noteScore || 0) <= 0 && (!Array.isArray(state.activeNoteClaims) || state.activeNoteClaims.length === 0)) return true;
+  return false;
+}
+
 function getRenderableNoteClaims() {
   const persistedClaims = (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
     .filter((claim) => {
@@ -1615,7 +1690,7 @@ function getRenderableNoteClaims() {
     });
   const claims = persistedClaims.length > 0
     ? persistedClaims
-    : (state.noteAnalysisPending ? buildProvisionalNoteClaims(getActiveNoteDraftBody()) : []);
+    : (shouldShowProvisionalNoteAnalysis() ? buildProvisionalNoteClaims(getActiveNoteDraftBody()) : []);
   return claims
     .slice()
     .sort((a, b) => {
@@ -1623,6 +1698,75 @@ function getRenderableNoteClaims() {
       if (startDiff !== 0) return startDiff;
       return Number((b && b.end_offset) || 0) - Number((a && a.end_offset) || 0);
     });
+}
+
+function getRenderableNoteRegions() {
+  const persisted = (Array.isArray(state.activeNoteRegions) ? state.activeNoteRegions : [])
+    .filter((region) => {
+      if (!region) return false;
+      const start = Number((region && region.start_offset) || 0);
+      const end = Number((region && region.end_offset) || 0);
+      return Number.isFinite(start) && Number.isFinite(end) && end > start;
+    });
+  if (persisted.length > 0) {
+    return persisted.slice().sort((a, b) => Number((a && a.start_offset) || 0) - Number((b && b.start_offset) || 0));
+  }
+  return shouldShowProvisionalNoteAnalysis() ? buildProvisionalNoteRegions(getActiveNoteDraftBody()) : [];
+}
+
+function getActiveNoteRegionById(regionId = '') {
+  const targetId = String(regionId || '').trim();
+  if (!targetId) return null;
+  return getRenderableNoteRegions().find((region) => String((region && region.region_id) || '').trim() === targetId) || null;
+}
+
+function getActiveNoteRegionAtOffset(offset = -1) {
+  const target = Number(offset);
+  if (!Number.isFinite(target) || target < 0) return null;
+  return getRenderableNoteRegions()
+    .find((region) => target >= Number((region && region.start_offset) || 0) && target <= Number((region && region.end_offset) || 0)) || null;
+}
+
+function getActiveNoteRegionForClaim(claim = {}) {
+  if (!claim) return null;
+  const claimId = String((claim && claim.id) || '').trim();
+  const start = Number((claim && claim.start_offset) ?? -1);
+  const end = Number((claim && claim.end_offset) ?? -1);
+  return getRenderableNoteRegions().find((region) => {
+    const regionClaimIds = Array.isArray(region && region.claim_ids) ? region.claim_ids : [];
+    if (claimId && regionClaimIds.includes(claimId)) return true;
+    const regionStart = Number((region && region.start_offset) ?? -1);
+    const regionEnd = Number((region && region.end_offset) ?? -1);
+    return start >= 0 && end > start && regionStart >= 0 && regionEnd > regionStart && end > regionStart && start < regionEnd;
+  }) || null;
+}
+
+function buildProvisionalEvidenceFeed() {
+  return getRenderableNoteRegions().map((region) => ({
+    region_id: String((region && region.region_id) || '').trim(),
+    start_offset: Number((region && region.start_offset) || 0),
+    end_offset: Number((region && region.end_offset) || 0),
+    region_status: 'checking',
+    region_score: Number((region && region.region_score) || 0.34) || 0.34,
+    region_text: String((region && region.region_text) || ''),
+    claim_ids: Array.isArray(region && region.claim_ids) ? region.claim_ids.slice() : [],
+    support_count: 0,
+    contradict_count: 0,
+    weak_count: 1,
+    support_items: [],
+    contradiction_items: [],
+    context_items: [],
+    suggested_rewrite: null,
+    provisional: true,
+  }));
+}
+
+function getRenderableNoteEvidenceFeed() {
+  const feed = Array.isArray(state.activeNoteEvidenceFeed) ? state.activeNoteEvidenceFeed : [];
+  if (feed.length > 0) {
+    return feed.slice().sort((a, b) => Number((a && a.start_offset) || 0) - Number((b && b.start_offset) || 0));
+  }
+  return shouldShowProvisionalNoteAnalysis() ? buildProvisionalEvidenceFeed() : [];
 }
 
 function getActiveNoteClaimById(claimId = '') {
@@ -1646,10 +1790,11 @@ function clampUnit(value) {
 
 function getNoteClaimConfidence(claim = {}) {
   if (claim && claim.provisional) return 0.34;
-  const verdict = String((claim && (claim.verdict || claim.status)) || '').trim();
+  const verdict = normalizeNoteEvidenceStatus(String((claim && (claim.verdict || claim.status)) || '').trim());
   const raw = Number((claim && claim.truth_confidence) || (claim && claim.highlight_score) || (claim && claim.top_score) || 0);
   if (raw > 0) return clampUnit(raw);
   if (verdict === 'supported') return 0.85;
+  if (verdict === 'mostly_supported') return 0.72;
   if (verdict === 'contradicted') return 0.83;
   if (verdict === 'mixed') return 0.58;
   return 0.22;
@@ -1657,20 +1802,12 @@ function getNoteClaimConfidence(claim = {}) {
 
 function getNoteClaimTone(claim = {}) {
   if (claim && claim.provisional) {
-    return { label: 'Finding evidence', className: 'checking', guidance: 'This sentence looks factual, but no verdict is available yet.' };
+    return getNoteEvidenceTone('checking', { pending: true });
   }
-  const verdict = String((claim && (claim.verdict || claim.status)) || '').trim();
+  const verdict = normalizeNoteEvidenceStatus(String((claim && (claim.verdict || claim.status)) || '').trim());
   const explanation = normalizeWhitespace(String((claim && claim.explanation) || ''));
-  if (verdict === 'supported') {
-    return { label: 'Supported', className: 'supported', guidance: explanation || 'Current web reporting supports this wording.' };
-  }
-  if (verdict === 'contradicted') {
-    return { label: 'Contradicted', className: 'contradicted', guidance: explanation || 'Current web reporting contradicts this wording.' };
-  }
-  if (verdict === 'mixed') {
-    return { label: 'Mixed', className: 'mixed', guidance: explanation || 'Supporting and contradicting sources both match parts of this claim.' };
-  }
-  return { label: 'Insufficient evidence', className: 'insufficient', guidance: explanation || 'The available web evidence is not strong enough to confirm this wording yet.' };
+  const tone = getNoteEvidenceTone(verdict);
+  return explanation ? { ...tone, guidance: explanation } : tone;
 }
 
 function buildNoteClaimSuggestions(claim = {}) {
@@ -1799,7 +1936,7 @@ function resolveOpenNoteClaim() {
     if (byId) return byId;
   }
   if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start) {
-    const byRange = claims.find((item) => Number(item.start_offset || -1) === start && Number(item.end_offset || -1) === end);
+    const byRange = claims.find((item) => Number((item && item.start_offset) ?? -1) === start && Number((item && item.end_offset) ?? -1) === end);
     if (byRange) return byRange;
   }
   if (claimText) {
@@ -1842,7 +1979,191 @@ function buildNoteCitationSummaryHtml(claim = {}, options = {}) {
   `;
 }
 
+function getNoteRiskChipConfig(riskLevel = '') {
+  const normalized = String(riskLevel || '').trim() || 'needs_review';
+  if (normalized === 'clean') {
+    return { className: 'clean', label: 'Clean' };
+  }
+  if (normalized === 'high_contradiction_risk') {
+    return { className: 'high-risk', label: 'High contradiction risk' };
+  }
+  return { className: 'needs-review', label: 'Needs review' };
+}
+
+function getNoteAnalysisStageLabel(stage = '') {
+  const normalized = String(stage || '').trim();
+  if (normalized === 'detecting_claims') return 'Detecting claims';
+  if (normalized === 'retrieving_sources') return 'Retrieving sources';
+  if (normalized === 'scoring_evidence') return 'Scoring evidence';
+  return 'Stable';
+}
+
+function getDisplayedNoteScore() {
+  const explicit = clamp(Math.round(Number(state.noteScore || 0) || 0), 0, 100);
+  if (explicit > 0 || !shouldShowProvisionalNoteAnalysis()) return explicit;
+  const regions = getRenderableNoteRegions();
+  if (!regions.length) return explicit;
+  const average = regions.reduce((sum, region) => sum + (Number((region && region.region_score) || 0.34) || 0.34), 0) / regions.length;
+  return clamp(Math.round(average * 100), 0, 100);
+}
+
+function getDisplayedNoteRiskLevel() {
+  const explicit = String(state.noteRiskLevel || '').trim();
+  if (explicit && explicit !== 'clean') return explicit;
+  if (shouldShowProvisionalNoteAnalysis() || getRenderableNoteRegions().length > 0) return 'needs_review';
+  return explicit || 'needs_review';
+}
+
+function renderNotesScoreSummary() {
+  const valueNode = e('notes-score-value');
+  const fillNode = e('notes-score-fill');
+  const chipNode = e('notes-risk-chip');
+  const score = getDisplayedNoteScore();
+  if (valueNode) valueNode.textContent = String(score);
+  if (fillNode) fillNode.style.width = `${score}%`;
+  if (chipNode) {
+    const risk = getNoteRiskChipConfig(getDisplayedNoteRiskLevel());
+    chipNode.textContent = risk.label;
+    chipNode.className = `notes-risk-chip ${risk.className}`;
+  }
+}
+
+function getLeadClaimForEvidenceRow(row = {}) {
+  const claimIds = Array.isArray(row && row.claim_ids) ? row.claim_ids : [];
+  const claims = claimIds
+    .map((claimId) => getActiveNoteClaimById(claimId))
+    .filter(Boolean);
+  if (!claims.length) return null;
+  return claims.slice().sort((a, b) => {
+    const aStrength = Math.max(Number((a && a.contradict_confidence) || 0), Number((a && a.support_confidence) || 0));
+    const bStrength = Math.max(Number((b && b.contradict_confidence) || 0), Number((b && b.support_confidence) || 0));
+    return bStrength - aStrength;
+  })[0] || null;
+}
+
+function renderNoteEvidenceSourceRow(item = {}, row = {}, kind = 'support') {
+  const citation = item || {};
+  const source = citation && citation.source ? citation.source : {};
+  const claimId = String((citation && citation.claim_id) || (Array.isArray(row && row.claim_ids) ? row.claim_ids[0] : '') || '').trim();
+  const sourceUrl = String(source.url || '').trim();
+  const summary = normalizeWhitespace(String((citation && citation.passage_text) || (citation && citation.excerpt) || source.title || sourceUrl || ''));
+  const title = String(source.title || sourceUrl || 'Source').trim() || 'Source';
+  const label = kind === 'contradiction' ? 'Contradicts' : (kind === 'context' ? 'Adds context' : 'Supports');
+  return `
+    <article
+      class="notes-evidence-source ${escapeHtml(kind)}"
+      data-note-evidence-region="${escapeHtml(String((row && row.region_id) || ''))}"
+      data-note-evidence-claim="${escapeHtml(claimId)}"
+    >
+      <div class="notes-evidence-source-meta">
+        <span class="notes-evidence-source-label">${escapeHtml(label)}</span>
+        ${sourceUrl ? `<button type="button" class="notes-evidence-source-open" data-note-citation-open="${escapeHtml(String((citation && citation.id) || ''))}" data-note-citation-url="${escapeHtml(sourceUrl)}" data-note-citation-title="${escapeHtml(title)}" data-note-citation-excerpt="${escapeHtml(summary.slice(0, 600))}">Open</button>` : ''}
+      </div>
+      <div class="notes-evidence-source-title">${escapeHtml(title)}</div>
+      <div class="notes-evidence-source-snippet">${escapeHtml(summary)}</div>
+    </article>
+  `;
+}
+
+function renderNotesEvidenceRow(row = {}) {
+  const tone = getNoteEvidenceTone(String((row && row.region_status) || ''), { pending: !!(row && row.provisional) });
+  const score = clamp(Math.round((Number((row && row.region_score) || 0) || 0) * 100), 0, 100);
+  const regionId = String((row && row.region_id) || '').trim();
+  const leadClaim = getLeadClaimForEvidenceRow(row);
+  const rewrite = row && row.suggested_rewrite ? row.suggested_rewrite : null;
+  const isActive = regionId && regionId === String(state.activeEvidenceRegionId || '').trim();
+  const sections = [
+    ...(Array.isArray(row && row.contradiction_items) && row.contradiction_items.length ? row.contradiction_items.slice(0, 2).map((item) => renderNoteEvidenceSourceRow(item, row, 'contradiction')) : []),
+    ...(Array.isArray(row && row.support_items) && row.support_items.length ? row.support_items.slice(0, 2).map((item) => renderNoteEvidenceSourceRow(item, row, 'support')) : []),
+    ...(Array.isArray(row && row.context_items) && row.context_items.length ? row.context_items.slice(0, 1).map((item) => renderNoteEvidenceSourceRow(item, row, 'context')) : []),
+  ];
+  return `
+    <section class="notes-evidence-row ${escapeHtml(tone.className)}${isActive ? ' active' : ''}" data-note-evidence-row="${escapeHtml(regionId)}">
+      <button
+        type="button"
+        class="notes-evidence-region-btn"
+        data-note-evidence-region="${escapeHtml(regionId)}"
+        data-note-evidence-claim="${escapeHtml(String((leadClaim && leadClaim.id) || ''))}"
+      >
+        <div class="notes-evidence-row-meta">
+          <strong>${escapeHtml(tone.label)}</strong>
+          <span class="muted small">${escapeHtml(`${score}`)}</span>
+        </div>
+        <div class="notes-evidence-score-track">
+          <div class="notes-evidence-score-fill ${escapeHtml(tone.className)}" style="width:${score}%"></div>
+        </div>
+        <div class="notes-evidence-row-text">${escapeHtml(String((row && row.region_text) || ''))}</div>
+      </button>
+      ${sections.length ? `<div class="notes-evidence-sources">${sections.join('')}</div>` : '<div class="notes-citation-state muted">Evidence is still gathering for this section.</div>'}
+      ${rewrite && leadClaim ? `
+        <button
+          type="button"
+          class="notes-claim-action-btn"
+          data-claim-action="${escapeHtml(String(rewrite.key || 'rewrite'))}"
+          data-claim-id="${escapeHtml(String((leadClaim && leadClaim.id) || ''))}"
+          data-claim-replacement="${escapeHtml(String(rewrite.replacement || ''))}"
+        >
+          <strong>${escapeHtml(String(rewrite.label || 'Rewrite'))}</strong>
+          <span>${escapeHtml(String(rewrite.description || ''))}</span>
+        </button>
+      ` : ''}
+    </section>
+  `;
+}
+
+function renderNotesEvidenceRail() {
+  const titleNode = e('notes-citation-title');
+  const stageNode = e('notes-citation-stage');
+  const bodyNode = e('notes-citation-body');
+  const closeBtn = e('notes-citation-close-btn');
+  if (titleNode) titleNode.textContent = 'Evidence';
+  if (stageNode) stageNode.textContent = getNoteAnalysisStageLabel(state.noteAnalysisStage);
+  if (closeBtn) closeBtn.disabled = !String(state.activeEvidenceRegionId || '').trim();
+  if (!bodyNode) return;
+  if (!state.activeNote) {
+    bodyNode.innerHTML = '<div class="notes-citation-state muted">Open a note to see evidence feedback.</div>';
+    return;
+  }
+  const feed = getRenderableNoteEvidenceFeed();
+  if (!feed.length) {
+    const pendingMessage = shouldShowProvisionalNoteAnalysis()
+      ? 'Claim detection is running for this note.'
+      : 'Write factual sentences and evidence will appear here.';
+    bodyNode.innerHTML = `<div class="notes-citation-state muted">${escapeHtml(pendingMessage)}</div>`;
+    return;
+  }
+  bodyNode.innerHTML = feed.map((row) => renderNotesEvidenceRow(row)).join('');
+}
+
+function focusNoteEvidenceRegion(regionId = '', options = {}) {
+  const targetId = String(regionId || '').trim();
+  const targetClaimId = String((options && options.claimId) || '').trim();
+  state.activeEvidenceRegionId = targetId;
+  state.noteCitationPopover = {
+    ...state.noteCitationPopover,
+    open: !!targetId,
+    claimId: targetClaimId,
+    claimText: '',
+    claimStartOffset: -1,
+    claimEndOffset: -1,
+    loading: false,
+  };
+  renderNoteHighlightLayer();
+  if (String((state.activeNote && state.activeNote.active_mode) || 'edit').trim() === 'view') {
+    void renderNotePreview();
+  }
+  renderNotesEvidenceRail();
+  if (!(options && options.scroll === false) && targetId) {
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-note-region-id="${CSS.escape(targetId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      document.querySelector(`[data-note-preview-region-id="${CSS.escape(targetId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      document.querySelector(`[data-note-evidence-row="${CSS.escape(targetId)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  }
+}
+
 function closeNoteCitationPopover() {
+  state.activeEvidenceRegionId = '';
   state.noteCitationPopover = {
     open: false,
     claimId: '',
@@ -1853,21 +2174,15 @@ function closeNoteCitationPopover() {
     requestSeq: Number((state.noteCitationPopover && state.noteCitationPopover.requestSeq) || 0),
     loading: false,
   };
-  const popover = e('notes-citation-popover');
-  const body = e('notes-citation-body');
-  const surface = getNotesMainSurface();
-  if (popover) popover.classList.add('hidden');
-  if (body) body.innerHTML = '';
-  if (surface) surface.classList.remove('notes-citation-open');
+  renderNotesEvidenceRail();
+  renderNoteHighlightLayer();
+  if (String((state.activeNote && state.activeNote.active_mode) || 'edit').trim() === 'view') {
+    void renderNotePreview();
+  }
 }
 
 function positionNoteCitationPopover() {
-  const popover = e('notes-citation-popover');
-  const surface = getNotesMainSurface();
-  if (!popover || !surface) return;
-  popover.style.top = '';
-  popover.style.height = '';
-  surface.classList.add('notes-citation-open');
+  renderNotesEvidenceRail();
 }
 
 function toggleNoteCitationChunk(citationId = '') {
@@ -1940,7 +2255,7 @@ function computeNoteStatusText() {
   if (!state.activeNote) return 'No note selected';
   if (state.noteSaveState === 'saving') return 'Saving';
   if (state.noteSaveState === 'edited') return 'Edited';
-  if (state.noteAnalysisPending) return 'Checking sources';
+  if (state.noteAnalysisPending) return getNoteAnalysisStageLabel(state.noteAnalysisStage);
   const summary = state.activeNoteAnalysis;
   if (summary && Number(summary.claim_count || 0) <= 0) {
     const message = String(summary.message || '').trim();
@@ -1993,8 +2308,8 @@ function renderNoteHighlightLayer() {
     return;
   }
   const content = String(getActiveNoteDraftBody() || input.value || '');
-  const claims = getRenderableNoteClaims();
-  const useLayer = claims.length > 0 && !!content;
+  const regions = getRenderableNoteRegions();
+  const useLayer = regions.length > 0 && !!content;
   let cursor = 0;
   let html = '';
   let markCount = 0;
@@ -2003,13 +2318,14 @@ function renderNoteHighlightLayer() {
     layer.innerHTML = '';
     return;
   }
-  claims.forEach((claim) => {
-    const start = clamp(Math.round(Number((claim && claim.start_offset) || 0)), 0, content.length);
-    const end = clamp(Math.round(Number((claim && claim.end_offset) || 0)), start, content.length);
+  regions.forEach((region) => {
+    const start = clamp(Math.round(Number((region && region.start_offset) || 0)), 0, content.length);
+    const end = clamp(Math.round(Number((region && region.end_offset) || 0)), start, content.length);
     if (end <= start || start < cursor) return;
     html += escapeHtml(content.slice(cursor, start));
-    const tone = getNoteClaimTone(claim);
-    html += `<mark class="notes-highlight-${tone.className}" data-claim-id="${escapeHtml(String((claim && claim.id) || ''))}">${escapeHtml(content.slice(start, end))}</mark>`;
+    const tone = getNoteEvidenceTone(String((region && region.region_status) || ''), { pending: !!(region && region.provisional) });
+    const active = String((region && region.region_id) || '').trim() === String(state.activeEvidenceRegionId || '').trim() ? ' notes-highlight-active' : '';
+    html += `<mark class="notes-highlight-${tone.className}${active}" data-note-region-id="${escapeHtml(String((region && region.region_id) || ''))}">${escapeHtml(content.slice(start, end))}</mark>`;
     markCount += 1;
     cursor = end;
   });
@@ -2046,8 +2362,8 @@ function tryWrapClaimText(root, claim = {}) {
       span.className = `notes-inline-citation ${tone.className}`;
       span.dataset.claimId = String((claim && claim.id) || '').trim();
       span.dataset.claimText = target;
-      span.dataset.claimStartOffset = String(Number((claim && claim.start_offset) || -1));
-      span.dataset.claimEndOffset = String(Number((claim && claim.end_offset) || -1));
+      span.dataset.claimStartOffset = String(Number((claim && claim.start_offset) ?? -1));
+      span.dataset.claimEndOffset = String(Number((claim && claim.end_offset) ?? -1));
       span.dataset.supportLabel = String((claim && claim.status) || '').trim();
       span.title = `${tone.label} claim`;
       try {
@@ -2072,44 +2388,46 @@ function applyNotePreviewHighlights(root) {
   });
 }
 
-function injectNotePreviewClaimTokens(markdown = '', claims = []) {
+function injectNotePreviewRegionTokens(markdown = '', regions = []) {
   const source = String(markdown || '');
-  const items = Array.isArray(claims) ? claims : [];
+  const items = Array.isArray(regions) ? regions : [];
   if (!source || items.length === 0) {
-    return { markdown: source, tokenClaims: [] };
+    return { markdown: source, tokenRegions: [] };
   }
-  const tokenClaims = [];
+  const tokenRegions = [];
   let cursor = 0;
   let out = '';
-  items.forEach((claim) => {
-    const start = clamp(Math.round(Number((claim && claim.start_offset) || 0)), 0, source.length);
-    const end = clamp(Math.round(Number((claim && claim.end_offset) || 0)), start, source.length);
+  items.forEach((region) => {
+    const start = clamp(Math.round(Number((region && region.start_offset) || 0)), 0, source.length);
+    const end = clamp(Math.round(Number((region && region.end_offset) || 0)), start, source.length);
     if (end <= start || start < cursor) return;
-    const tokenId = tokenClaims.length;
-    const startToken = `@@NOTECLAIMSTART${tokenId}@@`;
-    const endToken = `@@NOTECLAIMEND${tokenId}@@`;
+    const tokenId = tokenRegions.length;
+    const startToken = `@@NOTEREGIONSTART${tokenId}@@`;
+    const endToken = `@@NOTEREGIONEND${tokenId}@@`;
     out += source.slice(cursor, start);
     out += startToken;
     out += source.slice(start, end);
     out += endToken;
-    tokenClaims.push({
+    tokenRegions.push({
       tokenId,
       startToken,
       endToken,
-      claim,
+      region,
     });
     cursor = end;
   });
   out += source.slice(cursor);
-  return { markdown: out, tokenClaims };
+  return { markdown: out, tokenRegions };
 }
 
-function applyNotePreviewClaimTokens(html = '', tokenClaims = []) {
+function applyNotePreviewRegionTokens(html = '', tokenRegions = []) {
   let out = String(html || '');
-  (Array.isArray(tokenClaims) ? tokenClaims : []).forEach((entry) => {
-    const claim = entry && entry.claim ? entry.claim : {};
-    const tone = getNoteClaimTone(claim);
-    const openTag = `<span class="notes-inline-citation ${escapeHtml(String(tone.className || ''))}" data-claim-id="${escapeHtml(String((claim && claim.id) || ''))}" data-claim-text="${escapeHtml(String((claim && claim.claim_text) || ''))}" data-claim-start-offset="${escapeHtml(String(Number((claim && claim.start_offset) || -1)))}" data-claim-end-offset="${escapeHtml(String(Number((claim && claim.end_offset) || -1)))}" title="${escapeHtml(`${String(tone.label || 'Claim').trim()} claim`)}">`;
+  (Array.isArray(tokenRegions) ? tokenRegions : []).forEach((entry) => {
+    const region = entry && entry.region ? entry.region : {};
+    const tone = getNoteEvidenceTone(String((region && region.region_status) || ''), { pending: !!(region && region.provisional) });
+    const active = String((region && region.region_id) || '').trim() === String(state.activeEvidenceRegionId || '').trim() ? ' active' : '';
+    const leadClaimId = Array.isArray(region && region.claim_ids) ? String(region.claim_ids[0] || '').trim() : '';
+    const openTag = `<span class="notes-inline-citation ${escapeHtml(String(tone.className || ''))}${active}" data-note-preview-region-id="${escapeHtml(String((region && region.region_id) || ''))}" data-note-region-id="${escapeHtml(String((region && region.region_id) || ''))}" data-claim-id="${escapeHtml(leadClaimId)}" title="${escapeHtml(`${String(tone.label || 'Evidence').trim()} section`)}">`;
     out = out.split(String((entry && entry.startToken) || '')).join(openTag);
     out = out.split(String((entry && entry.endToken) || '')).join('</span>');
   });
@@ -2127,14 +2445,9 @@ function bindNotePreviewInteractions() {
     if (citation) {
       event.preventDefault();
       event.stopPropagation();
-      void openNoteCitationPopover(
-        String(citation.getAttribute('data-claim-id') || citation.dataset.claimId || '').trim(),
-        citation,
-        {
-          claim_text: String(citation.getAttribute('data-claim-text') || citation.dataset.claimText || citation.textContent || '').trim(),
-          start_offset: Number(citation.getAttribute('data-claim-start-offset') || citation.dataset.claimStartOffset || -1),
-          end_offset: Number(citation.getAttribute('data-claim-end-offset') || citation.dataset.claimEndOffset || -1),
-        },
+      focusNoteEvidenceRegion(
+        String(citation.getAttribute('data-note-region-id') || citation.dataset.noteRegionId || '').trim(),
+        { claimId: String(citation.getAttribute('data-claim-id') || citation.dataset.claimId || '').trim() },
       );
       return;
     }
@@ -2159,11 +2472,11 @@ async function renderNotePreview() {
   state.notePreviewRenderSeq = requestSeq;
   content.innerHTML = '<div class="artifact-markdown-preview-empty">Rendering note...</div>';
   bindNotePreviewInteractions();
-  const claims = getRenderableNoteClaims();
-  const injected = injectNotePreviewClaimTokens(String(getActiveNoteDraftBody()), claims);
-  const html = applyNotePreviewClaimTokens(
+  const regions = getRenderableNoteRegions();
+  const injected = injectNotePreviewRegionTokens(String(getActiveNoteDraftBody()), regions);
+  const html = applyNotePreviewRegionTokens(
     await renderMarkdownToHtml(injected.markdown),
-    injected.tokenClaims,
+    injected.tokenRegions,
   );
   if (requestSeq !== Number(state.notePreviewRenderSeq || 0)) return;
   if (!state.activeNote) return;
@@ -2193,6 +2506,8 @@ function renderNotesSurface() {
   if (deleteBtn) deleteBtn.disabled = !hasNote;
   if (promoteBtn) promoteBtn.disabled = !hasNote;
   if (statusNode) statusNode.textContent = computeNoteStatusText();
+  renderNotesScoreSummary();
+  renderNotesEvidenceRail();
 
   if (!hasNote) {
     if (titleInput) titleInput.value = '';
@@ -2233,10 +2548,16 @@ async function refreshActiveNoteAnalysis(options = {}) {
   if (String(state.activeNoteId || '').trim() !== targetId) return;
   state.activeNoteAnalysis = res.analysis_summary || null;
   state.activeNoteClaims = Array.isArray(res.claims) ? res.claims : [];
+  state.activeNoteRegions = Array.isArray(res.regions) ? res.regions : [];
+  state.activeNoteEvidenceFeed = Array.isArray(res.evidence_feed) ? res.evidence_feed : [];
+  state.noteScore = clamp(Math.round(Number(res.note_score || (res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
+  state.noteRiskLevel = String(res.risk_level || (res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
+  state.noteAnalysisStage = String(res.analysis_stage || '').trim() || 'stable';
   const noteRevision = Number((state.activeNote && state.activeNote.analysis_revision) || 0);
   const analyzedRevision = Number((res.analysis_summary && res.analysis_summary.note_revision) || 0);
   if (noteRevision > 0 && analyzedRevision < noteRevision && String((state.activeNote && state.activeNote.body_markdown) || '').trim()) {
     state.noteAnalysisPending = true;
+    state.noteAnalysisStage = state.activeNoteClaims.length > 0 ? 'retrieving_sources' : 'detecting_claims';
     if (options.allowReschedule !== false) {
       clearNoteAnalysisRefreshTimer();
       state.noteAnalysisRefreshTimer = setTimeout(() => {
@@ -2246,13 +2567,24 @@ async function refreshActiveNoteAnalysis(options = {}) {
     }
   } else {
     state.noteAnalysisPending = false;
+    if (state.activeNoteClaims.length > 0 && state.activeNoteEvidenceFeed.length === 0) {
+      state.noteAnalysisStage = 'scoring_evidence';
+    } else if (!String(state.noteAnalysisStage || '').trim()) {
+      state.noteAnalysisStage = 'stable';
+    }
     clearNoteAnalysisRefreshTimer();
   }
   renderNotesSurface();
   if (state.noteCitationPopover && state.noteCitationPopover.open) {
-    const activeClaim = resolveOpenNoteClaim();
-    if (activeClaim) void openNoteCitationPopover(String(activeClaim.id || '').trim());
-    else closeNoteCitationPopover();
+    const activeRegion = getActiveNoteRegionById(state.activeEvidenceRegionId);
+    if (activeRegion) {
+      focusNoteEvidenceRegion(String(activeRegion.region_id || '').trim(), {
+        claimId: String((state.noteCitationPopover && state.noteCitationPopover.claimId) || '').trim(),
+        scroll: false,
+      });
+    } else {
+      closeNoteCitationPopover();
+    }
   }
 }
 
@@ -2292,6 +2624,7 @@ async function saveActiveNote(options = {}) {
   upsertLocalNoteSummary(res.note);
   state.noteSaveState = 'saved';
   state.noteAnalysisPending = true;
+  state.noteAnalysisStage = 'detecting_claims';
   renderNotesSurface();
   clearNoteAnalysisRefreshTimer();
   state.noteAnalysisRefreshTimer = setTimeout(() => {
@@ -2313,8 +2646,14 @@ function scheduleActiveNoteSave(delayMs = 800) {
 async function setActiveNoteMode(mode = 'edit') {
   if (!notesApi || !state.activeNote) return;
   const nextMode = String(mode || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
+  logNotesDebug('setActiveNoteMode:start', {
+    current: String((state.activeNote && state.activeNote.active_mode) || 'edit'),
+    next: nextMode,
+    noteId: String((state.activeNote && state.activeNote.id) || ''),
+  });
   if (String((state.activeNote && state.activeNote.active_mode) || 'edit').trim() === nextMode) {
     renderNotesSurface();
+    logNotesDebug('setActiveNoteMode:no-op', { next: nextMode });
     return;
   }
   state.activeNote = {
@@ -2329,17 +2668,28 @@ async function setActiveNoteMode(mode = 'edit') {
     upsertLocalNoteSummary(res.note);
     renderNotesSurface();
   }
+  logNotesDebug('setActiveNoteMode:done', {
+    next: nextMode,
+    ok: !!(res && res.ok),
+    noteId: String((res && res.note && res.note.id) || state.activeNoteId || ''),
+  });
 }
 
 async function loadNoteRecord(noteId = '', options = {}) {
   if (!notesApi) return;
   const targetId = String(noteId || '').trim();
   if (!targetId) return;
+  logNotesDebug('loadNoteRecord:start', {
+    targetId,
+    activeId: String(state.activeNoteId || ''),
+    saveState: String(state.noteSaveState || ''),
+  });
   if (!options.skipSave && state.activeNote && String(state.activeNoteId || '').trim() !== targetId && state.noteSaveState === 'edited') {
     await saveActiveNote({ silent: true });
   }
   const res = await notesApi.get(targetId);
   if (!res || !res.ok || !res.note) {
+    logNotesDebug('loadNoteRecord:error', { targetId, message: String((res && res.message) || '') });
     if (!options.silent) window.alert((res && res.message) || 'Unable to load note.');
     return;
   }
@@ -2349,14 +2699,25 @@ async function loadNoteRecord(noteId = '', options = {}) {
   state.activeNote = res.note;
   state.activeNoteAnalysis = res.analysis_summary || null;
   state.activeNoteClaims = [];
+  state.activeNoteRegions = [];
+  state.activeNoteEvidenceFeed = [];
+  state.activeEvidenceRegionId = '';
   state.noteDraftTitle = String(res.note.title || '');
   state.noteDraftBody = String(res.note.body_markdown || '');
   state.noteSaveState = 'saved';
   state.noteAnalysisPending = !!(String(res.note.body_markdown || '').trim()
     && Number((res.analysis_summary && res.analysis_summary.note_revision) || 0) < Number(res.note.analysis_revision || 0));
+  state.noteScore = clamp(Math.round(Number((res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
+  state.noteRiskLevel = String((res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
+  state.noteAnalysisStage = state.noteAnalysisPending ? 'detecting_claims' : 'stable';
   upsertLocalNoteSummary(res.note);
   renderNotesSurface();
   await refreshActiveNoteAnalysis({ noteId: state.activeNoteId, allowReschedule: true });
+  logNotesDebug('loadNoteRecord:done', {
+    targetId,
+    activeId: String(state.activeNoteId || ''),
+    title: String((res.note && res.note.title) || ''),
+  });
 }
 
 async function loadNotesList(options = {}) {
@@ -2383,8 +2744,14 @@ async function loadNotesList(options = {}) {
   state.activeNote = null;
   state.activeNoteAnalysis = null;
   state.activeNoteClaims = [];
+  state.activeNoteRegions = [];
+  state.activeNoteEvidenceFeed = [];
+  state.activeEvidenceRegionId = '';
   state.noteDraftTitle = '';
   state.noteDraftBody = '';
+  state.noteScore = 0;
+  state.noteRiskLevel = 'needs_review';
+  state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
   state.noteAnalysisPending = false;
   renderNotesSurface();
@@ -2428,8 +2795,14 @@ async function deleteActiveNote() {
   state.activeNote = null;
   state.activeNoteAnalysis = null;
   state.activeNoteClaims = [];
+  state.activeNoteRegions = [];
+  state.activeNoteEvidenceFeed = [];
+  state.activeEvidenceRegionId = '';
   state.noteDraftTitle = '';
   state.noteDraftBody = '';
+  state.noteScore = 0;
+  state.noteRiskLevel = 'needs_review';
+  state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
   state.noteAnalysisPending = false;
   renderNotesSurface();
@@ -2439,20 +2812,14 @@ async function deleteActiveNote() {
 }
 
 async function openNoteCitationPopover(claimId = '', anchorEl = null, claimHint = null) {
-  if (!notesApi || !state.activeNote) return;
-  const noteId = String(state.activeNoteId || '').trim();
+  if (!state.activeNote) return;
   const targetClaimId = String(claimId || '').trim();
-  if (!noteId) return;
-  const popover = e('notes-citation-popover');
-  const titleNode = e('notes-citation-title');
-  const bodyNode = e('notes-citation-body');
-  if (!popover || !titleNode || !bodyNode) return;
   const normalizedHint = claimHint && typeof claimHint === 'object'
     ? {
         id: String((claimHint && claimHint.id) || targetClaimId).trim(),
         claim_text: String((claimHint && claimHint.claim_text) || '').trim(),
-        start_offset: Number((claimHint && claimHint.start_offset) || -1),
-        end_offset: Number((claimHint && claimHint.end_offset) || -1),
+        start_offset: Number((claimHint && claimHint.start_offset) ?? -1),
+        end_offset: Number((claimHint && claimHint.end_offset) ?? -1),
       }
     : null;
   const matchingHintClaim = normalizedHint
@@ -2471,76 +2838,15 @@ async function openNoteCitationPopover(claimId = '', anchorEl = null, claimHint 
   const claim = getActiveNoteClaimById(targetClaimId)
     || matchingHintClaim
     || resolveOpenNoteClaim();
-  if (!claim) return;
-  const requestSeq = Number((state.noteCitationPopover && state.noteCitationPopover.requestSeq) || 0) + 1;
-  titleNode.textContent = String(claim.claim_text || 'Sources');
-  bodyNode.innerHTML = buildNoteCitationSummaryHtml(claim, {
-    stateMessage: claim.provisional
-      ? 'Finding evidence for this claim...'
-      : 'Loading evidence...',
+  const region = getActiveNoteRegionForClaim(claim)
+    || getActiveNoteRegionById(String((normalizedHint && normalizedHint.region_id) || '').trim())
+    || (normalizedHint && Number.isFinite(normalizedHint.start_offset) ? getActiveNoteRegionAtOffset(normalizedHint.start_offset) : null)
+    || null;
+  if (!region) return;
+  focusNoteEvidenceRegion(String(region.region_id || '').trim(), {
+    claimId: claim ? String((claim && claim.id) || targetClaimId).trim() : targetClaimId,
+    anchorEl,
   });
-  popover.classList.remove('hidden');
-  positionNoteCitationPopover(anchorEl);
-  state.noteCitationPopover = {
-    open: true,
-    claimId: String(claim.id || targetClaimId).trim(),
-    claimText: String(claim.claim_text || ''),
-    claimStartOffset: Number((claim && claim.start_offset) || -1),
-    claimEndOffset: Number((claim && claim.end_offset) || -1),
-    expandedCitationId: '',
-    requestSeq,
-    loading: true,
-  };
-  const res = await notesApi.getCitations(noteId, String(claim.id || '').trim(), {
-    claim_text: String(claim.claim_text || ''),
-    start_offset: Number((claim && claim.start_offset) || -1),
-    end_offset: Number((claim && claim.end_offset) || -1),
-  });
-  const popoverState = state.noteCitationPopover || {};
-  if (!popoverState.open || Number(popoverState.requestSeq || 0) !== requestSeq) return;
-  state.noteCitationPopover = {
-    ...popoverState,
-    loading: false,
-  };
-  if (!res || !res.ok) {
-    const fallbackMessage = state.noteAnalysisPending || String((res && res.message) || '').trim() === 'Claim not found.'
-      ? 'Evidence refresh is still running for this claim.'
-      : String((res && res.message) || 'Unable to load evidence.');
-    bodyNode.innerHTML = buildNoteCitationSummaryHtml(claim, { stateMessage: fallbackMessage });
-    return;
-  }
-  const citations = Array.isArray(res.citations) ? res.citations : [];
-  const resolvedClaim = (res && res.claim) ? res.claim : claim;
-  state.noteCitationPopover = {
-    ...state.noteCitationPopover,
-    claimId: String((resolvedClaim && resolvedClaim.id) || claim.id || '').trim(),
-    claimText: String((resolvedClaim && resolvedClaim.claim_text) || claim.claim_text || ''),
-    claimStartOffset: Number((resolvedClaim && resolvedClaim.start_offset) || (claim && claim.start_offset) || -1),
-    claimEndOffset: Number((resolvedClaim && resolvedClaim.end_offset) || (claim && claim.end_offset) || -1),
-  };
-  titleNode.textContent = String((resolvedClaim && resolvedClaim.claim_text) || claim.claim_text || 'Sources');
-  const headerHtml = buildNoteCitationSummaryHtml(resolvedClaim, {
-    stateMessage: String((res && res.analysis_state) || '').trim() === 'refreshing' ? 'Updating evidence...' : '',
-  });
-  const eligibleCitations = getHelpfulLeadCitations(citations.filter((citation) => {
-    const kind = getNoteCitationSourceKind(citation);
-    return !kind || ['explicit_url', 'web_search', 'official_search', 'challenge_search'].includes(kind);
-  }));
-  const supportingCitations = eligibleCitations.filter((citation) => String((citation && citation.stance) || '').trim() !== 'contradict');
-  const contradictingCitations = eligibleCitations.filter((citation) => String((citation && citation.stance) || '').trim() === 'contradict');
-  if (!eligibleCitations.length) {
-    const noEvidenceMessage = String((res && res.analysis_state) || '').trim() === 'refreshing'
-      ? 'Updating evidence for this claim.'
-      : 'No evidence available for this passage yet.';
-    bodyNode.innerHTML = `${headerHtml}<div class="notes-citation-state muted">${escapeHtml(noEvidenceMessage)}</div>`;
-    return;
-  }
-  const sectionsHtml = [
-    renderNoteCitationSection('Supporting evidence', supportingCitations),
-    renderNoteCitationSection('Contradicting evidence', contradictingCitations),
-  ].filter(Boolean).join('');
-  bodyNode.innerHTML = `${headerHtml}${sectionsHtml}`;
-  positionNoteCitationPopover();
 }
 
 async function createReferenceFromActiveNote() {
@@ -13988,9 +14294,21 @@ function bindControls() {
 
   const noteTitleInput = e('note-title-input');
   const noteInput = e('notes-input');
-  const scheduleNoteSaveFromInput = () => {
+  const scheduleNoteSaveFromInput = ({ bodyChanged = false } = {}) => {
     if (!state.activeNote) return;
     state.noteSaveState = 'edited';
+    if (bodyChanged) {
+      state.noteAnalysisPending = !!String(state.noteDraftBody || '').trim();
+      state.noteAnalysisStage = state.noteAnalysisPending ? 'detecting_claims' : 'stable';
+      state.activeNoteClaims = [];
+      state.activeNoteRegions = [];
+      state.activeNoteEvidenceFeed = [];
+      state.noteScore = 0;
+      state.noteRiskLevel = 'needs_review';
+      if (!state.noteAnalysisPending) {
+        state.activeEvidenceRegionId = '';
+      }
+    }
     renderNotesSurface();
     scheduleActiveNoteSave(800);
   };
@@ -14007,7 +14325,7 @@ function bindControls() {
   noteInput?.addEventListener('input', () => {
     if (!state.activeNote) return;
     state.noteDraftBody = String(noteInput.value || '');
-    scheduleNoteSaveFromInput();
+    scheduleNoteSaveFromInput({ bodyChanged: true });
     renderNoteHighlightLayer();
   });
   noteInput?.addEventListener('select', () => {
@@ -14027,9 +14345,11 @@ function bindControls() {
     const start = Number(noteInput.selectionStart);
     const end = Number(noteInput.selectionEnd);
     if (!Number.isFinite(start) || !Number.isFinite(end) || start !== end) return;
-    const claim = getActiveNoteClaimAtOffset(start);
-    if (claim) {
-      void openNoteCitationPopover(String(claim.id || '').trim(), noteInput);
+    const region = getActiveNoteRegionAtOffset(start);
+    if (region) {
+      focusNoteEvidenceRegion(String((region && region.region_id) || '').trim(), {
+        claimId: Array.isArray(region && region.claim_ids) ? String(region.claim_ids[0] || '').trim() : '',
+      });
     } else {
       closeNoteCitationPopover();
     }
@@ -14037,14 +14357,14 @@ function bindControls() {
   e('notes-highlight-layer')?.addEventListener('click', (event) => {
     const rawTarget = event.target instanceof Node ? event.target : null;
     const target = rawTarget instanceof Element ? rawTarget : (rawTarget && rawTarget.parentElement ? rawTarget.parentElement : null);
-    const claimMark = target ? target.closest('mark[data-claim-id]') : null;
-    if (!claimMark) {
+    const regionMark = target ? target.closest('mark[data-note-region-id]') : null;
+    if (!regionMark) {
       e('notes-input')?.focus();
       return;
     }
     event.preventDefault();
     event.stopPropagation();
-    void openNoteCitationPopover(String(claimMark.getAttribute('data-claim-id') || '').trim(), claimMark);
+    focusNoteEvidenceRegion(String(regionMark.getAttribute('data-note-region-id') || '').trim());
   });
   noteInput?.addEventListener('keydown', async (event) => {
     if ((event.metaKey || event.ctrlKey) && String(event.key || '').toLowerCase() === 's') {
@@ -14066,10 +14386,12 @@ function bindControls() {
     await createReferenceFromActiveNote();
   });
   e('notes-mode-edit-btn')?.addEventListener('click', async () => {
+    logNotesDebug('click:notes-mode-edit-btn');
     await setActiveNoteMode('edit');
     e('notes-input')?.focus();
   });
   e('notes-mode-view-btn')?.addEventListener('click', async () => {
+    logNotesDebug('click:notes-mode-view-btn');
     await setActiveNoteMode('view');
   });
   e('notes-search')?.addEventListener('input', (event) => {
@@ -14083,6 +14405,9 @@ function bindControls() {
     renderNotesList();
   });
   e('notes-list')?.addEventListener('click', async (event) => {
+    logNotesDebug('click:notes-list', {
+      target: event.target instanceof Element ? event.target.outerHTML.slice(0, 120) : String(event.target),
+    });
     const deleteButton = event.target instanceof Element ? event.target.closest('[data-note-delete]') : null;
     if (deleteButton) {
       event.preventDefault();
@@ -14098,6 +14423,7 @@ function bindControls() {
     const button = event.target instanceof Element ? event.target.closest('[data-note-id]') : null;
     if (!button) return;
     const noteId = String(button.getAttribute('data-note-id') || '').trim();
+    logNotesDebug('click:notes-list:item', { noteId, activeId: String(state.activeNoteId || '') });
     if (!noteId || noteId === String(state.activeNoteId || '').trim()) return;
     await loadNoteRecord(noteId);
   });
@@ -14108,24 +14434,27 @@ function bindControls() {
       const claimId = String(actionButton.getAttribute('data-claim-id') || '').trim();
       const replacement = String(actionButton.getAttribute('data-claim-replacement') || '');
       applyNoteClaimSuggestion(claimId, replacement);
-      closeNoteCitationPopover();
+      renderNotesEvidenceRail();
       showPassiveNotification('Claim updated. Review and refine the placeholders.');
       return;
     }
-    const toggleButton = event.target instanceof Element ? event.target.closest('[data-note-citation-toggle]') : null;
-    if (toggleButton) {
+    const openButton = event.target instanceof Element ? event.target.closest('[data-note-citation-open]') : null;
+    if (openButton) {
       event.preventDefault();
-      toggleNoteCitationChunk(String(toggleButton.getAttribute('data-note-citation-toggle') || '').trim());
+      void openNoteCitationInWorkspace({
+        url: String(openButton.getAttribute('data-note-citation-url') || '').trim(),
+        title: String(openButton.getAttribute('data-note-citation-title') || '').trim(),
+        excerpt: String(openButton.getAttribute('data-note-citation-excerpt') || '').trim(),
+      });
       return;
     }
-    const openButton = event.target instanceof Element ? event.target.closest('[data-note-citation-open]') : null;
-    if (!openButton) return;
+    const regionButton = event.target instanceof Element ? event.target.closest('[data-note-evidence-region]') : null;
+    if (!regionButton) return;
     event.preventDefault();
-    void openNoteCitationInWorkspace({
-      url: String(openButton.getAttribute('data-note-citation-url') || '').trim(),
-      title: String(openButton.getAttribute('data-note-citation-title') || '').trim(),
-      excerpt: String(openButton.getAttribute('data-note-citation-excerpt') || '').trim(),
-    });
+    focusNoteEvidenceRegion(
+      String(regionButton.getAttribute('data-note-evidence-region') || '').trim(),
+      { claimId: String(regionButton.getAttribute('data-note-evidence-claim') || '').trim() },
+    );
   });
   e('notes-citation-close-btn')?.addEventListener('click', () => {
     closeNoteCitationPopover();

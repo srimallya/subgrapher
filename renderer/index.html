@@ -328,6 +328,16 @@
             </div>
           </div>
           <div class="notes-toolbar-actions">
+            <div class="notes-score-summary" aria-live="polite">
+              <div class="notes-score-summary-meta">
+                <span id="notes-score-label">Evidence Reliability</span>
+                <strong id="notes-score-value">0</strong>
+              </div>
+              <div class="notes-score-track">
+                <div id="notes-score-fill" class="notes-score-fill"></div>
+              </div>
+            </div>
+            <span id="notes-risk-chip" class="notes-risk-chip needs-review">Needs review</span>
             <span id="notes-status" class="muted">No note selected</span>
             <button id="notes-save-btn" type="button">Save</button>
             <button id="notes-create-reference-btn" type="button">Create Reference</button>
@@ -344,13 +354,16 @@
             <div id="notes-preview-content" class="notes-preview-content"></div>
           </section>
         </div>
-        <div id="notes-citation-popover" class="notes-citation-popover hidden">
+        <aside id="notes-citation-popover" class="notes-citation-popover">
           <div class="notes-citation-header">
-            <div id="notes-citation-title" class="notes-citation-title">Sources</div>
-            <button id="notes-citation-close-btn" type="button" class="notes-citation-close-btn" aria-label="Close sources">Close</button>
+            <div>
+              <div id="notes-citation-title" class="notes-citation-title">Evidence</div>
+              <div id="notes-citation-stage" class="muted small">Stable</div>
+            </div>
+            <button id="notes-citation-close-btn" type="button" class="notes-citation-close-btn" aria-label="Clear evidence focus">Clear Focus</button>
           </div>
           <div id="notes-citation-body" class="notes-citation-body"></div>
-        </div>
+        </aside>
       </main>
     </div>
   </section>
