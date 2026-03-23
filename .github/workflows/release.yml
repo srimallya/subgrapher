@@ -25,11 +25,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Prepare bundled Python runtime (mac arm64)
-        run: npm run prepare:python:mac-arm64
-
       - name: Build macOS DMG (arm64, unsigned)
-        run: npx electron-builder --mac dmg --arm64 --publish never
+        run: npm run build:mac
 
       - name: Upload workflow artifact (mac)
         uses: actions/upload-artifact@v4
@@ -67,9 +64,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Prepare bundled Python runtime (win x64)
-        run: npm run prepare:python:win-x64
-
       - name: Build Windows NSIS EXE
         shell: bash
         run: |
@@ -78,7 +72,7 @@ jobs:
           unset WIN_CSC_LINK
           unset WIN_CSC_KEY_PASSWORD
           unset WIN_CSC_TIMESTAMP_SERVER
-          npx electron-builder --win nsis --x64 --publish never
+          npm run build:win
 
       - name: Upload workflow artifact (win)
         uses: actions/upload-artifact@v4
