@@ -1,6 +1,6 @@
 {
   "name": "subgrapher",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "description": "Subgrapher standalone browser workspace",
   "main": "main.js",
   "author": "Srimallya Maitra",
@@ -14,8 +14,8 @@
     "prepare:llm:win-x64": "node scripts/prepare_bundled_llm.js --target win-x64",
     "prepare:python:mac-arm64": "node scripts/prepare_bundled_python.js --target darwin-arm64",
     "prepare:python:win-x64": "node scripts/prepare_windows_python_or_placeholder.js",
-    "build:mac": "npm run generate:icons:mac && npm run prepare:python:mac-arm64 && electron-builder --mac dmg --arm64",
-    "build:win": "npm run prepare:python:win-x64 && electron-builder --win nsis --x64",
+    "build:mac": "npm run generate:icons:mac && npm run prepare:python:mac-arm64 && electron-builder --mac dmg --arm64 --publish never",
+    "build:win": "npm run prepare:python:win-x64 && electron-builder --win nsis --x64 --publish never",
     "build:release": "npm run build:mac && npm run build:win"
   },
   "dependencies": {
