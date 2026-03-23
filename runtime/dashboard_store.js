@@ -957,6 +957,34 @@ function createDashboardStore(options = {}) {
     };
   }
 
+  async function rerunFeedItemSummary(itemId = '') {
+    const id = String(itemId || '').trim();
+    if (!id) return { ok: false, message: 'item_id is required.' };
+    const state = readState();
+    const items = pruneFeedItems(state.rss && state.rss.items);
+    const index = items.findIndex((entry) => String((entry && entry.id) || '').trim() === id);
+    if (index < 0) return { ok: false, message: 'Feed item not found.' };
+    const item = items[index];
+    const summaryPatch = await buildCleanSummary({
+      ...item,
+      raw_content_text: String(item.raw_content_text || item.content_text || '').trim(),
+    }, null);
+    const updatedItem = normalizeStoredFeedItem({
+      ...item,
+      ...summaryPatch,
+    });
+    items[index] = updatedItem;
+    state.rss = {
+      items,
+      last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
+    };
+    writeState(state);
+    return {
+      ok: true,
+      item: clone(updatedItem),
+    };
+  }
+
   function getFeedItem(itemId = '') {
     const id = String(itemId || '').trim();
     if (!id) return { ok: false, message: 'item_id is required.' };
@@ -1037,6 +1065,7 @@ function createDashboardStore(options = {}) {
     listFeedItems,
     refreshFeeds,
     rerunSummaries,
+    rerunFeedItemSummary,
     getFeedItem,
     setSelectedTopic,
     saveEvent,

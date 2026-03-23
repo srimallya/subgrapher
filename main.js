@@ -23136,6 +23136,10 @@ ipcMain.handle('browser:dashboardGetFeedItem', async (_event, payload) => {
   return getDashboardStore().getFeedItem(String((payload && payload.item_id) || '').trim());
 });
 
+ipcMain.handle('browser:dashboardRerunFeedItemSummary', async (_event, payload) => {
+  return getDashboardStore().rerunFeedItemSummary(String((payload && payload.item_id) || '').trim());
+});
+
 ipcMain.handle('browser:dashboardListNotifications', async (_event, payload) => {
   return listDashboardNotifications({
     limit: Number((payload && payload.limit) || 30),

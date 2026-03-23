@@ -7526,6 +7526,45 @@ function buildStatusFeedModalBody(item = {}) {
   return 'No fetched article content was available for this link.';
 }
 
+function applyStatusFeedModalItem(item = {}, options = {}) {
+  const titleNode = e('status-feed-modal-title');
+  const metaNode = e('status-feed-modal-meta');
+  const bodyNode = e('status-feed-modal-body');
+  const statusNode = e('status-feed-modal-status');
+  const openBtn = e('status-feed-open-btn');
+  const refreshBtn = e('status-feed-refresh-btn');
+  if (!titleNode || !metaNode || !bodyNode || !statusNode || !openBtn || !refreshBtn) return;
+  const title = String((item && (item.display_title || item.title)) || 'Article').trim() || 'Article';
+  const url = String((item && item.url) || '').trim();
+  const content = buildStatusFeedModalBody(item);
+  const statusText = String(options.status || '').trim() || (
+    String((item && item.fetch_status) || '').trim() === 'fetched'
+      ? ''
+      : 'Showing saved summary because full fetched content was unavailable.'
+  );
+  titleNode.textContent = title;
+  metaNode.textContent = buildStatusFeedModalMeta(item);
+  bodyNode.textContent = content;
+  statusNode.textContent = statusText;
+  openBtn.dataset.url = url;
+  openBtn.dataset.title = title;
+  openBtn.disabled = !url;
+  refreshBtn.disabled = !!options.disableRefresh;
+  state.dashboard.feedModal = {
+    itemId: String((item && item.id) || state.dashboard.feedModal.itemId || '').trim(),
+    title,
+    url,
+    source: String((item && item.source_name) || '').trim(),
+    topic: String((item && item.topic) || '').trim(),
+    publishedAt: Number((item && item.published_at) || 0),
+    content,
+    status: statusText,
+    fetchStatus: String((item && item.fetch_status) || '').trim(),
+    loading: !!options.loading,
+    openReady: !!url,
+  };
+}
+
 async function openStatusFeedPreviewModal(itemId = '') {
   const id = String(itemId || '').trim();
   const overlay = e('status-feed-overlay');
@@ -7534,7 +7573,8 @@ async function openStatusFeedPreviewModal(itemId = '') {
   const bodyNode = e('status-feed-modal-body');
   const statusNode = e('status-feed-modal-status');
   const openBtn = e('status-feed-open-btn');
-  if (!id || !overlay || !titleNode || !metaNode || !bodyNode || !statusNode || !openBtn || !api.dashboardGetFeedItem) return;
+  const refreshBtn = e('status-feed-refresh-btn');
+  if (!id || !overlay || !titleNode || !metaNode || !bodyNode || !statusNode || !openBtn || !refreshBtn || !api.dashboardGetFeedItem) return;
   overlay.classList.remove('hidden');
   titleNode.textContent = 'Loading article…';
   metaNode.textContent = '';
@@ -7543,6 +7583,7 @@ async function openStatusFeedPreviewModal(itemId = '') {
   openBtn.dataset.url = '';
   openBtn.dataset.title = '';
   openBtn.disabled = true;
+  refreshBtn.disabled = true;
   state.dashboard.feedModal.loading = true;
   const res = await api.dashboardGetFeedItem(id);
   if (!res || !res.ok || !res.item) {
@@ -7550,34 +7591,10 @@ async function openStatusFeedPreviewModal(itemId = '') {
     bodyNode.textContent = '';
     statusNode.textContent = (res && res.message) || 'Unable to load article.';
     state.dashboard.feedModal.loading = false;
+    refreshBtn.disabled = false;
     return;
   }
-  const item = res.item || {};
-  const title = String((item && (item.display_title || item.title)) || 'Article').trim() || 'Article';
-  const url = String((item && item.url) || '').trim();
-  const content = buildStatusFeedModalBody(item);
-  titleNode.textContent = title;
-  metaNode.textContent = buildStatusFeedModalMeta(item);
-  bodyNode.textContent = content;
-  statusNode.textContent = String((item && item.fetch_status) || '').trim() === 'fetched'
-    ? ''
-    : 'Showing saved summary because full fetched content was unavailable.';
-  openBtn.dataset.url = url;
-  openBtn.dataset.title = title;
-  openBtn.disabled = !url;
-  state.dashboard.feedModal = {
-    itemId: id,
-    title,
-    url,
-    source: String((item && item.source_name) || '').trim(),
-    topic: String((item && item.topic) || '').trim(),
-    publishedAt: Number((item && item.published_at) || 0),
-    content,
-    status: statusNode.textContent,
-    fetchStatus: String((item && item.fetch_status) || '').trim(),
-    loading: false,
-    openReady: !!url,
-  };
+  applyStatusFeedModalItem({ ...res.item, id }, { loading: false, disableRefresh: false });
 }
 
 async function openStatusMailNotification(payload = {}) {
@@ -16002,6 +16019,29 @@ function bindControls() {
     const title = String((button && button.dataset && button.dataset.title) || '').trim();
     if (!url) return;
     await openStatusFeedItem(url, title);
+  });
+  e('status-feed-refresh-btn')?.addEventListener('click', async () => {
+    const itemId = String((state.dashboard.feedModal && state.dashboard.feedModal.itemId) || '').trim();
+    if (!itemId || !api.dashboardRerunFeedItemSummary) return;
+    const refreshBtn = e('status-feed-refresh-btn');
+    if (refreshBtn) refreshBtn.disabled = true;
+    const statusNode = e('status-feed-modal-status');
+    if (statusNode) statusNode.textContent = 'Refreshing summary…';
+    state.dashboard.feedModal.loading = true;
+    const res = await api.dashboardRerunFeedItemSummary(itemId);
+    if (!isModalOpen('status-feed-overlay')) return;
+    if (!res || !res.ok || !res.item) {
+      state.dashboard.feedModal.loading = false;
+      if (refreshBtn) refreshBtn.disabled = false;
+      if (statusNode) statusNode.textContent = (res && res.message) || 'Unable to refresh summary.';
+      return;
+    }
+    applyStatusFeedModalItem(res.item, {
+      loading: false,
+      disableRefresh: false,
+      status: 'Summary refreshed.',
+    });
+    await loadDashboardFeedItems({ refresh: false });
   });
 
   if (!document.__contextPreviewEscBound) {

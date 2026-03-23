@@ -170,6 +170,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     dashboardListFeedItems: (topic = 'all', limit = 80, query = '') => ipcRenderer.invoke('browser:dashboardListFeedItems', { topic, limit, query }),
     dashboardRefreshFeeds: (topic = 'all', limit = 80, query = '') => ipcRenderer.invoke('browser:dashboardRefreshFeeds', { topic, limit, query }),
     dashboardGetFeedItem: (itemId = '') => ipcRenderer.invoke('browser:dashboardGetFeedItem', { item_id: itemId }),
+    dashboardRerunFeedItemSummary: (itemId = '') => ipcRenderer.invoke('browser:dashboardRerunFeedItemSummary', { item_id: itemId }),
     dashboardListNotifications: (limit = 30) => ipcRenderer.invoke('browser:dashboardListNotifications', { limit }),
     srListSkills: (srId) => ipcRenderer.invoke('browser:srListSkills', { srId }),
     srSaveSkill: (srId, skill, scope) => ipcRenderer.invoke('browser:srSaveSkill', { srId, skill, scope }),
