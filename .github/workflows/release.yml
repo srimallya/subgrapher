@@ -68,10 +68,9 @@ jobs:
         run: npm ci
 
       - name: Prepare bundled Python runtime (win x64)
-        shell: bash
-        run: |
-          export SUBGRAPHER_REQUIRE_BUNDLED_PYTHON=1
-          npm run prepare:python:win-x64
+        env:
+          SUBGRAPHER_REQUIRE_BUNDLED_PYTHON: '1'
+        run: npm run prepare:python:win-x64
 
       - name: Build Windows NSIS EXE
         shell: bash
