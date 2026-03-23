@@ -87,11 +87,27 @@ function firstSentences(text = '', count = 3, maxChars = 420) {
   return normalizeWhitespace(out.join(' ')).slice(0, maxChars);
 }
 
+function splitSentences(text = '') {
+  return String(text || '')
+    .split(/(?<=[.!?])\s+/)
+    .map((item) => normalizeWhitespace(item))
+    .filter(Boolean);
+}
+
+function getMeaningfulSentences(text = '', limit = 8) {
+  return splitSentences(text)
+    .filter((sentence) => /[a-z]{4,}/i.test(sentence) && sentence.replace(/[^a-z]/gi, '').length >= 12)
+    .slice(0, limit);
+}
+
 function stripFeedNoise(text = '') {
   return normalizeWhitespace(String(text || '')
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
     .replace(/https?:\/\/[^\s]+/g, ' ')
     .replace(/\b(cookie policy|privacy policy|subscribe to continue reading|read more|sign up for|all rights reserved|javascript is required|enable javascript|share this article|newsletter)\b/gi, ' ')
+    .replace(/(^|[\s])([.][\s]*){2,}/g, ' ')
+    .replace(/\s+\./g, '.')
+    .replace(/^\.+/, ' ')
     .replace(/\s*\|\s*/g, ' ')
     .replace(/\s{2,}/g, ' '));
 }
@@ -172,7 +188,8 @@ function buildTaskPrompt(taskType = '', payload = {}) {
     ].join('\n');
   }
   const title = truncateText(normalizeWhitespace(payload.title || ''), 240);
-  const raw = truncateText(String(payload.raw_content_text || payload.content_text || ''), 6000);
+  const cleaned = stripFeedNoise(String(payload.raw_content_text || payload.content_text || ''));
+  const raw = truncateText(cleaned || String(payload.raw_content_text || payload.content_text || ''), 9000);
   const sourceName = truncateText(normalizeWhitespace(payload.source_name || ''), 160);
   const url = truncateText(normalizeWhitespace(payload.url || ''), 400);
   return [
@@ -180,7 +197,8 @@ function buildTaskPrompt(taskType = '', payload = {}) {
     'Read the fetched article text and output one JSON object only.',
     'No prose. No markdown. No code fences.',
     'Remove scraper noise, nav text, subscribe prompts, repeated headlines, and legal boilerplate.',
-    'Write a concise factual summary in 2 to 4 sentences.',
+    'Write the gist of the story in 5 to 10 factual sentences.',
+    'Do not include subscribe prompts, cookie banners, nav labels, social prompts, or website chrome.',
     'Write a short excerpt under 220 characters.',
     'Return entities as a short list of names.',
     'Return topics as a short list of lowercase tags.',
@@ -196,6 +214,45 @@ function buildTaskPrompt(taskType = '', payload = {}) {
     '',
     'JSON:',
   ].join('\n');
+}
+
+function getTaskJsonSchema(taskType = '') {
+  if (taskType === 'note_policy_classification') {
+    return JSON.stringify({
+      type: 'object',
+      additionalProperties: false,
+      required: ['note_mode', 'freshness_bias', 'source_mix', 'contradiction_scan', 'result_budget', 'staleness_ttl_minutes', 'prefer_recent_window_days'],
+      properties: {
+        note_mode: { type: 'string', enum: ['live_update', 'background_brief', 'historical_summary', 'analysis_opinion', 'mixed'] },
+        freshness_bias: { type: 'string', enum: ['low', 'medium', 'high'] },
+        source_mix: { type: 'string', enum: ['latest_news', 'official_sources', 'reference_background', 'mixed'] },
+        contradiction_scan: { type: 'boolean' },
+        result_budget: { type: 'integer', minimum: 3, maximum: 10 },
+        staleness_ttl_minutes: { type: 'integer', minimum: 30, maximum: 20160 },
+        prefer_recent_window_days: { type: 'integer', minimum: 1, maximum: 3650 },
+      },
+    });
+  }
+  return JSON.stringify({
+    type: 'object',
+    additionalProperties: false,
+    required: ['summary', 'excerpt', 'entities', 'topics', 'content_quality'],
+    properties: {
+      summary: { type: 'string', minLength: 120, maxLength: 2200 },
+      excerpt: { type: 'string', minLength: 30, maxLength: 220 },
+      entities: {
+        type: 'array',
+        maxItems: 12,
+        items: { type: 'string', minLength: 1, maxLength: 120 },
+      },
+      topics: {
+        type: 'array',
+        maxItems: 8,
+        items: { type: 'string', minLength: 1, maxLength: 40 },
+      },
+      content_quality: { type: 'string', enum: ['clean', 'noisy', 'fragmented'] },
+    },
+  });
 }
 
 function buildFallbackNotePolicy(note = {}) {
@@ -277,7 +334,7 @@ function buildFallbackNotePolicy(note = {}) {
 function buildFallbackFeedSummary(article = {}) {
   const rawText = stripFeedNoise(String((article && article.raw_content_text) || (article && article.content_text) || ''));
   const title = normalizeWhitespace(String((article && (article.display_title || article.title || article.crawler_title)) || ''));
-  const summary = firstSentences(rawText || title, 3, 420);
+  const summary = normalizeWhitespace(getMeaningfulSentences(rawText || title, 8).join(' ') || firstSentences(rawText || title, 8, 1600));
   const excerpt = firstSentences(summary || rawText || title, 2, 220);
   const topics = [];
   const lower = `${title} ${rawText}`.toLowerCase();
@@ -483,8 +540,12 @@ class BundledSmallLlmRuntime {
     const summary = normalizeWhitespace(src.summary || '');
     const excerpt = normalizeWhitespace(src.excerpt || '');
     if (!summary) throw new Error('summary is required');
+    const sentenceCount = getMeaningfulSentences(summary, 12).length;
+    if (sentenceCount < 5 || sentenceCount > 10) {
+      throw new Error(`summary must contain 5 to 10 sentences, got ${sentenceCount}`);
+    }
     return {
-      summary: summary.slice(0, 1200),
+      summary: summary.slice(0, 2200),
       excerpt: (excerpt || firstSentences(summary, 2, 220)).slice(0, 320),
       entities: Array.isArray(src.entities)
         ? src.entities.map((item) => normalizeWhitespace(item)).filter(Boolean).slice(0, 12)
@@ -522,6 +583,10 @@ class BundledSmallLlmRuntime {
           'off',
           '--log-disable',
           '--no-perf',
+          '--simple-io',
+          '--no-display-prompt',
+          '--json-schema',
+          getTaskJsonSchema(taskType),
           '--ctx-size',
           String(clampNumber(manifest.ctx_size, 1024, 32768, DEFAULT_CTX_SIZE)),
           '--seed',

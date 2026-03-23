@@ -1824,6 +1824,12 @@ function shouldShowProvisionalNoteAnalysis() {
   return false;
 }
 
+function shouldMaskPersistedNoteAnalysis() {
+  if (!state.activeNote) return false;
+  if (state.noteAnalysisPending) return true;
+  return String(state.noteFreshnessState || '').trim() === 'refreshing';
+}
+
 function getRenderableNoteClaims() {
   const persistedClaims = (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
     .filter((claim) => {
@@ -1832,7 +1838,7 @@ function getRenderableNoteClaims() {
       const end = Number((claim && claim.end_offset) || 0);
       return Number.isFinite(start) && Number.isFinite(end) && end > start;
     });
-  const claims = persistedClaims.length > 0
+  const claims = (persistedClaims.length > 0 && !shouldMaskPersistedNoteAnalysis())
     ? persistedClaims
     : (shouldShowProvisionalNoteAnalysis() ? buildProvisionalNoteClaims(getActiveNoteDraftBody()) : []);
   return claims
@@ -1852,7 +1858,7 @@ function getRenderableNoteRegions() {
       const end = Number((region && region.end_offset) || 0);
       return Number.isFinite(start) && Number.isFinite(end) && end > start;
     });
-  if (persisted.length > 0) {
+  if (persisted.length > 0 && !shouldMaskPersistedNoteAnalysis()) {
     return persisted.slice().sort((a, b) => Number((a && a.start_offset) || 0) - Number((b && b.start_offset) || 0));
   }
   return shouldShowProvisionalNoteAnalysis() ? buildProvisionalNoteRegions(getActiveNoteDraftBody()) : [];
@@ -1911,7 +1917,7 @@ function buildProvisionalEvidenceFeed() {
 
 function getRenderableNoteEvidenceFeed() {
   const feed = Array.isArray(state.activeNoteEvidenceFeed) ? state.activeNoteEvidenceFeed : [];
-  if (feed.length > 0) {
+  if (feed.length > 0 && !shouldMaskPersistedNoteAnalysis()) {
     return feed.slice().sort((a, b) => Number((a && a.start_offset) || 0) - Number((b && b.start_offset) || 0));
   }
   return shouldShowProvisionalNoteAnalysis() ? buildProvisionalEvidenceFeed() : [];
@@ -2155,6 +2161,10 @@ function getNoteAnalysisStageLabel(stage = '') {
 }
 
 function getDisplayedNoteScore() {
+  if (shouldMaskPersistedNoteAnalysis()) {
+    const provisionalPending = computeProvisionalNoteMetrics(getActiveNoteDraftBody());
+    return provisionalPending.note_score > 0 ? provisionalPending.note_score : 0;
+  }
   const explicit = clamp(Math.round(Number(state.noteScore || 0) || 0), 0, 100);
   const summaryRevision = getNoteAnalysisRevision(state.activeNoteAnalysis);
   const noteRevision = Number((state.activeNote && state.activeNote.analysis_revision) || 0) || 0;
@@ -2167,6 +2177,10 @@ function getDisplayedNoteScore() {
 }
 
 function getDisplayedNoteRiskLevel() {
+  if (shouldMaskPersistedNoteAnalysis()) {
+    const provisionalPending = computeProvisionalNoteMetrics(getActiveNoteDraftBody());
+    return provisionalPending.risk_level || 'needs_review';
+  }
   const explicit = String(state.noteRiskLevel || '').trim();
   if (!shouldShowProvisionalNoteAnalysis()) {
     if (explicit && explicit !== 'clean') return explicit;
@@ -2192,6 +2206,7 @@ function renderNotesScoreSummary() {
     chipNode.textContent = risk.label;
     chipNode.className = `notes-risk-chip ${risk.className}`;
   }
+  if (valueNode) valueNode.classList.toggle('is-pending', shouldMaskPersistedNoteAnalysis());
 }
 
 function getLeadClaimForEvidenceRow(row = {}) {
@@ -2292,6 +2307,10 @@ function renderNotesEvidenceRail() {
   if (!bodyNode) return;
   if (!state.activeNote) {
     bodyNode.innerHTML = '<div class="notes-citation-state muted">Open a note to see evidence feedback.</div>';
+    return;
+  }
+  if (shouldMaskPersistedNoteAnalysis()) {
+    bodyNode.innerHTML = '<div class="notes-citation-state muted">Refreshing evidence for this note. Previous source cards are hidden until the new run completes.</div>';
     return;
   }
   const feed = getRenderableNoteEvidenceFeed();
@@ -2687,7 +2706,14 @@ function renderNotesSurface() {
   if (reanalyzeBtn) reanalyzeBtn.disabled = !hasNote || state.noteAnalysisPending;
   if (deleteBtn) deleteBtn.disabled = !hasNote;
   if (promoteBtn) promoteBtn.disabled = !hasNote;
-  if (statusNode) statusNode.textContent = computeNoteStatusText();
+  if (statusNode) {
+    statusNode.textContent = computeNoteStatusText();
+    const notePolicy = (state.activeNoteAnalysis && state.activeNoteAnalysis.note_policy && typeof state.activeNoteAnalysis.note_policy === 'object')
+      ? state.activeNoteAnalysis.note_policy
+      : {};
+    const statusReason = String(notePolicy.fallback_reason || '').trim();
+    statusNode.title = statusReason || '';
+  }
   renderNotesScoreSummary();
   renderNotesEvidenceRail();
 

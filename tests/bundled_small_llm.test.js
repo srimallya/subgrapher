@@ -34,7 +34,7 @@ process.stdin.on('end', () => {
     return;
   }
   process.stdout.write(JSON.stringify({
-    summary: 'Cleaned summary from bundled runtime.',
+    summary: 'Cleaned summary from bundled runtime. It removes scraper junk from the fetched article. It keeps the factual core of the story intact. It returns a longer gist suitable for the status panel. It stays within the structured output contract.',
     excerpt: 'Cleaned summary from bundled runtime.',
     entities: ['Iran', 'United States'],
     topics: ['world'],
@@ -109,5 +109,5 @@ test('bundled small llm uses packaged runtime when executable and model are pres
   });
   assert.equal(summary.ok, true);
   assert.equal(summary.analysis_source, 'llm');
-  assert.equal(summary.summary, 'Cleaned summary from bundled runtime.');
+  assert.match(summary.summary, /Cleaned summary from bundled runtime/);
 });

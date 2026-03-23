@@ -633,7 +633,7 @@ function createDashboardStore(options = {}) {
     }
     if (!summarizeArticle) {
       return {
-        clean_summary: String(normalized.summary || buildContentExcerpt(rawContentText, 420)).trim(),
+        clean_summary: String(normalized.summary || buildContentExcerpt(rawContentText, 1600)).trim(),
         clean_excerpt: buildContentExcerpt(rawContentText || normalized.summary || '', 220),
         summary_generated_at: nowTs(),
         summary_model_id: '',
@@ -653,7 +653,7 @@ function createDashboardStore(options = {}) {
     }).catch(() => null);
     if (!res || res.ok === false) {
       return {
-        clean_summary: String(normalized.summary || buildContentExcerpt(rawContentText, 420)).trim(),
+        clean_summary: String(normalized.summary || buildContentExcerpt(rawContentText, 1600)).trim(),
         clean_excerpt: buildContentExcerpt(rawContentText || normalized.summary || '', 220),
         summary_generated_at: nowTs(),
         summary_model_id: '',
@@ -663,7 +663,7 @@ function createDashboardStore(options = {}) {
         summary_content_hash: contentHash,
       };
     }
-    const cleanSummary = String(res.summary || normalized.summary || buildContentExcerpt(rawContentText, 420)).trim();
+    const cleanSummary = String(res.summary || normalized.summary || buildContentExcerpt(rawContentText, 1600)).trim();
     return {
       clean_summary: cleanSummary,
       clean_excerpt: String(res.excerpt || buildContentExcerpt(cleanSummary || rawContentText, 220)).trim(),
