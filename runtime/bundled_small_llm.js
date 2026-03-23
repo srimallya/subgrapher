@@ -366,6 +366,15 @@ class BundledSmallLlmRuntime {
     this.activeTasks = new Map();
   }
 
+  _log(message = '', meta = null) {
+    const prefix = '[bundled-llm]';
+    if (meta && typeof meta === 'object') {
+      console.log(prefix, message, meta);
+      return;
+    }
+    console.log(prefix, message);
+  }
+
   _isPackaged() {
     return !!(this.app && this.app.isPackaged);
   }
@@ -572,6 +581,12 @@ class BundledSmallLlmRuntime {
       : FEED_SUMMARY_SCHEMA_VERSION;
     const promptVersion = Number((manifest.prompt_versions && manifest.prompt_versions[taskType]) || schemaVersion) || schemaVersion;
     const backend = String(manifest.backend || 'llama.cpp-cli').trim() || 'llama.cpp-cli';
+    this._log('task:start', {
+      task_type: String(taskType || '').trim(),
+      backend,
+      model_id: String(manifest.model_id || '').trim(),
+      label: String(payload.title || payload.id || payload.url || '').trim(),
+    });
     return new Promise((resolve, reject) => {
       const args = backend === 'llama.cpp-cli'
         ? [
@@ -621,6 +636,11 @@ class BundledSmallLlmRuntime {
         if (settled) return;
         settled = true;
         child.kill('SIGKILL');
+        this._log('task:timeout', {
+          task_type: String(taskType || '').trim(),
+          timeout_ms: timeoutMs,
+          label: String(payload.title || payload.id || payload.url || '').trim(),
+        });
         reject(new Error(`bundled llm timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
@@ -634,6 +654,11 @@ class BundledSmallLlmRuntime {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        this._log('task:error', {
+          task_type: String(taskType || '').trim(),
+          error: String((err && err.message) || err || 'spawn_failed'),
+          label: String(payload.title || payload.id || payload.url || '').trim(),
+        });
         reject(err);
       });
       child.on('close', (code) => {
@@ -641,17 +666,33 @@ class BundledSmallLlmRuntime {
         settled = true;
         clearTimeout(timeout);
         if (code !== 0) {
+          this._log('task:nonzero_exit', {
+            task_type: String(taskType || '').trim(),
+            code,
+            stderr: normalizeWhitespace(stderr).slice(0, 240),
+            label: String(payload.title || payload.id || payload.url || '').trim(),
+          });
           reject(new Error(`bundled llm exited with code ${code}: ${normalizeWhitespace(stderr).slice(0, 400)}`));
           return;
         }
         try {
           const parsed = JSON.parse(backend === 'llama.cpp-cli' ? extractFirstJsonObject(stdout) : stdout);
+          this._log('task:done', {
+            task_type: String(taskType || '').trim(),
+            label: String(payload.title || payload.id || payload.url || '').trim(),
+          });
           resolve({
             payload: parsed,
             stderr: normalizeWhitespace(stderr),
             prompt_version: promptVersion,
           });
         } catch (err) {
+          this._log('task:invalid_json', {
+            task_type: String(taskType || '').trim(),
+            error: String((err && err.message) || err || 'invalid_json'),
+            stdout_preview: normalizeWhitespace(stdout).slice(0, 240),
+            label: String(payload.title || payload.id || payload.url || '').trim(),
+          });
           reject(new Error(`bundled llm returned invalid JSON: ${err.message}`));
         }
       });
@@ -691,6 +732,10 @@ class BundledSmallLlmRuntime {
     } catch (err) {
       const reason = String((err && err.message) || 'note_policy_failed');
       this.lastPolicyError = reason;
+      this._log('note:fallback', {
+        title: String((note && note.title) || '').trim(),
+        reason,
+      });
       const unavailable = err && err.code === 'BUNDLED_LLM_UNAVAILABLE';
       const policy = buildFallbackNotePolicy(note);
       return {
@@ -739,6 +784,10 @@ class BundledSmallLlmRuntime {
     } catch (err) {
       const reason = String((err && err.message) || 'feed_summary_failed');
       this.lastFeedError = reason;
+      this._log('feed:fallback', {
+        title: String((article && article.title) || (article && article.url) || '').trim(),
+        reason,
+      });
       const unavailable = err && err.code === 'BUNDLED_LLM_UNAVAILABLE';
       const payload = buildFallbackFeedSummary(article);
       return {

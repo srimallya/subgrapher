@@ -6481,13 +6481,30 @@ async function runNoteAnalysis(noteId = '', options = {}) {
   const expectedRevision = Number((options && options.expectedRevision) || 0) || 0;
   const setStage = (options && typeof options.setStage === 'function') ? options.setStage : null;
   const store = getNotesStore();
+  const logNoteStage = (stage = '', meta = {}) => {
+    console.log('[bundled-llm] note-analysis:stage', {
+      note_id: targetId,
+      stage: String(stage || '').trim(),
+      ...meta,
+    });
+  };
+  logNoteStage('detecting_claims', { expected_revision: expectedRevision });
   if (setStage) setStage('detecting_claims');
   const noteRes = await store.getNote(targetId);
   if (!noteRes || !noteRes.ok || !noteRes.note) {
+    console.error('[bundled-llm] note-analysis:error', {
+      note_id: targetId,
+      error: (noteRes && noteRes.message) || 'Note not found.',
+    });
     return { ok: false, message: (noteRes && noteRes.message) || 'Note not found.' };
   }
   const note = noteRes.note;
   if (expectedRevision > 0 && Number(note.analysis_revision || 0) !== expectedRevision) {
+    console.error('[bundled-llm] note-analysis:stale', {
+      note_id: targetId,
+      expected_revision: expectedRevision,
+      actual_revision: Number(note.analysis_revision || 0) || 0,
+    });
     return {
       ok: false,
       stale: true,
@@ -6497,6 +6514,7 @@ async function runNoteAnalysis(noteId = '', options = {}) {
   }
   if (!String(note.body_markdown || '').trim()) {
     const engine = getNoteAnalysisEngine();
+    logNoteStage('scoring_evidence', { empty_note: true });
     if (setStage) setStage('scoring_evidence');
     return store.saveAnalysis(targetId, {
       analysis_run_id: makeId('analysis'),
@@ -6518,13 +6536,36 @@ async function runNoteAnalysis(noteId = '', options = {}) {
       citations: [],
     });
   }
+  logNoteStage('retrieving_sources', {
+    note_title: String(note.title || '').trim(),
+    revision: Number(note.analysis_revision || 0) || 0,
+  });
   if (setStage) setStage('retrieving_sources');
-  const analysisRes = await getNoteAnalysisEngine().analyze(note, {});
+  const analysisRes = await getNoteAnalysisEngine().analyze(note, {
+    onProgress: (event = {}) => {
+      logNoteStage(String((event && event.stage) || '').trim() || 'retrieving_sources', event);
+    },
+  });
   if (!analysisRes || analysisRes.ok === false) {
+    console.error('[bundled-llm] note-analysis:error', {
+      note_id: targetId,
+      stage: 'retrieving_sources',
+      error: String((analysisRes && analysisRes.message) || 'Note analysis failed.'),
+    });
     return { ok: false, message: String((analysisRes && analysisRes.message) || 'Note analysis failed.') };
   }
+  logNoteStage('scoring_evidence', {
+    claim_count: Number((analysisRes && analysisRes.summary && analysisRes.summary.claim_count) || (analysisRes && analysisRes.claims && analysisRes.claims.length) || 0) || 0,
+    source_count: Array.isArray(analysisRes && analysisRes.sources) ? analysisRes.sources.length : 0,
+  });
   if (setStage) setStage('scoring_evidence');
-  return store.saveAnalysis(targetId, analysisRes);
+  const saveRes = await store.saveAnalysis(targetId, analysisRes);
+  console.log('[bundled-llm] note-analysis:done', {
+    note_id: targetId,
+    ok: !!(saveRes && saveRes.ok),
+    analysis_source: String((saveRes && saveRes.analysis_summary && saveRes.analysis_summary.analysis_source) || '').trim(),
+  });
+  return saveRes;
 }
 
 function scheduleNoteAnalysis(noteId = '', delayMs = 1200, revision = 0) {
@@ -6600,7 +6641,7 @@ async function computeBundledLlmTaskDiagnostics() {
     total_candidates: totalCandidates,
     pending_tasks: pendingTasks,
     completed_tasks: completedTasks,
-    progress_percent: clamp(Math.max(0, activeProgress), 0, 100),
+    progress_percent: Math.max(0, Math.min(100, Number(activeProgress || 0) || 0)),
     current_label: String(job.current_label || '').trim(),
     started_at: Number(job.started_at || 0) || 0,
     finished_at: Number(job.finished_at || 0) || 0,
@@ -6635,6 +6676,9 @@ async function rerunBundledLlmTasks(options = {}) {
     finished_at: 0,
     last_error: '',
   };
+  console.log('[bundled-llm] rerun:start', {
+    force: !!options.force,
+  });
   try {
     const notesStore = getNotesStore();
     const listRes = await notesStore.listNotes();
@@ -6648,28 +6692,65 @@ async function rerunBundledLlmTasks(options = {}) {
       if (!String(noteRes.note.body_markdown || '').trim()) continue;
       noteCandidates.push(noteRes.note);
     }
-    const feedBacklog = getDashboardStore().getSummaryBacklogStatus();
-    bundledLlmRerunJob.total = noteCandidates.length + Number((feedBacklog && feedBacklog.total_candidates) || 0);
+    const notesResetRes = await notesStore.resetAnalyses(noteCandidates.map((note) => String((note && note.id) || '').trim()));
+    const feedResetRes = getDashboardStore().resetFeedCache();
+    bundledLlmRerunJob.total = noteCandidates.length;
+    bundledLlmRerunJob.completed = 0;
+    console.log('[bundled-llm] rerun:workload', {
+      note_candidates: noteCandidates.length,
+      feed_candidates: 0,
+      total: bundledLlmRerunJob.total,
+      reset_notes: !!(notesResetRes && notesResetRes.ok),
+      reset_feed_items: Number((feedResetRes && feedResetRes.cleared_items) || 0),
+    });
     for (const note of noteCandidates) {
       bundledLlmRerunJob.current_label = String(note.title || note.id || 'note').trim();
+      console.log('[bundled-llm] rerun:note:start', {
+        note_id: String(note.id || '').trim(),
+        title: bundledLlmRerunJob.current_label,
+        completed: bundledLlmRerunJob.completed,
+        total: bundledLlmRerunJob.total,
+      });
       await runNoteAnalysis(String(note.id || '').trim(), {
         expectedRevision: Number(note.analysis_revision || 0) || 0,
       }).catch((err) => {
         bundledLlmRerunJob.last_error = String((err && err.message) || 'note_rerun_failed');
+        console.error('[bundled-llm] rerun:note:error', {
+          note_id: String(note.id || '').trim(),
+          title: bundledLlmRerunJob.current_label,
+          error: bundledLlmRerunJob.last_error,
+        });
       });
       bundledLlmRerunJob.completed += 1;
+      console.log('[bundled-llm] rerun:note:done', {
+        note_id: String(note.id || '').trim(),
+        title: bundledLlmRerunJob.current_label,
+        completed: bundledLlmRerunJob.completed,
+        total: bundledLlmRerunJob.total,
+      });
     }
-    await getDashboardStore().rerunSummaries({
-      force: !!options.force,
-      onProgress: ({ completed = 0, total = 0, label = '' }) => {
+    await getDashboardStore().refreshFeeds({
+      force: true,
+      discardExisting: true,
+      onProgress: ({ completed = 0, total = 0, label = '', stage = '' }) => {
         bundledLlmRerunJob.current_label = String(label || '').trim();
         bundledLlmRerunJob.completed = noteCandidates.length + Number(completed || 0);
         bundledLlmRerunJob.total = noteCandidates.length + Number(total || 0);
+        console.log('[bundled-llm] rerun:feed:progress', {
+          stage: String(stage || '').trim(),
+          label: bundledLlmRerunJob.current_label,
+          completed: bundledLlmRerunJob.completed,
+          total: bundledLlmRerunJob.total,
+        });
       },
     });
     bundledLlmRerunJob.running = false;
     bundledLlmRerunJob.finished_at = nowTs();
     bundledLlmRerunJob.current_label = '';
+    console.log('[bundled-llm] rerun:done', {
+      completed: bundledLlmRerunJob.completed,
+      total: bundledLlmRerunJob.total,
+    });
     return {
       ok: true,
       diagnostics: await computeBundledLlmTaskDiagnostics(),
@@ -6678,6 +6759,9 @@ async function rerunBundledLlmTasks(options = {}) {
     bundledLlmRerunJob.running = false;
     bundledLlmRerunJob.finished_at = nowTs();
     bundledLlmRerunJob.last_error = String((err && err.message) || 'bundled_llm_rerun_failed');
+    console.error('[bundled-llm] rerun:error', {
+      error: bundledLlmRerunJob.last_error,
+    });
     return {
       ok: false,
       message: bundledLlmRerunJob.last_error,

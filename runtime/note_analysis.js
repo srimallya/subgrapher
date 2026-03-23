@@ -920,6 +920,19 @@ function createNoteAnalysisEngine(options = {}) {
     const noteRevision = Number((note && note.analysis_revision) || 0);
     const body = String((note && note.body_markdown) || '');
     const analysisRunId = makeId('analysis');
+    const reportProgress = typeof context.onProgress === 'function' ? context.onProgress : null;
+    const emitProgress = (stage = '', meta = {}) => {
+      if (!reportProgress) return;
+      try {
+        reportProgress({
+          stage: String(stage || '').trim(),
+          note_id: noteId,
+          ...meta,
+        });
+      } catch (_) {
+        // ignore observer failures
+      }
+    };
     const policyRes = classifyNotePolicy
       ? await classifyNotePolicy({
         id: noteId,
@@ -967,6 +980,11 @@ function createNoteAnalysisEngine(options = {}) {
         return claim;
       }));
     const claims = rawClaims.filter((item) => item.factuality === 'factual');
+    emitProgress('claims_detected', {
+      claim_count: claims.length,
+      explicit_url_count: explicitUrls.length,
+      note_mode: String(notePolicy.note_mode || '').trim(),
+    });
     if (claims.length === 0) {
       const summary = summarizeAnalysis(claims);
       return {
@@ -1114,6 +1132,9 @@ function createNoteAnalysisEngine(options = {}) {
       url: item.canonical_url,
       title: '',
     }));
+    emitProgress('explicit_fetch_queue', {
+      item_count: explicitFetchItems.length,
+    });
     explicitFetchItems.forEach((item) => {
       ensureSource({
         source_kind: item.source_kind,
@@ -1129,9 +1150,19 @@ function createNoteAnalysisEngine(options = {}) {
       return { item, preview };
     }, MAX_CONCURRENCY);
     explicitFetchResults.forEach(addFetchedSource);
+    emitProgress('explicit_fetch_done', {
+      fetched_count: explicitFetchResults.length,
+      source_count: sources.length,
+      passage_count: passages.length,
+    });
 
     const claimSearchResults = await Promise.all(claims.map(async (claim) => {
       const searchPlans = buildClaimSearchPlans(claim);
+      emitProgress('claim_search_start', {
+        claim_id: String(claim.id || '').trim(),
+        claim_text: String(claim.claim_text || '').slice(0, 180),
+        plan_count: searchPlans.length,
+      });
       const buckets = {
         support: { items: [] },
         official: { items: [] },
@@ -1165,6 +1196,13 @@ function createNoteAnalysisEngine(options = {}) {
           ).sort((a, b) => Number(b.query_confidence || 0) - Number(a.query_confidence || 0)).slice(0, 4);
         }
       }
+      emitProgress('claim_search_done', {
+        claim_id: String(claim.id || '').trim(),
+        claim_text: String(claim.claim_text || '').slice(0, 180),
+        support_results: buckets.support.items.length,
+        official_results: buckets.official.items.length,
+        challenge_results: buckets.challenge.items.length,
+      });
       return {
         claim,
         webRes: ['official', 'support', 'challenge'].map((intent) => ({
@@ -1197,12 +1235,21 @@ function createNoteAnalysisEngine(options = {}) {
 
     const fetchQueue = dedupeBy(searchSources, (item) => `${item.source_kind}:${normalizeUrl(item.url)}`)
       .slice(0, maxFetchesForNote);
+    emitProgress('web_fetch_queue', {
+      item_count: fetchQueue.length,
+      source_candidate_count: searchSources.length,
+    });
 
     const fetchResults = await runPool(fetchQueue, async (item) => {
       const preview = await fetchWithCache(item.url);
       return { item, preview };
     }, MAX_CONCURRENCY);
     fetchResults.forEach(addFetchedSource);
+    emitProgress('web_fetch_done', {
+      fetched_count: fetchResults.length,
+      source_count: sources.length,
+      passage_count: passages.length,
+    });
 
     const passageScoresByClaim = new Map();
     const sourceSupportCount = new Map();
@@ -1259,6 +1306,12 @@ function createNoteAnalysisEngine(options = {}) {
         support: supportRanked,
         challenge: challengeRanked,
       });
+    });
+    emitProgress('scoring_done', {
+      claim_count: claims.length,
+      source_count: sources.length,
+      passage_count: passages.length,
+      citation_count: citations.length,
     });
 
     let temporalScores = new Map();

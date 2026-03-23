@@ -67,3 +67,53 @@ test('dashboard store preserves raw article text and prefers clean summaries in 
   assert.equal(backlog.total_candidates, 1);
   assert.equal(backlog.pending_items, 1);
 });
+
+test('dashboard store resetFeedCache clears stored RSS items without touching other dashboard state', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+  });
+
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [{ id: 'evt_1', title: 'Existing event', start_date: '2026-03-23', end_date: '2026-03-23', repeat: 'off', note: '', time: '', created_at: Date.now(), updated_at: Date.now() }],
+    tasks: [{ id: 'tsk_1', title: 'Existing task', created_at: Date.now(), updated_at: Date.now() }],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: Date.now(),
+      items: [{
+        id: 'feed_reset_1',
+        url: 'https://example.com/reset',
+        title: 'Reset me',
+        display_title: 'Reset me',
+        raw_content_text: 'Raw article text',
+        clean_summary: 'Existing clean summary',
+        source_name: 'Example Feed',
+        source_domain: 'example.com',
+        topic: 'world',
+        source_topic: 'world',
+        published_at: Date.now(),
+        fetched_at: Date.now(),
+        content_fetched_at: Date.now(),
+        fetch_status: 'fetched',
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const resetRes = store.resetFeedCache();
+  assert.equal(resetRes.ok, true);
+  assert.equal(resetRes.cleared_items, 1);
+
+  const nextState = store.getState();
+  assert.equal(nextState.ok, true);
+  assert.equal(Array.isArray(nextState.state.events), true);
+  assert.equal(nextState.state.events.length, 1);
+  assert.equal(Array.isArray(nextState.state.tasks), true);
+  assert.equal(nextState.state.tasks.length, 1);
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 0);
+});

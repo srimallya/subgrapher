@@ -553,6 +553,20 @@ function createDashboardStore(options = {}) {
     };
   }
 
+  function resetFeedCache() {
+    const state = readState();
+    const clearedItems = pruneFeedItems(state.rss && state.rss.items).length;
+    state.rss = {
+      items: [],
+      last_refreshed_at: 0,
+    };
+    writeState(state);
+    return {
+      ok: true,
+      cleared_items: clearedItems,
+    };
+  }
+
   function shouldRefreshFeeds() {
     const state = readState();
     const last = Number((state.rss && state.rss.last_refreshed_at) || 0);
@@ -788,14 +802,30 @@ function createDashboardStore(options = {}) {
 
   async function refreshFeeds(options = {}) {
     const force = !!options.force;
+    const progress = typeof options.onProgress === 'function' ? options.onProgress : null;
+    const discardExisting = !!options.discardExisting;
+    const emitProgress = (meta = {}) => {
+      if (!progress) return;
+      try {
+        progress(meta);
+      } catch (_) {
+        // ignore observer failures
+      }
+    };
     if (!force && !shouldRefreshFeeds()) {
       return listFeedItems({ topic: options.topic, limit: options.limit, query: options.query });
     }
     const state = readState();
-    const existingItems = pruneFeedItems(state.rss && state.rss.items);
+    const existingItems = discardExisting ? [] : pruneFeedItems(state.rss && state.rss.items);
     const existingMap = getLookupMap(existingItems);
     const discoveredMap = new Map();
     const errors = [];
+    emitProgress({
+      stage: 'fetching_feeds',
+      total: STARTER_FEEDS.length,
+      completed: 0,
+      label: 'Fetching RSS sources',
+    });
     const results = await Promise.allSettled(STARTER_FEEDS.map(async (source) => {
       const xml = await fetchTextWithTimeout(source.url);
       return parseFeedXml(xml, source).slice(0, MAX_PER_SOURCE);
@@ -818,20 +848,41 @@ function createDashboardStore(options = {}) {
     const discovered = Array.from(discoveredMap.values())
       .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0))
       .slice(0, MAX_REFRESH_ITEMS);
-    const enriched = await mapWithConcurrency(discovered, ENRICH_CONCURRENCY, async (candidate) => {
-      const keys = getItemLookupKeys(candidate);
-      let existing = null;
-      for (let i = 0; i < keys.length; i += 1) {
-        if (existingMap.has(keys[i])) {
-          existing = existingMap.get(keys[i]);
-          break;
-        }
-      }
-      return enrichFeedCandidate(candidate, existing);
+    emitProgress({
+      stage: 'enriching_articles',
+      total: discovered.length,
+      completed: 0,
+      label: discovered.length ? 'Fetching article text' : 'No feed items discovered',
     });
+    let enrichedCompleted = 0;
+    const enriched = await mapWithConcurrency(discovered, ENRICH_CONCURRENCY, async (candidate) => {
+      const result = await enrichFeedCandidate(candidate, discardExisting ? null : existingMap.get(`url:${canonicalizeUrl(candidate.url || '')}`) || null);
+      enrichedCompleted += 1;
+      emitProgress({
+        stage: 'enriching_articles',
+        total: discovered.length,
+        completed: enrichedCompleted,
+        label: String((candidate && (candidate.title || candidate.url)) || 'article').trim(),
+      });
+      return result;
+    });
+    emitProgress({
+      stage: 'summarizing_articles',
+      total: enriched.length,
+      completed: 0,
+      label: enriched.length ? 'Summarizing feeds' : 'No articles to summarize',
+    });
+    let summarizedCompleted = 0;
     const summarized = await mapWithConcurrency(enriched, ENRICH_CONCURRENCY, async (item) => {
-      const existing = existingMap.get(`url:${canonicalizeUrl(item.url || '')}`) || null;
+      const existing = discardExisting ? null : existingMap.get(`url:${canonicalizeUrl(item.url || '')}`) || null;
       const summaryPatch = await buildCleanSummary(item, existing);
+      summarizedCompleted += 1;
+      emitProgress({
+        stage: 'summarizing_articles',
+        total: enriched.length,
+        completed: summarizedCompleted,
+        label: String((item && (item.display_title || item.title || item.url)) || 'article').trim(),
+      });
       return normalizeStoredFeedItem({
         ...item,
         ...summaryPatch,
@@ -981,6 +1032,7 @@ function createDashboardStore(options = {}) {
   return {
     getState,
     getSummaryBacklogStatus,
+    resetFeedCache,
     shouldRefreshFeeds,
     listFeedItems,
     refreshFeeds,

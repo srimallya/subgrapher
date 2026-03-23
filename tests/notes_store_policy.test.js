@@ -52,3 +52,44 @@ test('notes store persists analysis policy and freshness metadata', async () => 
   assert.equal(analysisRes.analysis_summary.latest_evidence_at, 1_710_000_000_000);
   assert.equal(analysisRes.analysis_summary.next_refresh_at, 1_710_000_360_000);
 });
+
+test('notes store resetAnalyses clears saved evidence state without deleting notes', async () => {
+  const tempDir = makeTempDir();
+  const store = createNotesStore({ userDataPath: tempDir });
+  const createRes = await store.createNote({
+    title: 'Persistent note',
+    body_markdown: 'This note body should survive reset.',
+    active_mode: 'view',
+  });
+  assert.equal(createRes.ok, true);
+
+  const noteId = createRes.note.id;
+  const saveRes = await store.saveAnalysis(noteId, {
+    analysis_run_id: 'analysis_reset_1',
+    note_revision: createRes.note.analysis_revision,
+    extractor_version: 'note-analyzer-v8',
+    status: 'completed',
+    message: 'Saved before reset.',
+    note_policy: { note_mode: 'live_update', freshness_bias: 'high' },
+    analysis_source: 'llm',
+    freshness_state: 'stable',
+    latest_evidence_at: 1_710_000_000_000,
+    next_refresh_at: 1_710_000_360_000,
+    claims: [],
+    sources: [],
+    passages: [],
+    citations: [],
+  });
+  assert.equal(saveRes.ok, true);
+
+  const resetRes = await store.resetAnalyses([noteId]);
+  assert.equal(resetRes.ok, true);
+  assert.equal(resetRes.cleared_notes, 1);
+
+  const noteRes = await store.getNote(noteId);
+  assert.equal(noteRes.ok, true);
+  assert.equal(noteRes.note.title, 'Persistent note');
+  assert.equal(noteRes.note.body_markdown, 'This note body should survive reset.');
+  assert.equal(noteRes.note.last_analyzed_at, 0);
+  assert.equal(noteRes.analysis_summary, null);
+});

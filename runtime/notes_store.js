@@ -853,6 +853,28 @@ function createNotesStore(options = {}) {
       });
     },
 
+    async resetAnalyses(noteIds = []) {
+      return runWithDb(async (db) => {
+        const targets = Array.isArray(noteIds)
+          ? noteIds.map((item) => String(item || '').trim()).filter(Boolean)
+          : [];
+        if (targets.length === 0) {
+          db.run('DELETE FROM note_citations');
+          db.run('DELETE FROM note_passages');
+          db.run('DELETE FROM note_sources');
+          db.run('DELETE FROM note_claims');
+          db.run('DELETE FROM analysis_runs');
+          db.run('UPDATE notes SET last_analyzed_at = 0');
+          return { ok: true, cleared_notes: null, reset_scope: 'all' };
+        }
+        targets.forEach((target) => {
+          deleteAnalysisRows(db, target);
+          db.run('UPDATE notes SET last_analyzed_at = 0 WHERE id = ?', [target]);
+        });
+        return { ok: true, cleared_notes: targets.length, reset_scope: 'partial' };
+      });
+    },
+
     async saveAnalysis(noteId = '', payload = {}) {
       return runWithDb(async (db) => {
         const note = queryNoteById(db, noteId);
