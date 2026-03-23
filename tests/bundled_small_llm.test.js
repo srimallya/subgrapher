@@ -111,3 +111,63 @@ test('bundled small llm uses packaged runtime when executable and model are pres
   assert.equal(summary.analysis_source, 'llm');
   assert.match(summary.summary, /Cleaned summary from bundled runtime/);
 });
+
+test('bundled small llm retries malformed feed-summary outputs before falling back', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subgrapher-llm-retry-'));
+  const binDir = path.join(root, 'bin');
+  const modelDir = path.join(root, 'models');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(modelDir, { recursive: true });
+  const executablePath = path.join(binDir, 'subgrapher-llm');
+  const modelPath = path.join(modelDir, 'Qwen3.5-0.8B-Q8_0.gguf');
+  const counterPath = path.join(root, 'attempt-count.txt');
+  const script = `#!/usr/bin/env node
+const fs = require('fs');
+const counterPath = ${JSON.stringify(counterPath)};
+const prior = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, 'utf8')) || 0 : 0;
+const attempt = prior + 1;
+fs.writeFileSync(counterPath, String(attempt));
+if (attempt < 3) {
+  process.stdout.write('{"summary":"too short"}');
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({
+  summary: 'Sentence one states the core news clearly. Sentence two adds the immediate context. Sentence three explains the reported decision. Sentence four notes who is affected. Sentence five describes the next step in the story.',
+  excerpt: 'Sentence one states the core news clearly. Sentence two adds the immediate context.',
+  entities: ['Microsoft'],
+  topics: ['tech'],
+  content_quality: 'clean'
+}));
+`;
+  fs.writeFileSync(executablePath, script, { mode: 0o755 });
+  fs.writeFileSync(modelPath, 'placeholder-model');
+  fs.writeFileSync(path.join(root, 'runtime-manifest.json'), `${JSON.stringify({
+    bundled: true,
+    backend: 'bundled-cli',
+    model_id: 'retry-model',
+    model_name: 'Retry Model',
+    tasks: ['note_policy_classification', 'rss_article_cleanup_summary'],
+    schema_version: 1,
+    prompt_versions: {
+      note_policy_classification: 1,
+      rss_article_cleanup_summary: 1,
+    },
+    executable_rel_path: 'bin/subgrapher-llm',
+    model_rel_path: 'models/Qwen3.5-0.8B-Q8_0.gguf',
+    timeout_ms: 5000,
+    max_retries: 5,
+  }, null, 2)}\n`);
+
+  const runtime = createBundledSmallLlmRuntime({
+    projectRoot: process.cwd(),
+    bundledRootDir: root,
+  });
+  const summary = await runtime.summarizeFeedArticle({
+    title: 'Retry article',
+    raw_content_text: 'Raw article body that should eventually summarize correctly.',
+  });
+  assert.equal(summary.ok, true);
+  assert.equal(summary.analysis_source, 'llm');
+  assert.equal(summary.attempts, 3);
+  assert.match(summary.summary, /Sentence one states the core news clearly/);
+});

@@ -44,8 +44,15 @@ Where:
 - Product role split:
   - `notes` is thought-first ambient computation for drafting and reading
   - `web` workspace tabs remain the browser-first research surface
+- Bundled small-LLM routing:
+  - Notes uses a bundled local GGUF model through an in-app runtime, not through Ollama or a separately installed model host.
+  - The bundled model is task-scoped:
+    - full-note policy classification before evidence retrieval
+    - current-feed article cleanup/summarization for Status
+  - This model is not a general chat surface inside the app; it is a local structured-output helper for routing and cleanup tasks.
 - Notes behavior:
   - users write freely in markdown/plain note form without manually triggering fact-check actions
+  - when writing pauses, the full note is classified first into a retrieval policy that controls freshness bias, source mix, contradiction scan, and fetch budget
   - factual claims are detected continuously from the current note body
   - web evidence retrieval runs in the background against detected claims
   - reliability is shown at two levels:
@@ -63,6 +70,24 @@ Where:
 - Promotion:
   - `Create Reference` from a note preserves the note body, evidence summary, retrieved research links, and excerpt context when moving into Workspace
   - promoted references should open with the carried research context already attached rather than requiring the user to rediscover the same sources
+- Refresh behavior:
+  - Notes exposes explicit `Reanalyze` so an older note can discard prior evidence state and rerun policy classification plus evidence retrieval from scratch
+  - freshness-sensitive notes can auto-refresh evidence while idle when the stored evidence TTL has expired
+
+### Bundled local LLM
+- Subgrapher ships a bundled small local GGUF model plus local inference runtime for product-internal structured tasks.
+- The bundled runtime is cross-platform and packaged with the app for macOS and Windows release builds.
+- Current bundled tasks:
+  - `note_policy_classification`
+  - `rss_article_cleanup_summary`
+- Failure handling:
+  - invalid JSON, too-short summaries, and similar small-model output failures are retried up to 10 times before fallback
+  - deterministic fallback heuristics remain available when the bundled runtime is unavailable or still fails validation after retries
+
+### Status feed cleanup
+- The `status` feed stores both raw fetched article text and cleaned summaries.
+- After crawler fetch, the bundled small LLM removes scraper noise and stores a concise factual gist for display/search.
+- `Rerun Tasks` in Settings discards old derived note/feed LLM outputs and rebuilds them from source content.
 
 ### Markdown artifacts
 - Code/text editor with debounced autosave.

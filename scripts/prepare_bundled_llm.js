@@ -198,6 +198,7 @@ function writeManifest(target = '', runtimeInfo = {}, modelInfo = {}) {
     model_rel_path: modelInfo.modelRelPath,
     llama_cpp_release: runtimeInfo.releaseTag,
     timeout_ms: 60000,
+    max_retries: 10,
     ctx_size: 2048,
     seed: 7,
     prepared_at: new Date().toISOString(),

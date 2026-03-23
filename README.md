@@ -49,6 +49,7 @@ Subgrapher is an attempt to build for the open web and open communication instea
 
 ![Status tab](screengrabs/08-status-tab.jpg)
 ![Reference workspace](screengrabs/01-reference-workspace.jpg)
+![Ambient note evidence](screengrabs/09-ambient-note.jpg)
 ![Browser and chat](screengrabs/02-browser-and-chat.jpg)
 ![Reference graph](screengrabs/03-reference-graph.jpg)
 ![Mail client](screengrabs/04-mail-client.jpg)

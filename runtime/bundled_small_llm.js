@@ -10,6 +10,7 @@ const FEED_SUMMARY_SCHEMA_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_CTX_SIZE = 2048;
 const DEFAULT_SEED = 7;
+const DEFAULT_MAX_RETRIES = 10;
 
 function nowTs() {
   return Date.now();
@@ -129,6 +130,10 @@ function truncateText(value = '', maxChars = 8000) {
   return String(value || '').slice(0, Math.max(0, Number(maxChars) || 0));
 }
 
+function sleep(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
 function extractFirstJsonObject(text = '') {
   const src = String(text || '');
   const start = src.indexOf('{');
@@ -161,7 +166,11 @@ function extractFirstJsonObject(text = '') {
   throw new Error('bundled llm returned incomplete JSON');
 }
 
-function buildTaskPrompt(taskType = '', payload = {}) {
+function buildTaskPrompt(taskType = '', payload = {}, options = {}) {
+  const attempt = Math.max(1, Number(options.attempt || 1) || 1);
+  const retryNote = attempt > 1
+    ? `Retry attempt ${attempt}. Previous output failed validation. Return only one valid JSON object that matches the schema exactly.`
+    : '';
   if (taskType === 'note_policy_classification') {
     const title = truncateText(normalizeWhitespace(payload.title || ''), 240);
     const body = truncateText(String(payload.body_markdown || ''), 6000);
@@ -177,6 +186,7 @@ function buildTaskPrompt(taskType = '', payload = {}) {
       'Set staleness_ttl_minutes between 30 and 20160.',
       'Set prefer_recent_window_days between 1 and 3650.',
       'Favor live_update with high freshness when the note says today, latest, current, ongoing, or as of a recent date.',
+      retryNote,
       'Output schema:',
       '{"note_mode":"","freshness_bias":"","source_mix":"","contradiction_scan":true,"result_budget":5,"staleness_ttl_minutes":1440,"prefer_recent_window_days":14}',
       '',
@@ -203,6 +213,7 @@ function buildTaskPrompt(taskType = '', payload = {}) {
     'Return entities as a short list of names.',
     'Return topics as a short list of lowercase tags.',
     'Choose content_quality from: clean, noisy, fragmented.',
+    retryNote,
     'Output schema:',
     '{"summary":"","excerpt":"","entities":[],"topics":[],"content_quality":"clean"}',
     '',
@@ -588,11 +599,12 @@ class BundledSmallLlmRuntime {
       label: String(payload.title || payload.id || payload.url || '').trim(),
     });
     return new Promise((resolve, reject) => {
+      const attempt = Math.max(1, Number(payload._attempt || 1) || 1);
+      const runSeed = clampNumber(manifest.seed + (attempt - 1), 0, 2147483647, DEFAULT_SEED);
       const args = backend === 'llama.cpp-cli'
         ? [
           '-m',
           availability.model_path,
-          '-no-cnv',
           '-st',
           '--reasoning',
           'off',
@@ -605,15 +617,15 @@ class BundledSmallLlmRuntime {
           '--ctx-size',
           String(clampNumber(manifest.ctx_size, 1024, 32768, DEFAULT_CTX_SIZE)),
           '--seed',
-          String(clampNumber(manifest.seed, 0, 2147483647, DEFAULT_SEED)),
+          String(runSeed),
           '--temp',
-          '0',
+          attempt > 1 ? '0.2' : '0',
           '--top-p',
-          '0.1',
+          attempt > 1 ? '0.3' : '0.1',
           '-n',
           String(taskType === 'note_policy_classification' ? 96 : 220),
           '-p',
-          buildTaskPrompt(taskType, payload),
+          buildTaskPrompt(taskType, payload, { attempt }),
         ]
         : [
           '--task',
@@ -705,18 +717,81 @@ class BundledSmallLlmRuntime {
     });
   }
 
+  _isRetryableTaskError(err) {
+    const reason = String((err && err.message) || err || '').toLowerCase();
+    if (!reason) return false;
+    if (reason.includes('bundled llm unavailable')) return false;
+    if (reason.includes('timed out')) return false;
+    return (
+      reason.includes('invalid json')
+      || reason.includes('output did not contain json')
+      || reason.includes('incomplete json')
+      || reason.includes('summary must contain 5 to 10 sentences')
+      || reason.includes('summary is required')
+      || reason.includes('excerpt is required')
+      || reason.includes('invalid note_mode')
+      || reason.includes('invalid freshness_bias')
+      || reason.includes('invalid source_mix')
+    );
+  }
+
+  async _runTaskWithRetries(taskType = '', payload = {}, validateFn = null) {
+    const manifest = this._loadManifest();
+    const maxRetries = clampNumber(manifest.max_retries, 1, 10, DEFAULT_MAX_RETRIES);
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+      try {
+        const result = await this._runBundledTask(taskType, {
+          ...payload,
+          _attempt: attempt,
+        });
+        const normalizedPayload = typeof validateFn === 'function'
+          ? validateFn.call(this, result.payload)
+          : result.payload;
+        if (attempt > 1) {
+          this._log('task:retry_recovered', {
+            task_type: String(taskType || '').trim(),
+            attempt,
+            label: String(payload.title || payload.id || payload.url || '').trim(),
+          });
+        }
+        return {
+          ...result,
+          payload: normalizedPayload,
+          attempt,
+          attempts: attempt,
+        };
+      } catch (err) {
+        lastError = err;
+        const retryable = this._isRetryableTaskError(err);
+        const hasMore = attempt < maxRetries;
+        this._log('task:attempt_failed', {
+          task_type: String(taskType || '').trim(),
+          attempt,
+          max_attempts: maxRetries,
+          retryable,
+          error: String((err && err.message) || err || 'task_failed'),
+          label: String(payload.title || payload.id || payload.url || '').trim(),
+        });
+        if (!retryable || !hasMore) break;
+        await sleep(Math.min(750, 80 * attempt));
+      }
+    }
+    throw lastError || new Error('bundled llm task failed');
+  }
+
   async classifyNotePolicy(note = {}) {
     const taskId = this._beginTask('note_policy_classification', {
       label: String((note && note.title) || 'note').trim(),
     });
     try {
       const manifest = this._loadManifest();
-      const result = await this._runBundledTask('note_policy_classification', {
+      const result = await this._runTaskWithRetries('note_policy_classification', {
         id: String((note && note.id) || '').trim(),
         title: String((note && note.title) || ''),
         body_markdown: String((note && note.body_markdown) || ''),
-      });
-      const policy = this._validateNotePolicyPayload(result.payload);
+      }, this._validateNotePolicyPayload);
+      const policy = result.payload;
       this.lastPolicyError = '';
       return {
         ok: true,
@@ -727,6 +802,7 @@ class BundledSmallLlmRuntime {
         model_id: String(manifest.model_id || ''),
         model_name: String(manifest.model_name || manifest.model_id || ''),
         prompt_version: Number(result.prompt_version || NOTE_POLICY_SCHEMA_VERSION) || NOTE_POLICY_SCHEMA_VERSION,
+        attempts: Number(result.attempts || 1) || 1,
         classified_at: nowTs(),
       };
     } catch (err) {
@@ -759,15 +835,15 @@ class BundledSmallLlmRuntime {
     });
     try {
       const manifest = this._loadManifest();
-      const result = await this._runBundledTask('rss_article_cleanup_summary', {
+      const result = await this._runTaskWithRetries('rss_article_cleanup_summary', {
         id: String((article && article.id) || '').trim(),
         title: String((article && article.title) || ''),
         raw_content_text: String((article && article.raw_content_text) || (article && article.content_text) || ''),
         source_name: String((article && article.source_name) || ''),
         source_domain: String((article && article.source_domain) || ''),
         url: String((article && article.url) || ''),
-      });
-      const payload = this._validateFeedSummaryPayload(result.payload);
+      }, this._validateFeedSummaryPayload);
+      const payload = result.payload;
       this.lastFeedError = '';
       return {
         ok: true,
@@ -778,6 +854,7 @@ class BundledSmallLlmRuntime {
         model_id: String(manifest.model_id || ''),
         model_name: String(manifest.model_name || manifest.model_id || ''),
         prompt_version: Number(result.prompt_version || FEED_SUMMARY_SCHEMA_VERSION) || FEED_SUMMARY_SCHEMA_VERSION,
+        attempts: Number(result.attempts || 1) || 1,
         generated_at: nowTs(),
         content_hash: hashText(String((article && article.raw_content_text) || (article && article.content_text) || '')),
       };
