@@ -6,6 +6,7 @@ const { spawnSync } = require('child_process');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const OUTPUT_DIR = path.join(REPO_ROOT, 'build', 'bundled-python', 'current');
+const REQUIRE_REAL_BUNDLE = /^(1|true|yes)$/i.test(String(process.env.SUBGRAPHER_REQUIRE_BUNDLED_PYTHON || '').trim());
 
 function run(command, args) {
   return spawnSync(command, args, {
@@ -58,6 +59,10 @@ function main() {
   const prep = run('node', ['scripts/prepare_bundled_python.js', '--target', 'win32-x64']);
   if (!prep.error && Number(prep.status || 0) === 0) {
     process.exit(0);
+  }
+  if (REQUIRE_REAL_BUNDLE) {
+    if (prep.error) throw prep.error;
+    process.exit(Number(prep.status || 1) || 1);
   }
   console.warn('[python-bundle] Windows bundled runtime prep failed; continuing with system-python fallback placeholder.');
   writeFallbackManifest();
