@@ -28,6 +28,7 @@ Subgrapher is an attempt to build for the open web and open communication instea
 
 - Uses semantic references as reusable knowledge containers
 - Includes ambient Notes that detect factual claims, gather web evidence, score reliability, and carry evidence forward into Workspace promotion
+- Downloads the bundled local LLM runtime and GGUF model on first launch, then uses it for note policy routing and Status feed cleanup
 - Lets the agent reason inside a reference and open tabs or generate visualizations for you
 - Supports local models through LM Studio in a sandboxed setup
 - Supports API models from OpenAI, Google, Anthropic, and Cerebras
@@ -73,6 +74,8 @@ npm run build:release
 ```
 
 Build output goes to `dist/`.
+
+On installed builds, the bundled small-LLM runtime is bootstrapped on first launch into app-managed local data. After the download finishes, Subgrapher automatically processes pending note analysis and Status feed cleanup tasks.
 
 ## Current stack
 

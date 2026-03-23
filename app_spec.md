@@ -1,7 +1,7 @@
 # Subgrapher App Spec (Unified Artifact Runtime)
 
 ## Summary
-Current app version: `2.2.2`
+Current app version: `2.2.3`
 
 Subgrapher uses one artifact runtime for authored outputs:
 - `markdown` artifacts for text/image docs
@@ -76,13 +76,25 @@ Where:
 
 ### Bundled local LLM
 - Subgrapher ships a bundled small local GGUF model plus local inference runtime for product-internal structured tasks.
-- The bundled runtime is cross-platform and packaged with the app for macOS and Windows release builds.
+- Release installers stay lean and reliable:
+  - the app downloads the pinned local runtime binary and GGUF model into app-managed local data on first launch
+  - assets are resolved from app data first, then packaged resources if present
+  - this removes live model/runtime fetching from release build time
 - Current bundled tasks:
   - `note_policy_classification`
   - `rss_article_cleanup_summary`
+- Bootstrap behavior:
+  - Settings shows bundled-LLM lifecycle state and progress:
+    - `missing`
+    - `downloading`
+    - `extracting`
+    - `ready`
+    - `error`
+  - once bootstrap completes, the app automatically processes pending note analysis and feed-summary work
 - Failure handling:
   - invalid JSON, too-short summaries, and similar small-model output failures are retried up to 10 times before fallback
   - deterministic fallback heuristics remain available when the bundled runtime is unavailable or still fails validation after retries
+  - main-process logging failures such as closed stdio / `EPIPE` must not surface as fatal app popups
 
 ### Status feed cleanup
 - The `status` feed stores both raw fetched article text and cleaned summaries.

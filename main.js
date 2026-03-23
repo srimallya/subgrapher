@@ -54,6 +54,7 @@ const { createNotesStore } = require('./runtime/notes_store');
 const { createNoteAnalysisEngine, NOTE_EVIDENCE_MODE } = require('./runtime/note_analysis');
 const { createNoteAnalysisScheduler } = require('./runtime/note_analysis_scheduler');
 const { createBundledSmallLlmRuntime } = require('./runtime/bundled_small_llm');
+const { createBundledLlmBootstrapManager } = require('./runtime/bundled_llm_bootstrap');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -290,6 +291,7 @@ let notesStore = null;
 let noteAnalysisEngine = null;
 let noteAnalysisScheduler = null;
 let bundledSmallLlmRuntime = null;
+let bundledLlmBootstrapManager = null;
 let bundledLlmRerunJob = {
   running: false,
   total: 0,
@@ -318,6 +320,54 @@ let hyperwebPrivateSharesState = null;
 let hyperwebPublicSnapshotsState = null;
 let hyperwebReceiptWriteTimer = null;
 const shownHyperwebNotificationIds = new Set();
+
+function isBrokenPipeWriteError(err = null) {
+  if (!err || typeof err !== 'object') return false;
+  if (String(err.code || '').trim() === 'EPIPE') return true;
+  const message = String(err.message || '').toLowerCase();
+  return message.includes('write epipe') || message.includes('epipe');
+}
+
+function safeMainLog(level = 'log', message = '', meta = null) {
+  const fn = typeof console[level] === 'function' ? console[level].bind(console) : console.log.bind(console);
+  try {
+    if (meta && typeof meta === 'object') {
+      fn(message, meta);
+      return;
+    }
+    fn(message);
+  } catch (err) {
+    if (isBrokenPipeWriteError(err)) return;
+    throw err;
+  }
+}
+
+let brokenPipeGuardInstalled = false;
+function installBrokenPipeLoggingGuard() {
+  if (brokenPipeGuardInstalled) return;
+  brokenPipeGuardInstalled = true;
+  const swallowStreamError = (err) => {
+    if (isBrokenPipeWriteError(err)) return;
+    throw err;
+  };
+  if (process.stdout && typeof process.stdout.on === 'function') {
+    process.stdout.on('error', swallowStreamError);
+  }
+  if (process.stderr && typeof process.stderr.on === 'function') {
+    process.stderr.on('error', swallowStreamError);
+  }
+  const uncaughtHandler = (err) => {
+    if (isBrokenPipeWriteError(err)) {
+      safeMainLog('warn', '[bundled-llm] ignored broken pipe logging failure', {
+        error: String((err && err.message) || err || 'EPIPE'),
+      });
+      return;
+    }
+    process.removeListener('uncaughtException', uncaughtHandler);
+    throw err;
+  };
+  process.on('uncaughtException', uncaughtHandler);
+}
 const asyncJsonWriteQueueByPath = new Map();
 const appDataProtectionState = {
   locked: false,
@@ -6360,9 +6410,34 @@ function getBundledSmallLlmRuntime() {
     bundledSmallLlmRuntime = createBundledSmallLlmRuntime({
       projectRoot: __dirname,
       app,
+      userDataPath: app.getPath('userData'),
     });
   }
   return bundledSmallLlmRuntime;
+}
+
+function getBundledLlmBootstrapManager() {
+  if (!bundledLlmBootstrapManager) {
+    bundledLlmBootstrapManager = createBundledLlmBootstrapManager({
+      projectRoot: __dirname,
+      userDataPath: app.getPath('userData'),
+      log: (message, meta) => safeMainLog('log', `[bundled-llm] ${message}`, meta),
+      onReady: () => {
+        if (bundledLlmRerunJob.running) return;
+        void processBundledLlmBacklog({
+          forceReset: false,
+          trigger: 'bootstrap_ready',
+        });
+      },
+    });
+  }
+  return bundledLlmBootstrapManager;
+}
+
+async function ensureBundledLlmAssets(options = {}) {
+  return getBundledLlmBootstrapManager().ensureBundledLlmAssets({
+    force: !!(options && options.force),
+  });
 }
 
 function getNoteAnalysisEngine() {
@@ -6482,7 +6557,7 @@ async function runNoteAnalysis(noteId = '', options = {}) {
   const setStage = (options && typeof options.setStage === 'function') ? options.setStage : null;
   const store = getNotesStore();
   const logNoteStage = (stage = '', meta = {}) => {
-    console.log('[bundled-llm] note-analysis:stage', {
+    safeMainLog('log', '[bundled-llm] note-analysis:stage', {
       note_id: targetId,
       stage: String(stage || '').trim(),
       ...meta,
@@ -6492,7 +6567,7 @@ async function runNoteAnalysis(noteId = '', options = {}) {
   if (setStage) setStage('detecting_claims');
   const noteRes = await store.getNote(targetId);
   if (!noteRes || !noteRes.ok || !noteRes.note) {
-    console.error('[bundled-llm] note-analysis:error', {
+    safeMainLog('error', '[bundled-llm] note-analysis:error', {
       note_id: targetId,
       error: (noteRes && noteRes.message) || 'Note not found.',
     });
@@ -6500,7 +6575,7 @@ async function runNoteAnalysis(noteId = '', options = {}) {
   }
   const note = noteRes.note;
   if (expectedRevision > 0 && Number(note.analysis_revision || 0) !== expectedRevision) {
-    console.error('[bundled-llm] note-analysis:stale', {
+    safeMainLog('error', '[bundled-llm] note-analysis:stale', {
       note_id: targetId,
       expected_revision: expectedRevision,
       actual_revision: Number(note.analysis_revision || 0) || 0,
@@ -6547,7 +6622,7 @@ async function runNoteAnalysis(noteId = '', options = {}) {
     },
   });
   if (!analysisRes || analysisRes.ok === false) {
-    console.error('[bundled-llm] note-analysis:error', {
+    safeMainLog('error', '[bundled-llm] note-analysis:error', {
       note_id: targetId,
       stage: 'retrieving_sources',
       error: String((analysisRes && analysisRes.message) || 'Note analysis failed.'),
@@ -6560,7 +6635,7 @@ async function runNoteAnalysis(noteId = '', options = {}) {
   });
   if (setStage) setStage('scoring_evidence');
   const saveRes = await store.saveAnalysis(targetId, analysisRes);
-  console.log('[bundled-llm] note-analysis:done', {
+  safeMainLog('log', '[bundled-llm] note-analysis:done', {
     note_id: targetId,
     ok: !!(saveRes && saveRes.ok),
     analysis_source: String((saveRes && saveRes.analysis_summary && saveRes.analysis_summary.analysis_source) || '').trim(),
@@ -6613,6 +6688,7 @@ async function ensureFreshNoteAnalysis(noteId = '') {
 
 async function computeBundledLlmTaskDiagnostics() {
   const runtimeDiag = getBundledSmallLlmRuntime().diagnostics();
+  const bootstrapDiag = getBundledLlmBootstrapManager().currentDiagnostics();
   const notesStore = getNotesStore();
   const listRes = await notesStore.listNotes().catch(() => null);
   const noteItems = Array.isArray(listRes && listRes.notes) ? listRes.notes : [];
@@ -6632,20 +6708,31 @@ async function computeBundledLlmTaskDiagnostics() {
   const pendingTasks = notePending + Number((feedBacklog && feedBacklog.pending_items) || 0);
   const completedTasks = Math.max(0, totalCandidates - pendingTasks);
   const job = bundledLlmRerunJob || {};
+  const bootstrapState = String(bootstrapDiag.bootstrap_state || 'missing').trim() || 'missing';
+  const bootstrapWorking = bootstrapState === 'downloading' || bootstrapState === 'extracting';
   const activeProgress = job.running && Number(job.total || 0) > 0
     ? Math.round((Math.max(0, Number(job.completed || 0)) / Math.max(1, Number(job.total || 0))) * 100)
     : (totalCandidates > 0 ? Math.round((completedTasks / Math.max(1, totalCandidates)) * 100) : 100);
+  const effectiveProgress = bootstrapWorking
+    ? Math.max(0, Math.min(100, Number(bootstrapDiag.bootstrap_progress_percent || 0) || 0))
+    : Math.max(0, Math.min(100, Number(activeProgress || 0) || 0));
   return {
     ...runtimeDiag,
-    state: job.running ? 'working' : 'idle',
+    state: (job.running || bootstrapWorking) ? 'working' : (bootstrapState === 'error' ? 'error' : 'idle'),
     total_candidates: totalCandidates,
     pending_tasks: pendingTasks,
     completed_tasks: completedTasks,
-    progress_percent: Math.max(0, Math.min(100, Number(activeProgress || 0) || 0)),
-    current_label: String(job.current_label || '').trim(),
+    progress_percent: effectiveProgress,
+    current_label: String(job.current_label || bootstrapDiag.bootstrap_current_label || '').trim(),
     started_at: Number(job.started_at || 0) || 0,
     finished_at: Number(job.finished_at || 0) || 0,
     last_error: String(job.last_error || runtimeDiag.last_policy_error || runtimeDiag.last_feed_error || '').trim(),
+    bootstrap_state: bootstrapState,
+    bootstrap_progress_percent: Math.max(0, Math.min(100, Number(bootstrapDiag.bootstrap_progress_percent || 0) || 0)),
+    bootstrap_current_label: String(bootstrapDiag.bootstrap_current_label || '').trim(),
+    bootstrap_started_at: Number(bootstrapDiag.bootstrap_started_at || 0) || 0,
+    bootstrap_finished_at: Number(bootstrapDiag.bootstrap_finished_at || 0) || 0,
+    bootstrap_error: String(bootstrapDiag.bootstrap_error || '').trim(),
     notes: {
       total_candidates: noteCandidates,
       pending_tasks: notePending,
@@ -6659,7 +6746,7 @@ async function computeBundledLlmTaskDiagnostics() {
   };
 }
 
-async function rerunBundledLlmTasks(options = {}) {
+async function processBundledLlmBacklog(options = {}) {
   if (bundledLlmRerunJob.running) {
     return {
       ok: true,
@@ -6676,10 +6763,25 @@ async function rerunBundledLlmTasks(options = {}) {
     finished_at: 0,
     last_error: '',
   };
-  console.log('[bundled-llm] rerun:start', {
-    force: !!options.force,
+  const forceReset = !!(options && options.forceReset);
+  const trigger = String((options && options.trigger) || 'manual').trim() || 'manual';
+  safeMainLog('log', '[bundled-llm] rerun:start', {
+    force_reset: forceReset,
+    trigger,
   });
   try {
+    const bootstrapRes = await ensureBundledLlmAssets({ force: false });
+    if (!bootstrapRes || String(bootstrapRes.bootstrap_state || '').trim() !== 'ready') {
+      bundledLlmRerunJob.running = false;
+      bundledLlmRerunJob.finished_at = nowTs();
+      bundledLlmRerunJob.current_label = String((bootstrapRes && bootstrapRes.bootstrap_current_label) || '').trim();
+      bundledLlmRerunJob.last_error = String((bootstrapRes && bootstrapRes.bootstrap_error) || 'bundled_llm_setup_incomplete').trim();
+      return {
+        ok: false,
+        message: bundledLlmRerunJob.last_error || 'Bundled LLM setup is still in progress.',
+        diagnostics: await computeBundledLlmTaskDiagnostics(),
+      };
+    }
     const notesStore = getNotesStore();
     const listRes = await notesStore.listNotes();
     const notes = Array.isArray(listRes && listRes.notes) ? listRes.notes : [];
@@ -6690,22 +6792,30 @@ async function rerunBundledLlmTasks(options = {}) {
       const noteRes = await notesStore.getNote(noteId);
       if (!noteRes || !noteRes.ok || !noteRes.note) continue;
       if (!String(noteRes.note.body_markdown || '').trim()) continue;
+      if (!forceReset && !noteNeedsFreshAnalysis(noteRes.note, noteRes.analysis_summary || null)) continue;
       noteCandidates.push(noteRes.note);
     }
-    const notesResetRes = await notesStore.resetAnalyses(noteCandidates.map((note) => String((note && note.id) || '').trim()));
-    const feedResetRes = getDashboardStore().resetFeedCache();
+    const feedBacklogBefore = getDashboardStore().getSummaryBacklogStatus();
+    const notesResetRes = forceReset
+      ? await notesStore.resetAnalyses(noteCandidates.map((note) => String((note && note.id) || '').trim()))
+      : { ok: true, cleared_notes: 0 };
+    const feedResetRes = forceReset
+      ? getDashboardStore().resetFeedCache()
+      : { ok: true, cleared_items: 0 };
     bundledLlmRerunJob.total = noteCandidates.length;
     bundledLlmRerunJob.completed = 0;
-    console.log('[bundled-llm] rerun:workload', {
+    safeMainLog('log', '[bundled-llm] rerun:workload', {
       note_candidates: noteCandidates.length,
-      feed_candidates: 0,
+      feed_candidates: forceReset
+        ? Number((feedResetRes && feedResetRes.cleared_items) || 0)
+        : Number((feedBacklogBefore && feedBacklogBefore.pending_items) || 0),
       total: bundledLlmRerunJob.total,
       reset_notes: !!(notesResetRes && notesResetRes.ok),
       reset_feed_items: Number((feedResetRes && feedResetRes.cleared_items) || 0),
     });
     for (const note of noteCandidates) {
       bundledLlmRerunJob.current_label = String(note.title || note.id || 'note').trim();
-      console.log('[bundled-llm] rerun:note:start', {
+      safeMainLog('log', '[bundled-llm] rerun:note:start', {
         note_id: String(note.id || '').trim(),
         title: bundledLlmRerunJob.current_label,
         completed: bundledLlmRerunJob.completed,
@@ -6715,14 +6825,14 @@ async function rerunBundledLlmTasks(options = {}) {
         expectedRevision: Number(note.analysis_revision || 0) || 0,
       }).catch((err) => {
         bundledLlmRerunJob.last_error = String((err && err.message) || 'note_rerun_failed');
-        console.error('[bundled-llm] rerun:note:error', {
+        safeMainLog('error', '[bundled-llm] rerun:note:error', {
           note_id: String(note.id || '').trim(),
           title: bundledLlmRerunJob.current_label,
           error: bundledLlmRerunJob.last_error,
         });
       });
       bundledLlmRerunJob.completed += 1;
-      console.log('[bundled-llm] rerun:note:done', {
+      safeMainLog('log', '[bundled-llm] rerun:note:done', {
         note_id: String(note.id || '').trim(),
         title: bundledLlmRerunJob.current_label,
         completed: bundledLlmRerunJob.completed,
@@ -6730,24 +6840,24 @@ async function rerunBundledLlmTasks(options = {}) {
       });
     }
     await getDashboardStore().refreshFeeds({
-      force: true,
-      discardExisting: true,
       onProgress: ({ completed = 0, total = 0, label = '', stage = '' }) => {
         bundledLlmRerunJob.current_label = String(label || '').trim();
         bundledLlmRerunJob.completed = noteCandidates.length + Number(completed || 0);
         bundledLlmRerunJob.total = noteCandidates.length + Number(total || 0);
-        console.log('[bundled-llm] rerun:feed:progress', {
+        safeMainLog('log', '[bundled-llm] rerun:feed:progress', {
           stage: String(stage || '').trim(),
           label: bundledLlmRerunJob.current_label,
           completed: bundledLlmRerunJob.completed,
           total: bundledLlmRerunJob.total,
         });
       },
+      force: true,
+      discardExisting: forceReset,
     });
     bundledLlmRerunJob.running = false;
     bundledLlmRerunJob.finished_at = nowTs();
     bundledLlmRerunJob.current_label = '';
-    console.log('[bundled-llm] rerun:done', {
+    safeMainLog('log', '[bundled-llm] rerun:done', {
       completed: bundledLlmRerunJob.completed,
       total: bundledLlmRerunJob.total,
     });
@@ -6759,7 +6869,7 @@ async function rerunBundledLlmTasks(options = {}) {
     bundledLlmRerunJob.running = false;
     bundledLlmRerunJob.finished_at = nowTs();
     bundledLlmRerunJob.last_error = String((err && err.message) || 'bundled_llm_rerun_failed');
-    console.error('[bundled-llm] rerun:error', {
+    safeMainLog('error', '[bundled-llm] rerun:error', {
       error: bundledLlmRerunJob.last_error,
     });
     return {
@@ -6768,6 +6878,13 @@ async function rerunBundledLlmTasks(options = {}) {
       diagnostics: await computeBundledLlmTaskDiagnostics(),
     };
   }
+}
+
+async function rerunBundledLlmTasks(options = {}) {
+  return processBundledLlmBacklog({
+    forceReset: true,
+    trigger: String((options && options.trigger) || 'manual').trim() || 'manual',
+  });
 }
 
 async function listDashboardNotifications(options = {}) {
@@ -24306,7 +24423,7 @@ ipcMain.handle('browser:settingsDiagnostics', async () => {
 ipcMain.handle('browser:bundledLlmRerunTasks', async (_event, payload) => {
   if (!bundledLlmRerunJob.running) {
     void rerunBundledLlmTasks({
-      force: !!(payload && payload.force),
+      trigger: 'settings_rerun',
     });
   }
   return {
@@ -24894,6 +25011,7 @@ function consumePendingInviteTokenIfAny() {
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
+installBrokenPipeLoggingGuard();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
@@ -24945,6 +25063,13 @@ if (gotSingleInstanceLock) app.whenReady().then(() => {
   });
   hyperwebManager.refreshLocalPublicIndex().catch(() => {});
   createMainWindow();
+  if (app.isPackaged) {
+    void ensureBundledLlmAssets({ force: false }).catch((err) => {
+      safeMainLog('warn', '[bundled-llm] bootstrap:start_failed', {
+        error: String((err && err.message) || err || 'bundled_llm_bootstrap_failed'),
+      });
+    });
+  }
   if (!memorySemanticTimer) {
     memorySemanticTimer = setInterval(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;

@@ -7,21 +7,7 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const BUILD_ROOT = path.join(REPO_ROOT, 'build', 'bundled-llm');
 const CACHE_ROOT = path.join(BUILD_ROOT, 'cache');
 const OUTPUT_DIR = path.join(BUILD_ROOT, 'current');
-const MODEL_FILENAME = 'Qwen3.5-0.8B-Q8_0.gguf';
-const MODEL_REPO = 'lmstudio-community/Qwen3.5-0.8B-GGUF';
-const MODEL_URL = `https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_FILENAME}?download=1`;
-const GITHUB_RELEASE_API = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest';
-
-const TARGETS = {
-  'darwin-arm64': {
-    githubAssetPattern: /llama-b\d+-bin-macos-arm64\.tar\.gz$/i,
-    executableName: 'llama-cli',
-  },
-  'win-x64': {
-    githubAssetPattern: /llama-b\d+-bin-win-cpu-x64\.zip$/i,
-    executableName: 'llama-cli.exe',
-  },
-};
+const POLICY_MANIFEST_PATH = path.join(REPO_ROOT, 'runtime', 'models', 'policy_manifest.json');
 
 function parseArgs(argv = []) {
   const out = {};
@@ -38,6 +24,32 @@ function detectTarget() {
   throw new Error(`Unsupported host for bundled LLM prep: ${process.platform}-${process.arch}`);
 }
 
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function resolveTargetConfig(target = '') {
+  const manifest = readJson(POLICY_MANIFEST_PATH);
+  const assets = manifest && manifest.bootstrap_assets && typeof manifest.bootstrap_assets === 'object'
+    ? manifest.bootstrap_assets
+    : {};
+  const targetConfig = assets[target];
+  if (!targetConfig) {
+    throw new Error(`Unsupported bundled LLM target: ${target}`);
+  }
+  return {
+    target,
+    runtimeUrl: String(targetConfig.runtime_url || '').trim(),
+    runtimeArchiveName: String(targetConfig.runtime_archive_name || '').trim(),
+    runtimeArchiveType: String(targetConfig.runtime_archive_type || '').trim(),
+    runtimeExecutableName: String(targetConfig.runtime_executable_name || '').trim(),
+    runtimeRelease: String(targetConfig.runtime_release || '').trim(),
+    modelUrl: String(targetConfig.model_url || '').trim(),
+    modelFilename: String(targetConfig.model_filename || '').trim(),
+    modelRepo: String(targetConfig.model_repo || '').trim(),
+  };
+}
+
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
@@ -49,14 +61,6 @@ function rmrf(targetPath) {
 function run(cmd, args, options = {}) {
   execFileSync(cmd, args, {
     stdio: 'inherit',
-    ...options,
-  });
-}
-
-function capture(cmd, args, options = {}) {
-  return execFileSync(cmd, args, {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
     ...options,
   });
 }
@@ -102,11 +106,6 @@ function listFilesRecursive(rootDir) {
   return out;
 }
 
-function fetchLatestRelease() {
-  const raw = capture('curl', ['-L', '--fail', '--silent', '--show-error', GITHUB_RELEASE_API]);
-  return JSON.parse(raw);
-}
-
 function extractArchive(archivePath, outDir) {
   rmrf(outDir);
   ensureDir(outDir);
@@ -125,55 +124,37 @@ function extractArchive(archivePath, outDir) {
   throw new Error(`Unsupported archive format: ${archivePath}`);
 }
 
-function resolveAssetForTarget(target = '') {
-  const config = TARGETS[target];
-  if (!config) throw new Error(`Unsupported bundled LLM target: ${target}`);
-  const release = fetchLatestRelease();
-  const assets = Array.isArray(release.assets) ? release.assets : [];
-  const asset = assets.find((item) => config.githubAssetPattern.test(String(item && item.name || '')));
-  if (!asset) {
-    throw new Error(`Could not find llama.cpp asset for ${target} in release ${release.tag_name || 'latest'}`);
-  }
-  return {
-    tag: String(release.tag_name || '').trim(),
-    assetName: String(asset.name || '').trim(),
-    assetUrl: String(asset.browser_download_url || '').trim(),
-    executableName: config.executableName,
-  };
-}
-
-function installLlamaRuntime(target = '') {
-  const release = resolveAssetForTarget(target);
-  const archivePath = path.join(CACHE_ROOT, release.assetName);
+function installLlamaRuntime(target = '', targetConfig = {}) {
+  const archivePath = path.join(CACHE_ROOT, String(targetConfig.runtimeArchiveName || 'runtime-archive'));
   const extractDir = path.join(CACHE_ROOT, `${target}-extract`);
   const engineDir = path.join(OUTPUT_DIR, 'engine', 'llama');
 
-  downloadFile(release.assetUrl, archivePath);
+  downloadFile(String(targetConfig.runtimeUrl || ''), archivePath);
   extractArchive(archivePath, extractDir);
   const files = listFilesRecursive(extractDir);
-  const executablePath = files.find((filePath) => path.basename(filePath) === release.executableName);
+  const executablePath = files.find((filePath) => path.basename(filePath) === String(targetConfig.runtimeExecutableName || '').trim());
   if (!executablePath) {
-    throw new Error(`Could not locate ${release.executableName} after extracting ${release.assetName}`);
+    throw new Error(`Could not locate ${String(targetConfig.runtimeExecutableName || '').trim()} after extracting ${String(targetConfig.runtimeArchiveName || '').trim()}`);
   }
   const runtimeRoot = path.dirname(executablePath);
   rmrf(engineDir);
   copyDirContents(runtimeRoot, engineDir);
   return {
-    releaseTag: release.tag,
-    executableRelPath: path.posix.join('engine', 'llama', release.executableName),
+    releaseTag: String(targetConfig.runtimeRelease || '').trim(),
+    executableRelPath: path.posix.join('engine', 'llama', String(targetConfig.runtimeExecutableName || '').trim()),
   };
 }
 
-function installModel() {
+function installModel(targetConfig = {}) {
   const modelDir = path.join(OUTPUT_DIR, 'models');
-  const modelPath = path.join(modelDir, MODEL_FILENAME);
-  downloadFile(MODEL_URL, modelPath);
+  const modelPath = path.join(modelDir, String(targetConfig.modelFilename || 'Qwen3.5-0.8B-Q8_0.gguf'));
+  downloadFile(String(targetConfig.modelUrl || '').trim(), modelPath);
   return {
-    modelRelPath: path.posix.join('models', MODEL_FILENAME),
+    modelRelPath: path.posix.join('models', String(targetConfig.modelFilename || 'Qwen3.5-0.8B-Q8_0.gguf')),
   };
 }
 
-function writeManifest(target = '', runtimeInfo = {}, modelInfo = {}) {
+function writeManifest(target = '', targetConfig = {}, runtimeInfo = {}, modelInfo = {}) {
   const manifestPath = path.join(OUTPUT_DIR, 'runtime-manifest.json');
   const manifest = {
     bundled: true,
@@ -181,7 +162,7 @@ function writeManifest(target = '', runtimeInfo = {}, modelInfo = {}) {
     target,
     model_id: 'qwen3.5-0.8b-q8_0',
     model_name: 'Qwen3.5 0.8B Q8_0',
-    model_repo: MODEL_REPO,
+    model_repo: String(targetConfig.modelRepo || '').trim(),
     tasks: [
       'note_policy_classification',
       'rss_article_cleanup_summary',
@@ -208,12 +189,13 @@ function writeManifest(target = '', runtimeInfo = {}, modelInfo = {}) {
 
 function writeReadme(target = '') {
   const readmePath = path.join(OUTPUT_DIR, 'README_PLACEHOLDER.txt');
+  const targetConfig = resolveTargetConfig(target);
   const text = [
     'Bundled small-LLM runtime assets prepared for packaging.',
     '',
     `Target: ${target}`,
-    `Model: ${MODEL_REPO}/${MODEL_FILENAME}`,
-    'Runtime: ggml-org/llama.cpp latest release asset',
+    `Model: ${String(targetConfig.modelRepo || '').trim()}/${String(targetConfig.modelFilename || '').trim()}`,
+    `Runtime: ${String(targetConfig.runtimeRelease || '').trim()}`,
     '',
   ].join('\n');
   fs.writeFileSync(readmePath, text, 'utf8');
@@ -222,16 +204,14 @@ function writeReadme(target = '') {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const target = args.target || detectTarget();
-  if (!TARGETS[target]) {
-    throw new Error(`Unsupported --target value: ${target}`);
-  }
+  const targetConfig = resolveTargetConfig(target);
   ensureDir(CACHE_ROOT);
   rmrf(OUTPUT_DIR);
   ensureDir(OUTPUT_DIR);
 
-  const runtimeInfo = installLlamaRuntime(target);
-  const modelInfo = installModel();
-  writeManifest(target, runtimeInfo, modelInfo);
+  const runtimeInfo = installLlamaRuntime(target, targetConfig);
+  const modelInfo = installModel(targetConfig);
+  writeManifest(target, targetConfig, runtimeInfo, modelInfo);
   writeReadme(target);
   console.log(`Bundled LLM assets prepared for ${target} at ${OUTPUT_DIR}`);
 }

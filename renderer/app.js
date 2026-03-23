@@ -13175,11 +13175,14 @@ function renderSettingsDiagnostics() {
     lines.push(`model: ${String(llm.model_name || llm.model_id || 'Unknown').trim() || 'Unknown'}`);
     lines.push(`availability: ${String(llm.available ? 'ready' : 'missing').trim()}`);
     lines.push(`state: ${String(llm.state || 'idle').trim() || 'idle'}`);
+    if (llm.bootstrap_state) lines.push(`bootstrap: ${String(llm.bootstrap_state || '').trim()}`);
     lines.push(`progress: ${Math.max(0, Math.min(100, Number(llm.progress_percent || 0) || 0))}%`);
     lines.push(`pending tasks: ${Number(llm.pending_tasks || 0)}`);
     lines.push(`completed tasks: ${Number(llm.completed_tasks || 0)}`);
     if (llm.current_label) lines.push(`current: ${String(llm.current_label || '').trim()}`);
+    if (llm.bootstrap_current_label) lines.push(`setup current: ${String(llm.bootstrap_current_label || '').trim()}`);
     if (llm.unavailable_reason) lines.push(`unavailable: ${String(llm.unavailable_reason || '').trim()}`);
+    if (llm.bootstrap_error) lines.push(`setup error: ${String(llm.bootstrap_error || '').trim()}`);
     if (llm.last_error) lines.push(`last error: ${String(llm.last_error || '').trim()}`);
     bundledLlm.textContent = lines.join('\n');
   }
@@ -13191,7 +13194,10 @@ function renderSettingsDiagnostics() {
       ? diag.bundled_small_llm
       : {};
     bundledLlmRerunBtn.disabled = String(llm.state || 'idle').trim() === 'working';
-    if (String(llm.state || 'idle').trim() === 'working') scheduleBundledLlmDiagnosticsPoll();
+    if (
+      String(llm.state || 'idle').trim() === 'working'
+      || ['downloading', 'extracting'].includes(String(llm.bootstrap_state || '').trim())
+    ) scheduleBundledLlmDiagnosticsPoll();
     else clearBundledLlmDiagnosticsPoll();
   }
   if (orphanDeleteBtn) {
@@ -13219,7 +13225,10 @@ function scheduleBundledLlmDiagnosticsPoll() {
       const llm = (diagnostics.bundled_small_llm && typeof diagnostics.bundled_small_llm === 'object')
         ? diagnostics.bundled_small_llm
         : {};
-      if (String(llm.state || 'idle').trim() === 'working') {
+      if (
+        String(llm.state || 'idle').trim() === 'working'
+        || ['downloading', 'extracting'].includes(String(llm.bootstrap_state || '').trim())
+      ) {
         scheduleBundledLlmDiagnosticsPoll();
       }
     }

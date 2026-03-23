@@ -370,8 +370,8 @@ class BundledSmallLlmRuntime {
   constructor(options = {}) {
     this.projectRoot = path.resolve(String(options.projectRoot || process.cwd()));
     this.app = options.app || null;
+    this.userDataPath = options.userDataPath ? path.resolve(String(options.userDataPath)) : '';
     this.bundledRootDir = options.bundledRootDir ? path.resolve(String(options.bundledRootDir)) : '';
-    this.manifest = null;
     this.lastPolicyError = '';
     this.lastFeedError = '';
     this.activeTasks = new Map();
@@ -379,30 +379,43 @@ class BundledSmallLlmRuntime {
 
   _log(message = '', meta = null) {
     const prefix = '[bundled-llm]';
-    if (meta && typeof meta === 'object') {
-      console.log(prefix, message, meta);
-      return;
+    try {
+      if (meta && typeof meta === 'object') {
+        console.log(prefix, message, meta);
+        return;
+      }
+      console.log(prefix, message);
+    } catch (err) {
+      if (err && err.code === 'EPIPE') return;
+      throw err;
     }
-    console.log(prefix, message);
   }
 
   _isPackaged() {
     return !!(this.app && this.app.isPackaged);
   }
 
-  _bundledRootDir() {
-    if (this.bundledRootDir) return this.bundledRootDir;
-    if (process.env.SUBGRAPHER_BUNDLED_LLM_ROOT) return String(process.env.SUBGRAPHER_BUNDLED_LLM_ROOT);
-    if (this._isPackaged()) return path.join(process.resourcesPath, 'llm');
-    return path.join(this.projectRoot, 'build', 'bundled-llm', 'current');
+  _candidateRootDirs() {
+    if (this.bundledRootDir) {
+      return [this.bundledRootDir];
+    }
+    const roots = [];
+    if (this.userDataPath) roots.push(path.join(this.userDataPath, 'bundled-llm', 'current'));
+    if (this._isPackaged()) roots.push(path.join(process.resourcesPath, 'llm'));
+    if (process.env.SUBGRAPHER_BUNDLED_LLM_ROOT) roots.push(String(process.env.SUBGRAPHER_BUNDLED_LLM_ROOT));
+    roots.push(path.join(this.projectRoot, 'build', 'bundled-llm', 'current'));
+    return roots
+      .map((item) => path.resolve(String(item || '').trim()))
+      .filter(Boolean)
+      .filter((item, index, list) => list.indexOf(item) === index);
   }
 
   _manifestPath() {
     return path.join(this.projectRoot, 'runtime', 'models', MANIFEST_FILENAME);
   }
 
-  _assetManifestPath() {
-    return path.join(this._bundledRootDir(), ASSET_MANIFEST_FILENAME);
+  _assetManifestPath(rootDir = '') {
+    return path.join(rootDir || this._candidateRootDirs()[0] || '', ASSET_MANIFEST_FILENAME);
   }
 
   _defaultManifest() {
@@ -427,71 +440,85 @@ class BundledSmallLlmRuntime {
     };
   }
 
-  _loadManifest() {
-    if (!this.manifest) {
-      const projectManifest = readJsonSafe(this._manifestPath()) || {};
-      const assetManifest = readJsonSafe(this._assetManifestPath()) || {};
-      this.manifest = {
-        ...this._defaultManifest(),
-        ...projectManifest,
-        ...assetManifest,
-        prompt_versions: {
-          ...(this._defaultManifest().prompt_versions || {}),
-          ...((projectManifest && projectManifest.prompt_versions) || {}),
-          ...((assetManifest && assetManifest.prompt_versions) || {}),
-        },
-      };
-    }
-    return this.manifest;
+  _loadManifest(rootDir = '') {
+    const projectManifest = readJsonSafe(this._manifestPath()) || {};
+    const assetManifest = readJsonSafe(this._assetManifestPath(rootDir)) || {};
+    return {
+      ...this._defaultManifest(),
+      ...projectManifest,
+      ...assetManifest,
+      prompt_versions: {
+        ...(this._defaultManifest().prompt_versions || {}),
+        ...((projectManifest && projectManifest.prompt_versions) || {}),
+        ...((assetManifest && assetManifest.prompt_versions) || {}),
+      },
+    };
   }
 
-  _resolveExecutablePath(manifest = {}) {
+  _resolveExecutablePath(manifest = {}, rootDir = '') {
     const envPath = normalizeWhitespace(process.env.SUBGRAPHER_BUNDLED_LLM_BIN || '');
     if (envPath) return envPath;
     const relPath = pickPlatformValue(manifest.executable_rel_path, process.platform);
     if (!relPath) return '';
-    return path.join(this._bundledRootDir(), relPath);
+    return path.join(rootDir, relPath);
   }
 
-  _resolveModelPath(manifest = {}) {
+  _resolveModelPath(manifest = {}, rootDir = '') {
     const envPath = normalizeWhitespace(process.env.SUBGRAPHER_BUNDLED_LLM_MODEL || '');
     if (envPath) return envPath;
     const relPath = pickPlatformValue(manifest.model_rel_path, process.platform);
     if (!relPath) return '';
-    return path.join(this._bundledRootDir(), relPath);
+    return path.join(rootDir, relPath);
   }
 
-  _resolveBundledAvailability(manifest = {}) {
-    const bundledRoot = this._bundledRootDir();
-    const assetManifestPath = this._assetManifestPath();
-    const executablePath = this._resolveExecutablePath(manifest);
-    const modelPath = this._resolveModelPath(manifest);
-    const errors = [];
-    if (!fs.existsSync(bundledRoot)) {
-      errors.push(`bundled llm resources missing at ${bundledRoot}`);
+  _resolveBundledAvailability() {
+    const attempts = [];
+    for (const bundledRoot of this._candidateRootDirs()) {
+      const manifest = this._loadManifest(bundledRoot);
+      const assetManifestPath = this._assetManifestPath(bundledRoot);
+      const executablePath = this._resolveExecutablePath(manifest, bundledRoot);
+      const modelPath = this._resolveModelPath(manifest, bundledRoot);
+      const errors = [];
+      if (!fs.existsSync(bundledRoot)) {
+        errors.push(`bundled llm resources missing at ${bundledRoot}`);
+      }
+      if (!fs.existsSync(assetManifestPath)) {
+        errors.push(`runtime manifest missing at ${assetManifestPath}`);
+      }
+      if (!executablePath || !fs.existsSync(executablePath)) {
+        errors.push(`runtime binary missing at ${executablePath || '[unset]'}`);
+      }
+      if (!modelPath || !fs.existsSync(modelPath)) {
+        errors.push(`model file missing at ${modelPath || '[unset]'}`);
+      }
+      if (errors.length === 0) {
+        return {
+          available: true,
+          reason: '',
+          bundled_root: bundledRoot,
+          asset_manifest_path: assetManifestPath,
+          executable_path: executablePath,
+          model_path: modelPath,
+          manifest,
+        };
+      }
+      attempts.push({ bundled_root: bundledRoot, errors });
     }
-    if (!fs.existsSync(assetManifestPath)) {
-      errors.push(`runtime manifest missing at ${assetManifestPath}`);
-    }
-    if (!executablePath || !fs.existsSync(executablePath)) {
-      errors.push(`runtime binary missing at ${executablePath || '[unset]'}`);
-    }
-    if (!modelPath || !fs.existsSync(modelPath)) {
-      errors.push(`model file missing at ${modelPath || '[unset]'}`);
-    }
+    const first = attempts[0] || { bundled_root: this._candidateRootDirs()[0] || '', errors: ['bundled llm unavailable'] };
     return {
-      available: errors.length === 0,
-      reason: errors.join(' | '),
-      bundled_root: bundledRoot,
-      asset_manifest_path: assetManifestPath,
-      executable_path: executablePath,
-      model_path: modelPath,
+      available: false,
+      reason: first.errors.join(' | '),
+      bundled_root: first.bundled_root,
+      asset_manifest_path: this._assetManifestPath(first.bundled_root),
+      executable_path: '',
+      model_path: '',
+      manifest: this._loadManifest(first.bundled_root),
     };
   }
 
   diagnostics() {
-    const manifest = this._loadManifest();
-    const availability = this._resolveBundledAvailability(manifest);
+    const availability = this._resolveBundledAvailability();
+    const manifest = availability.manifest || this._loadManifest(availability.bundled_root);
     const activeTasks = Array.from(this.activeTasks.values());
     return {
       ok: true,
@@ -579,8 +606,8 @@ class BundledSmallLlmRuntime {
   }
 
   _runBundledTask(taskType = '', payload = {}) {
-    const manifest = this._loadManifest();
-    const availability = this._resolveBundledAvailability(manifest);
+    const availability = this._resolveBundledAvailability();
+    const manifest = availability.manifest || this._loadManifest(availability.bundled_root);
     if (!availability.available) {
       const error = new Error(availability.reason || 'bundled llm unavailable');
       error.code = 'BUNDLED_LLM_UNAVAILABLE';

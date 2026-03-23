@@ -18,6 +18,30 @@
     "win32": "engine/llama/llama-cli.exe"
   },
   "model_rel_path": "models/Qwen3.5-0.8B-Q8_0.gguf",
+  "bootstrap_assets": {
+    "darwin-arm64": {
+      "runtime_url": "https://github.com/ggml-org/llama.cpp/releases/download/b8487/llama-b8487-bin-macos-arm64.tar.gz",
+      "runtime_archive_name": "llama-b8487-bin-macos-arm64.tar.gz",
+      "runtime_archive_type": "tar.gz",
+      "runtime_executable_name": "llama-cli",
+      "runtime_release": "b8487",
+      "model_url": "https://huggingface.co/lmstudio-community/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf?download=1",
+      "model_filename": "Qwen3.5-0.8B-Q8_0.gguf",
+      "model_repo": "lmstudio-community/Qwen3.5-0.8B-GGUF",
+      "model_revision": "main"
+    },
+    "win-x64": {
+      "runtime_url": "https://github.com/ggml-org/llama.cpp/releases/download/b8487/llama-b8487-bin-win-cpu-x64.zip",
+      "runtime_archive_name": "llama-b8487-bin-win-cpu-x64.zip",
+      "runtime_archive_type": "zip",
+      "runtime_executable_name": "llama-cli.exe",
+      "runtime_release": "b8487",
+      "model_url": "https://huggingface.co/lmstudio-community/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf?download=1",
+      "model_filename": "Qwen3.5-0.8B-Q8_0.gguf",
+      "model_repo": "lmstudio-community/Qwen3.5-0.8B-GGUF",
+      "model_revision": "main"
+    }
+  },
   "timeout_ms": 60000,
   "max_retries": 10,
   "ctx_size": 2048,
