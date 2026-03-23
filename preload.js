@@ -230,6 +230,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ragStatus: (payload = {}) => ipcRenderer.invoke('browser:ragStatus', payload || {}),
     ragReindex: (payload = {}) => ipcRenderer.invoke('browser:ragReindex', payload || {}),
     settingsDiagnostics: () => ipcRenderer.invoke('browser:settingsDiagnostics'),
+    bundledLlmRerunTasks: (force = true) => ipcRenderer.invoke('browser:bundledLlmRerunTasks', { force }),
     settingsReferenceOrphanScan: () => ipcRenderer.invoke('browser:settingsReferenceOrphanScan'),
     settingsReferenceOrphanDelete: () => ipcRenderer.invoke('browser:settingsReferenceOrphanDelete'),
     settingsReferenceOrphanDeleteOne: (payload = {}) => ipcRenderer.invoke('browser:settingsReferenceOrphanDeleteOne', payload || {}),
@@ -366,6 +367,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getAnalysis: (noteId = '') => ipcRenderer.invoke('notes:get_analysis', { noteId }),
     getEvidenceFeed: (noteId = '') => ipcRenderer.invoke('notes:get_evidence_feed', { noteId }),
     getCitations: (noteId = '', claimId = '', claim = null) => ipcRenderer.invoke('notes:get_citations', { noteId, claimId, claim: claim && typeof claim === 'object' ? claim : null }),
+    reanalyze: (noteId = '') => ipcRenderer.invoke('notes:reanalyze', { noteId }),
     createReference: (noteId = '') => ipcRenderer.invoke('notes:create_reference', { noteId }),
   },
   tabs: {

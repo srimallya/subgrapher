@@ -218,7 +218,7 @@ function computeKeywordScore(item = {}, query = '') {
 function buildEmbeddingText(item = {}) {
   const text = [
     String(item.display_title || item.crawler_title || item.title || ''),
-    String(item.content_text || item.content_excerpt || item.summary || ''),
+    String(item.clean_summary || item.raw_content_text || item.content_text || item.content_excerpt || item.summary || ''),
     String(item.source_name || ''),
   ].filter(Boolean).join('\n');
   return text.slice(0, MAX_EMBED_INPUT_CHARS);
@@ -227,8 +227,9 @@ function buildEmbeddingText(item = {}) {
 function buildSearchText(item = {}) {
   return normalizeWhitespace([
     String(item.display_title || item.crawler_title || item.title || ''),
-    String(item.content_excerpt || ''),
-    String(item.content_text || ''),
+    String(item.clean_excerpt || item.content_excerpt || ''),
+    String(item.clean_summary || ''),
+    String(item.raw_content_text || item.content_text || ''),
     String(item.summary || ''),
     String(item.source_name || ''),
     String(item.source_domain || ''),
@@ -262,7 +263,9 @@ function normalizeStoredFeedItem(input = {}) {
     || canonicalUrl
     || 'Untitled'
   ).trim() || 'Untitled';
-  const contentText = String(src.content_text || src.summary || '').replace(/\u0000/g, '').trim().slice(0, MAX_CONTENT_CHARS);
+  const rawContentText = String(src.raw_content_text || src.content_text || src.summary || '').replace(/\u0000/g, '').trim().slice(0, MAX_CONTENT_CHARS);
+  const cleanSummary = String(src.clean_summary || src.summary || '').trim().slice(0, MAX_CONTENT_CHARS);
+  const cleanExcerpt = String(src.clean_excerpt || buildContentExcerpt(cleanSummary || rawContentText || src.summary || '')).trim();
   const contentMarkdown = String(src.content_markdown || '').trim().slice(0, MAX_CONTENT_CHARS);
   return {
     id: String(src.id || hashText(`${canonicalUrl}|${displayTitle}|${src.published_at || 0}`)).trim(),
@@ -271,8 +274,11 @@ function normalizeStoredFeedItem(input = {}) {
     crawler_title: String(src.crawler_title || '').trim(),
     display_title: displayTitle,
     summary: String(src.summary || '').trim(),
-    content_text: contentText,
-    content_excerpt: String(src.content_excerpt || buildContentExcerpt(contentText || src.summary || '')).trim(),
+    raw_content_text: rawContentText,
+    content_text: rawContentText,
+    clean_summary: cleanSummary,
+    clean_excerpt: cleanExcerpt,
+    content_excerpt: String(src.content_excerpt || cleanExcerpt || buildContentExcerpt(rawContentText || src.summary || '')).trim(),
     content_markdown: contentMarkdown,
     source_id: String(src.source_id || '').trim(),
     source_name: String(src.source_name || '').trim(),
@@ -283,14 +289,22 @@ function normalizeStoredFeedItem(input = {}) {
     published_at: Number(src.published_at || 0) || 0,
     fetched_at: Number(src.fetched_at || 0) || 0,
     content_fetched_at: Number(src.content_fetched_at || 0) || 0,
+    summary_generated_at: Number(src.summary_generated_at || 0) || 0,
+    summary_model_id: String(src.summary_model_id || '').trim(),
+    summary_status: String(src.summary_status || (cleanSummary ? 'generated' : 'pending')).trim() || 'pending',
+    content_quality: String(src.content_quality || '').trim(),
+    entities: Array.isArray(src.entities) ? src.entities.slice(0, 12).map((item) => String(item || '').trim()).filter(Boolean) : [],
+    summary_content_hash: String(src.summary_content_hash || '').trim(),
     search_text: String(buildSearchText({
       ...src,
       display_title: displayTitle,
-      content_text: contentText,
+      raw_content_text: rawContentText,
+      clean_summary: cleanSummary,
+      clean_excerpt: cleanExcerpt,
     })).trim(),
     embedding: toNumberArray(src.embedding),
-    fetch_status: String(src.fetch_status || (contentText ? 'cached' : 'rss_only')).trim() || 'rss_only',
-    has_full_content: !!(src.has_full_content || (Number(src.content_fetched_at || 0) > 0 && contentText)),
+    fetch_status: String(src.fetch_status || (rawContentText ? 'cached' : 'rss_only')).trim() || 'rss_only',
+    has_full_content: !!(src.has_full_content || (Number(src.content_fetched_at || 0) > 0 && rawContentText)),
   };
 }
 
@@ -432,12 +446,13 @@ function createDashboardStore(options = {}) {
   const userDataPath = String(options.userDataPath || '').trim();
   const filePath = path.join(userDataPath || process.cwd(), 'dashboard_state.json');
   const getEmbeddingConfig = typeof options.getEmbeddingConfig === 'function' ? options.getEmbeddingConfig : (() => ({}));
+  const summarizeArticle = typeof options.summarizeArticle === 'function' ? options.summarizeArticle : null;
 
   function readState() {
     try {
       if (!fs.existsSync(filePath)) {
         return {
-          version: 2,
+          version: 3,
           events: [],
           tasks: [],
           filters: { selected_topic: DEFAULT_TOPIC },
@@ -446,7 +461,7 @@ function createDashboardStore(options = {}) {
       }
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       return {
-        version: 2,
+        version: 3,
         events: Array.isArray(parsed && parsed.events) ? parsed.events : [],
         tasks: Array.isArray(parsed && parsed.tasks) ? parsed.tasks : [],
         filters: {
@@ -459,7 +474,7 @@ function createDashboardStore(options = {}) {
       };
     } catch (_) {
       return {
-        version: 2,
+        version: 3,
         events: [],
         tasks: [],
         filters: { selected_topic: DEFAULT_TOPIC },
@@ -470,7 +485,7 @@ function createDashboardStore(options = {}) {
 
   function writeState(state) {
     const next = {
-      version: 2,
+      version: 3,
       events: Array.isArray(state && state.events) ? state.events : [],
       tasks: Array.isArray(state && state.tasks) ? state.tasks : [],
       filters: {
@@ -516,6 +531,25 @@ function createDashboardStore(options = {}) {
           topics: getTopics(),
         },
       },
+    };
+  }
+
+  function getSummaryBacklogStatus() {
+    const state = readState();
+    const items = pruneFeedItems(state.rss && state.rss.items);
+    const totalCandidates = items.filter((item) => String((item && (item.raw_content_text || item.content_text)) || '').trim()).length;
+    const pendingItems = items.filter((item) => {
+      const rawText = String((item && (item.raw_content_text || item.content_text)) || '').trim();
+      if (!rawText) return false;
+      const expectedHash = hashText(rawText);
+      return !String((item && item.clean_summary) || '').trim()
+        || String((item && item.summary_content_hash) || '').trim() !== expectedHash;
+    }).length;
+    return {
+      ok: true,
+      total_candidates: totalCandidates,
+      pending_items: pendingItems,
+      completed_items: Math.max(0, totalCandidates - pendingItems),
     };
   }
 
@@ -569,12 +603,87 @@ function createDashboardStore(options = {}) {
     });
   }
 
+  async function buildCleanSummary(item = {}, existing = null) {
+    const normalized = normalizeStoredFeedItem({ ...existing, ...item });
+    const rawContentText = String(normalized.raw_content_text || normalized.content_text || '').trim();
+    const contentHash = hashText(rawContentText);
+    if (!rawContentText) {
+      return {
+        clean_summary: String(normalized.clean_summary || normalized.summary || '').trim(),
+        clean_excerpt: String(normalized.clean_excerpt || normalized.content_excerpt || '').trim(),
+        summary_generated_at: Number(normalized.summary_generated_at || 0) || 0,
+        summary_model_id: String(normalized.summary_model_id || '').trim(),
+        summary_status: String(normalized.summary_status || 'empty').trim() || 'empty',
+        content_quality: String(normalized.content_quality || '').trim(),
+        entities: Array.isArray(normalized.entities) ? normalized.entities.slice(0, 12) : [],
+        summary_content_hash: String(normalized.summary_content_hash || '').trim(),
+      };
+    }
+    if (existing && String(existing.summary_content_hash || '').trim() === contentHash && String(existing.clean_summary || '').trim()) {
+      return {
+        clean_summary: String(existing.clean_summary || '').trim(),
+        clean_excerpt: String(existing.clean_excerpt || buildContentExcerpt(existing.clean_summary || '')).trim(),
+        summary_generated_at: Number(existing.summary_generated_at || 0) || 0,
+        summary_model_id: String(existing.summary_model_id || '').trim(),
+        summary_status: String(existing.summary_status || 'generated').trim() || 'generated',
+        content_quality: String(existing.content_quality || '').trim(),
+        entities: Array.isArray(existing.entities) ? existing.entities.slice(0, 12) : [],
+        summary_content_hash: contentHash,
+      };
+    }
+    if (!summarizeArticle) {
+      return {
+        clean_summary: String(normalized.summary || buildContentExcerpt(rawContentText, 420)).trim(),
+        clean_excerpt: buildContentExcerpt(rawContentText || normalized.summary || '', 220),
+        summary_generated_at: nowTs(),
+        summary_model_id: '',
+        summary_status: 'fallback',
+        content_quality: String(normalized.content_quality || '').trim(),
+        entities: Array.isArray(normalized.entities) ? normalized.entities.slice(0, 12) : [],
+        summary_content_hash: contentHash,
+      };
+    }
+    const res = await summarizeArticle({
+      id: normalized.id,
+      title: normalized.display_title || normalized.title,
+      raw_content_text: rawContentText,
+      source_name: normalized.source_name,
+      source_domain: normalized.source_domain,
+      url: normalized.url,
+    }).catch(() => null);
+    if (!res || res.ok === false) {
+      return {
+        clean_summary: String(normalized.summary || buildContentExcerpt(rawContentText, 420)).trim(),
+        clean_excerpt: buildContentExcerpt(rawContentText || normalized.summary || '', 220),
+        summary_generated_at: nowTs(),
+        summary_model_id: '',
+        summary_status: 'fallback',
+        content_quality: String(normalized.content_quality || '').trim(),
+        entities: Array.isArray(normalized.entities) ? normalized.entities.slice(0, 12) : [],
+        summary_content_hash: contentHash,
+      };
+    }
+    const cleanSummary = String(res.summary || normalized.summary || buildContentExcerpt(rawContentText, 420)).trim();
+    return {
+      clean_summary: cleanSummary,
+      clean_excerpt: String(res.excerpt || buildContentExcerpt(cleanSummary || rawContentText, 220)).trim(),
+      summary_generated_at: Number(res.generated_at || nowTs()) || nowTs(),
+      summary_model_id: String(res.model_id || '').trim(),
+      summary_status: String((res.analysis_source === 'fallback') ? 'fallback' : 'generated').trim(),
+      content_quality: String(res.content_quality || '').trim(),
+      entities: Array.isArray(res.entities) ? res.entities.slice(0, 12).map((entity) => String(entity || '').trim()).filter(Boolean) : [],
+      summary_content_hash: contentHash,
+    };
+  }
+
   async function enrichFeedCandidate(candidate = {}, existing = null) {
     const base = normalizeStoredFeedItem({
       ...existing,
       ...candidate,
       display_title: candidate.title || (existing && existing.display_title) || candidate.url,
-      content_text: (existing && existing.content_text) || candidate.summary || '',
+      raw_content_text: (existing && (existing.raw_content_text || existing.content_text)) || candidate.summary || '',
+      clean_summary: (existing && existing.clean_summary) || candidate.summary || '',
+      clean_excerpt: (existing && existing.clean_excerpt) || buildContentExcerpt(candidate.summary || ''),
       content_excerpt: (existing && existing.content_excerpt) || buildContentExcerpt(candidate.summary || ''),
       source_topic: candidate.source_topic || (existing && existing.source_topic) || candidate.topic || OTHER_TOPIC,
       topic: candidate.topic || (existing && existing.topic) || candidate.source_topic || OTHER_TOPIC,
@@ -591,7 +700,10 @@ function createDashboardStore(options = {}) {
           ...base,
           display_title: existing.display_title || base.display_title,
           crawler_title: existing.crawler_title || base.crawler_title,
-          content_text: existing.content_text || base.content_text,
+          raw_content_text: existing.raw_content_text || existing.content_text || base.raw_content_text,
+          clean_summary: existing.clean_summary || base.clean_summary,
+          clean_excerpt: existing.clean_excerpt || base.clean_excerpt,
+          content_text: existing.raw_content_text || existing.content_text || base.raw_content_text,
           content_excerpt: existing.content_excerpt || base.content_excerpt,
           content_markdown: existing.content_markdown || base.content_markdown,
           content_fetched_at: existing.content_fetched_at || base.content_fetched_at,
@@ -618,8 +730,9 @@ function createDashboardStore(options = {}) {
       ...base,
       crawler_title: crawlerTitle,
       display_title: crawlerTitle || fallbackTitle,
-      content_text: contentText || base.content_text,
-      content_excerpt: buildContentExcerpt(contentText || base.content_text || base.summary || ''),
+      raw_content_text: contentText || base.raw_content_text,
+      content_text: contentText || base.raw_content_text,
+      content_excerpt: buildContentExcerpt(contentText || base.raw_content_text || base.summary || ''),
       content_markdown: contentMarkdown,
       content_fetched_at: nowTs(),
       fetch_status: 'fetched',
@@ -716,7 +829,15 @@ function createDashboardStore(options = {}) {
       }
       return enrichFeedCandidate(candidate, existing);
     });
-    const classified = await classifyItems(enriched);
+    const summarized = await mapWithConcurrency(enriched, ENRICH_CONCURRENCY, async (item) => {
+      const existing = existingMap.get(`url:${canonicalizeUrl(item.url || '')}`) || null;
+      const summaryPatch = await buildCleanSummary(item, existing);
+      return normalizeStoredFeedItem({
+        ...item,
+        ...summaryPatch,
+      });
+    });
+    const classified = await classifyItems(summarized);
     const mergedMap = new Map();
     existingItems.forEach((item) => {
       getItemLookupKeys(item).forEach((key) => {
@@ -747,6 +868,41 @@ function createDashboardStore(options = {}) {
     return {
       ...listing,
       message: errors.length ? errors.join(' | ') : '',
+    };
+  }
+
+  async function rerunSummaries(options = {}) {
+    const state = readState();
+    const progress = typeof options.onProgress === 'function' ? options.onProgress : null;
+    const items = pruneFeedItems(state.rss && state.rss.items);
+    let completed = 0;
+    const nextItems = await mapWithConcurrency(items, Math.max(1, Math.min(ENRICH_CONCURRENCY, 4)), async (item) => {
+      const summaryPatch = await buildCleanSummary({
+        ...item,
+        raw_content_text: String(item.raw_content_text || item.content_text || '').trim(),
+      }, options.force ? null : item);
+      completed += 1;
+      if (progress) {
+        progress({
+          total: items.length,
+          completed,
+          label: String((item && (item.display_title || item.title || item.url)) || 'article').trim(),
+        });
+      }
+      return normalizeStoredFeedItem({
+        ...item,
+        ...summaryPatch,
+      });
+    });
+    state.rss = {
+      items: nextItems,
+      last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
+    };
+    writeState(state);
+    return {
+      ok: true,
+      total: items.length,
+      completed,
     };
   }
 
@@ -824,9 +980,11 @@ function createDashboardStore(options = {}) {
 
   return {
     getState,
+    getSummaryBacklogStatus,
     shouldRefreshFeeds,
     listFeedItems,
     refreshFeeds,
+    rerunSummaries,
     getFeedItem,
     setSelectedTopic,
     saveEvent,

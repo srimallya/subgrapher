@@ -96,6 +96,11 @@ const state = {
   noteScore: 0,
   noteRiskLevel: 'needs_review',
   noteAnalysisStage: 'stable',
+  noteFreshnessState: 'stable',
+  noteLatestEvidenceAt: 0,
+  noteNextRefreshAt: 0,
+  notePolicy: null,
+  noteAnalysisSource: 'fallback',
   noteDraftTitle: '',
   noteDraftBody: '',
   noteSaveTimer: null,
@@ -156,6 +161,7 @@ const state = {
   settingsDirty: false,
   settingsValidationErrors: {},
   settingsDiagnostics: null,
+  settingsBundledLlmPollTimer: null,
   settingsTrustedPeers: [],
   mailStatus: null,
   mailUnreadCount: 0,
@@ -2425,6 +2431,9 @@ function computeNoteStatusText() {
     return analysisJob.last_error ? 'Evidence stalled' : 'Analysis stalled';
   }
   if (state.noteAnalysisPending) return getNoteAnalysisStageLabel(state.noteAnalysisStage);
+  if (String(state.noteFreshnessState || '').trim() === 'refreshing') return 'Refreshing evidence';
+  if (String(state.noteFreshnessState || '').trim() === 'stale') return 'Evidence may be stale';
+  if (String(state.noteFreshnessState || '').trim() === 'fallback_policy') return 'Using fallback policy';
   const summary = state.activeNoteAnalysis;
   if (summary && Number(summary.claim_count || 0) <= 0) {
     const message = String(summary.message || '').trim();
@@ -2661,6 +2670,7 @@ function renderNotesSurface() {
   const previewPane = e('notes-preview-pane');
   const input = e('notes-input');
   const saveBtn = e('notes-save-btn');
+  const reanalyzeBtn = e('notes-reanalyze-btn');
   const deleteBtn = e('notes-delete-btn');
   const promoteBtn = e('notes-create-reference-btn');
   const statusNode = e('notes-status');
@@ -2672,6 +2682,7 @@ function renderNotesSurface() {
   if (titleInput) titleInput.disabled = !hasNote;
   if (input) input.disabled = !hasNote;
   if (saveBtn) saveBtn.disabled = !hasNote;
+  if (reanalyzeBtn) reanalyzeBtn.disabled = !hasNote || state.noteAnalysisPending;
   if (deleteBtn) deleteBtn.disabled = !hasNote;
   if (promoteBtn) promoteBtn.disabled = !hasNote;
   if (statusNode) statusNode.textContent = computeNoteStatusText();
@@ -2726,6 +2737,11 @@ async function refreshActiveNoteAnalysis(options = {}) {
     state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, targetId);
     state.noteScore = clamp(Math.round(Number(res.note_score || (res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
     state.noteRiskLevel = String(res.risk_level || (res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
+    state.notePolicy = (res.note_policy && typeof res.note_policy === 'object') ? res.note_policy : ((res.analysis_summary && res.analysis_summary.note_policy) || null);
+    state.noteFreshnessState = String(res.freshness_state || (res.analysis_summary && res.analysis_summary.freshness_state) || 'stable').trim() || 'stable';
+    state.noteLatestEvidenceAt = Number(res.latest_evidence_at || (res.analysis_summary && res.analysis_summary.latest_evidence_at) || 0) || 0;
+    state.noteNextRefreshAt = Number(res.next_refresh_at || (res.analysis_summary && res.analysis_summary.next_refresh_at) || 0) || 0;
+    state.noteAnalysisSource = String(res.analysis_source || (res.analysis_summary && res.analysis_summary.analysis_source) || 'fallback').trim() || 'fallback';
     const normalizedStage = String(res.analysis_stage || (state.noteAnalysisJob && state.noteAnalysisJob.stage) || '').trim() || 'stable';
     state.noteAnalysisStage = normalizedStage === 'ready' ? 'stable' : normalizedStage;
     state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, state.activeNote, state.activeNoteAnalysis);
@@ -2833,6 +2849,31 @@ async function saveActiveNote(options = {}) {
     if (!options.silent) window.alert('Unable to save note.');
     return { ok: false, message: String((err && err.message) || 'Unable to save note.') };
   }
+}
+
+async function reanalyzeActiveNote() {
+  if (!notesApi || !state.activeNote) return;
+  const noteId = String(state.activeNoteId || '').trim();
+  if (!noteId) return;
+  if (state.noteSaveState === 'edited') {
+    const saveRes = await saveActiveNote({ silent: true });
+    if (saveRes && saveRes.ok === false) return;
+  }
+  state.noteAnalysisPending = true;
+  state.noteAnalysisStage = 'detecting_claims';
+  state.noteFreshnessState = 'refreshing';
+  renderNotesSurface();
+  const res = await notesApi.reanalyze(noteId);
+  if (!res || res.ok === false) {
+    state.noteAnalysisPending = false;
+    state.noteFreshnessState = 'error';
+    renderNotesSurface();
+    window.alert((res && res.message) || 'Unable to reanalyze note.');
+    return;
+  }
+  state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, noteId);
+  state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, state.activeNote, state.activeNoteAnalysis);
+  void refreshActiveNoteAnalysis({ noteId, allowReschedule: true, delayMs: 900 });
 }
 
 function scheduleActiveNoteSave(delayMs = 800) {
@@ -2948,6 +2989,11 @@ async function loadNoteRecord(noteId = '', options = {}) {
     state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, res.note, res.analysis_summary || null);
     state.noteScore = clamp(Math.round(Number((res.analysis_summary && res.analysis_summary.note_score) || 0) || 0), 0, 100);
     state.noteRiskLevel = String((res.analysis_summary && res.analysis_summary.risk_level) || 'needs_review').trim() || 'needs_review';
+    state.notePolicy = (res.analysis_summary && res.analysis_summary.note_policy) || null;
+    state.noteFreshnessState = String((res.analysis_summary && res.analysis_summary.freshness_state) || 'stable').trim() || 'stable';
+    state.noteLatestEvidenceAt = Number((res.analysis_summary && res.analysis_summary.latest_evidence_at) || 0) || 0;
+    state.noteNextRefreshAt = Number((res.analysis_summary && res.analysis_summary.next_refresh_at) || 0) || 0;
+    state.noteAnalysisSource = String((res.analysis_summary && res.analysis_summary.analysis_source) || 'fallback').trim() || 'fallback';
     const loadStage = String((state.noteAnalysisJob && state.noteAnalysisJob.stage) || 'detecting_claims').trim() || 'detecting_claims';
     state.noteAnalysisStage = state.noteAnalysisPending
       ? loadStage
@@ -3001,6 +3047,11 @@ async function loadNotesList(options = {}) {
   state.noteDraftBody = '';
   state.noteScore = 0;
   state.noteRiskLevel = 'needs_review';
+  state.notePolicy = null;
+  state.noteFreshnessState = 'stable';
+  state.noteLatestEvidenceAt = 0;
+  state.noteNextRefreshAt = 0;
+  state.noteAnalysisSource = 'fallback';
   state.noteAnalysisJob = null;
   state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
@@ -3053,6 +3104,11 @@ async function deleteActiveNote() {
   state.noteDraftBody = '';
   state.noteScore = 0;
   state.noteRiskLevel = 'needs_review';
+  state.notePolicy = null;
+  state.noteFreshnessState = 'stable';
+  state.noteLatestEvidenceAt = 0;
+  state.noteNextRefreshAt = 0;
+  state.noteAnalysisSource = 'fallback';
   state.noteAnalysisJob = null;
   state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
@@ -7286,7 +7342,7 @@ function renderStatusFeed() {
           <span class="status-rss-time muted">${Number((item && item.published_at) || 0) > 0 ? escapeHtml(formatAgo(Number(item.published_at || 0))) : ''}</span>
         </div>
         <div class="status-rss-title">${escapeHtml(String((item && (item.display_title || item.title)) || 'Untitled'))}</div>
-        ${String((item && item.content_excerpt) || '').trim() ? `<div class="status-rss-excerpt muted">${escapeHtml(String(item.content_excerpt || '').trim())}</div>` : ''}
+        ${String((item && (item.clean_excerpt || item.content_excerpt)) || '').trim() ? `<div class="status-rss-excerpt muted">${escapeHtml(String((item && (item.clean_excerpt || item.content_excerpt)) || '').trim())}</div>` : ''}
       </button>
     `).join('')
     : `<div class="status-empty muted">${query ? 'No matches.' : 'No feed items.'}</div>`;
@@ -7433,7 +7489,9 @@ function buildStatusFeedModalMeta(item = {}) {
 }
 
 function buildStatusFeedModalBody(item = {}) {
-  const content = String((item && item.content_text) || '').trim();
+  const cleanSummary = String((item && item.clean_summary) || '').trim();
+  if (cleanSummary) return cleanSummary;
+  const content = String((item && (item.raw_content_text || item.content_text)) || '').trim();
   if (content) return content;
   const excerpt = String((item && item.content_excerpt) || '').trim();
   if (excerpt) return excerpt;
@@ -13049,9 +13107,11 @@ function renderSettingsDiagnostics() {
   const hyper = e('settings-diagnostics-hyperweb');
   const identity = e('settings-diagnostics-identity');
   const python = e('settings-diagnostics-python');
+  const bundledLlm = e('settings-diagnostics-bundled-llm');
   const referenceStore = e('settings-diagnostics-reference-store');
   const orphanDeleteBtn = e('settings-danger-orphan-delete-all-btn');
   const pythonDownloadBtn = e('settings-python-download-btn');
+  const bundledLlmRerunBtn = e('settings-bundled-llm-rerun-btn');
   if (hyper) hyper.textContent = JSON.stringify((diag && diag.hyperweb) || {}, null, 2);
   if (identity) identity.textContent = JSON.stringify((diag && diag.hyperweb_identity) || {}, null, 2);
   if (referenceStore) {
@@ -13079,14 +13139,61 @@ function renderSettingsDiagnostics() {
     }
     python.textContent = lines.join('\n');
   }
+  if (bundledLlm) {
+    const llm = (diag && diag.bundled_small_llm && typeof diag.bundled_small_llm === 'object')
+      ? diag.bundled_small_llm
+      : {};
+    const lines = [];
+    lines.push(`model: ${String(llm.model_id || 'Unknown').trim() || 'Unknown'}`);
+    lines.push(`state: ${String(llm.state || 'idle').trim() || 'idle'}`);
+    lines.push(`progress: ${Math.max(0, Math.min(100, Number(llm.progress_percent || 0) || 0))}%`);
+    lines.push(`pending tasks: ${Number(llm.pending_tasks || 0)}`);
+    lines.push(`completed tasks: ${Number(llm.completed_tasks || 0)}`);
+    if (llm.current_label) lines.push(`current: ${String(llm.current_label || '').trim()}`);
+    if (llm.last_error) lines.push(`last error: ${String(llm.last_error || '').trim()}`);
+    bundledLlm.textContent = lines.join('\n');
+  }
   if (pythonDownloadBtn) {
     pythonDownloadBtn.hidden = !(electronApi && electronApi.platform === 'win32');
+  }
+  if (bundledLlmRerunBtn) {
+    const llm = (diag && diag.bundled_small_llm && typeof diag.bundled_small_llm === 'object')
+      ? diag.bundled_small_llm
+      : {};
+    bundledLlmRerunBtn.disabled = String(llm.state || 'idle').trim() === 'working';
+    if (String(llm.state || 'idle').trim() === 'working') scheduleBundledLlmDiagnosticsPoll();
+    else clearBundledLlmDiagnosticsPoll();
   }
   if (orphanDeleteBtn) {
     orphanDeleteBtn.disabled = !(diag && diag.reference_store && Number(diag.reference_store.orphan_count || 0) > 0);
   }
   renderSettingsOrphanList();
   renderSettingsHyperwebControls();
+}
+
+function clearBundledLlmDiagnosticsPoll() {
+  if (state.settingsBundledLlmPollTimer) {
+    clearTimeout(state.settingsBundledLlmPollTimer);
+    state.settingsBundledLlmPollTimer = null;
+  }
+}
+
+function scheduleBundledLlmDiagnosticsPoll() {
+  clearBundledLlmDiagnosticsPoll();
+  state.settingsBundledLlmPollTimer = setTimeout(async () => {
+    state.settingsBundledLlmPollTimer = null;
+    const diagnostics = await api.settingsDiagnostics();
+    if (diagnostics && diagnostics.ok) {
+      state.settingsDiagnostics = diagnostics;
+      renderSettingsDiagnostics();
+      const llm = (diagnostics.bundled_small_llm && typeof diagnostics.bundled_small_llm === 'object')
+        ? diagnostics.bundled_small_llm
+        : {};
+      if (String(llm.state || 'idle').trim() === 'working') {
+        scheduleBundledLlmDiagnosticsPoll();
+      }
+    }
+  }, 1200);
 }
 
 function formatSettingsOrphanReason(reason = '') {
@@ -14639,6 +14746,11 @@ function bindControls() {
       await saveActiveNote();
     });
   });
+  e('notes-reanalyze-btn')?.addEventListener('click', async () => {
+    await runNotesUiAction('notes:reanalyze', async () => {
+      await reanalyzeActiveNote();
+    });
+  });
   e('notes-delete-btn')?.addEventListener('click', async () => {
     await runNotesUiAction('notes:delete', async () => {
       await deleteActiveNote();
@@ -15468,6 +15580,22 @@ function bindControls() {
       state.settingsDiagnostics = diagnostics;
       renderSettingsDiagnostics();
     }
+  });
+
+  e('settings-bundled-llm-rerun-btn')?.addEventListener('click', async () => {
+    if (!api || typeof api.bundledLlmRerunTasks !== 'function') return;
+    state.settingsSaveState = 'Rerunning bundled LLM tasks...';
+    renderSettingsStatusLine();
+    const res = await api.bundledLlmRerunTasks(true);
+    if (res && res.diagnostics && res.diagnostics.ok) {
+      state.settingsDiagnostics = res.diagnostics;
+      renderSettingsDiagnostics();
+      scheduleBundledLlmDiagnosticsPoll();
+    }
+    state.settingsSaveState = (res && res.ok)
+      ? 'Bundled LLM rerun started.'
+      : ((res && res.message) || 'Bundled LLM rerun failed.');
+    renderSettingsStatusLine();
   });
 
   e('settings-danger-orphan-scan-btn')?.addEventListener('click', async () => {

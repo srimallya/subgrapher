@@ -53,6 +53,7 @@ const { createDashboardStore } = require('./runtime/dashboard_store');
 const { createNotesStore } = require('./runtime/notes_store');
 const { createNoteAnalysisEngine, NOTE_EVIDENCE_MODE } = require('./runtime/note_analysis');
 const { createNoteAnalysisScheduler } = require('./runtime/note_analysis_scheduler');
+const { createBundledSmallLlmRuntime } = require('./runtime/bundled_small_llm');
 
 const APP_NAME = 'Subgrapher';
 const STORE_FILENAME = 'semantic_references.json';
@@ -288,6 +289,16 @@ let dashboardStore = null;
 let notesStore = null;
 let noteAnalysisEngine = null;
 let noteAnalysisScheduler = null;
+let bundledSmallLlmRuntime = null;
+let bundledLlmRerunJob = {
+  running: false,
+  total: 0,
+  completed: 0,
+  current_label: '',
+  started_at: 0,
+  finished_at: 0,
+  last_error: '',
+};
 const pathBMetrics = {
   pathb_reuse_count: 0,
   pathb_create_count: 0,
@@ -6329,6 +6340,7 @@ function getDashboardStore() {
           model: String((ragEmbedding && ragEmbedding.model) || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
         };
       },
+      summarizeArticle: async (article = {}) => getBundledSmallLlmRuntime().summarizeFeedArticle(article),
     });
   }
   return dashboardStore;
@@ -6343,6 +6355,15 @@ function getNotesStore() {
   return notesStore;
 }
 
+function getBundledSmallLlmRuntime() {
+  if (!bundledSmallLlmRuntime) {
+    bundledSmallLlmRuntime = createBundledSmallLlmRuntime({
+      projectRoot: __dirname,
+    });
+  }
+  return bundledSmallLlmRuntime;
+}
+
 function getNoteAnalysisEngine() {
   if (!noteAnalysisEngine) {
     noteAnalysisEngine = createNoteAnalysisEngine({
@@ -6353,6 +6374,7 @@ function getNoteAnalysisEngine() {
         timeoutMs: 12_000,
       }),
       temporalGraphScorer: computeTemporalGraphScoresWithPython,
+      classifyNotePolicy: async (note = {}) => getBundledSmallLlmRuntime().classifyNotePolicy(note),
       makeId,
     });
   }
@@ -6414,6 +6436,20 @@ function getNoteAnalysisJobMetadata(noteId = '', note = null, summary = null) {
   };
 }
 
+function deriveNoteFreshnessState(note = null, summary = null, analysisJob = null) {
+  if (analysisJob && String((analysisJob && analysisJob.stage) || '').trim() === 'error') return 'error';
+  if (analysisJob && Number((analysisJob && analysisJob.running_revision) || 0) > 0) return 'refreshing';
+  const normalizedSummary = (summary && typeof summary === 'object') ? summary : {};
+  const explicit = String(normalizedSummary.freshness_state || '').trim();
+  if (explicit && explicit !== 'stable') return explicit;
+  const nextRefreshAt = Number(normalizedSummary.next_refresh_at || 0) || 0;
+  if (nextRefreshAt > 0 && nextRefreshAt <= nowTs() && note && String(note.body_markdown || '').trim()) {
+    return 'stale';
+  }
+  if (String(normalizedSummary.analysis_source || '').trim() === 'fallback') return 'fallback_policy';
+  return 'stable';
+}
+
 function ensureScheduledNoteAnalysis(noteId = '', note = null, summary = null, delayMs = 1200) {
   const targetId = String(noteId || '').trim();
   if (!targetId || !note) return getNoteAnalysisJobMetadata(targetId, note, summary);
@@ -6462,6 +6498,11 @@ async function runNoteAnalysis(noteId = '', options = {}) {
       completed_at: nowTs(),
       status: 'completed',
       message: 'Note is empty.',
+      note_policy: null,
+      analysis_source: 'fallback',
+      freshness_state: 'stable',
+      latest_evidence_at: 0,
+      next_refresh_at: 0,
       claims: [],
       sources: [],
       passages: [],
@@ -6489,12 +6530,19 @@ function scheduleNoteAnalysis(noteId = '', delayMs = 1200, revision = 0) {
 function noteNeedsFreshAnalysis(note = null, summary = null) {
   if (!note) return false;
   const analyzerVersion = String((getNoteAnalysisEngine() && getNoteAnalysisEngine().ANALYZER_VERSION) || '').trim();
+  const idleEnough = (nowTs() - Number((note && note.last_saved_at) || 0)) >= 15_000;
+  const staleLiveNote = !!(summary
+    && Number((summary && summary.next_refresh_at) || 0) > 0
+    && Number((summary && summary.next_refresh_at) || 0) <= nowTs()
+    && idleEnough
+    && String((note && note.active_mode) || 'edit').trim().toLowerCase() !== 'edit');
   return !!(
     String(note.body_markdown || '').trim()
     && (
       !summary
       || Number(summary.note_revision || 0) < Number(note.analysis_revision || 0)
       || String(summary.extractor_version || '').trim() !== analyzerVersion
+      || staleLiveNote
     )
   );
 }
@@ -6511,6 +6559,122 @@ async function ensureFreshNoteAnalysis(noteId = '') {
   if (!needsRefresh) return noteRes;
   await runNoteAnalysis(targetId, { expectedRevision: Number(note.analysis_revision || 0) || 0 });
   return store.getNote(targetId);
+}
+
+async function computeBundledLlmTaskDiagnostics() {
+  const runtimeDiag = getBundledSmallLlmRuntime().diagnostics();
+  const notesStore = getNotesStore();
+  const listRes = await notesStore.listNotes().catch(() => null);
+  const noteItems = Array.isArray(listRes && listRes.notes) ? listRes.notes : [];
+  let noteCandidates = 0;
+  let notePending = 0;
+  for (const item of noteItems) {
+    const noteId = String((item && item.id) || '').trim();
+    if (!noteId) continue;
+    const noteRes = await notesStore.getNote(noteId).catch(() => null);
+    if (!noteRes || !noteRes.ok || !noteRes.note) continue;
+    if (!String(noteRes.note.body_markdown || '').trim()) continue;
+    noteCandidates += 1;
+    if (noteNeedsFreshAnalysis(noteRes.note, noteRes.analysis_summary || null)) notePending += 1;
+  }
+  const feedBacklog = getDashboardStore().getSummaryBacklogStatus();
+  const totalCandidates = noteCandidates + Number((feedBacklog && feedBacklog.total_candidates) || 0);
+  const pendingTasks = notePending + Number((feedBacklog && feedBacklog.pending_items) || 0);
+  const completedTasks = Math.max(0, totalCandidates - pendingTasks);
+  const job = bundledLlmRerunJob || {};
+  const activeProgress = job.running && Number(job.total || 0) > 0
+    ? Math.round((Math.max(0, Number(job.completed || 0)) / Math.max(1, Number(job.total || 0))) * 100)
+    : (totalCandidates > 0 ? Math.round((completedTasks / Math.max(1, totalCandidates)) * 100) : 100);
+  return {
+    ...runtimeDiag,
+    state: job.running ? 'working' : 'idle',
+    total_candidates: totalCandidates,
+    pending_tasks: pendingTasks,
+    completed_tasks: completedTasks,
+    progress_percent: clamp(Math.max(0, activeProgress), 0, 100),
+    current_label: String(job.current_label || '').trim(),
+    started_at: Number(job.started_at || 0) || 0,
+    finished_at: Number(job.finished_at || 0) || 0,
+    last_error: String(job.last_error || runtimeDiag.last_policy_error || runtimeDiag.last_feed_error || '').trim(),
+    notes: {
+      total_candidates: noteCandidates,
+      pending_tasks: notePending,
+      completed_tasks: Math.max(0, noteCandidates - notePending),
+    },
+    feed: {
+      total_candidates: Number((feedBacklog && feedBacklog.total_candidates) || 0),
+      pending_tasks: Number((feedBacklog && feedBacklog.pending_items) || 0),
+      completed_tasks: Number((feedBacklog && feedBacklog.completed_items) || 0),
+    },
+  };
+}
+
+async function rerunBundledLlmTasks(options = {}) {
+  if (bundledLlmRerunJob.running) {
+    return {
+      ok: true,
+      already_running: true,
+      diagnostics: await computeBundledLlmTaskDiagnostics(),
+    };
+  }
+  bundledLlmRerunJob = {
+    running: true,
+    total: 0,
+    completed: 0,
+    current_label: '',
+    started_at: nowTs(),
+    finished_at: 0,
+    last_error: '',
+  };
+  try {
+    const notesStore = getNotesStore();
+    const listRes = await notesStore.listNotes();
+    const notes = Array.isArray(listRes && listRes.notes) ? listRes.notes : [];
+    const noteCandidates = [];
+    for (const item of notes) {
+      const noteId = String((item && item.id) || '').trim();
+      if (!noteId) continue;
+      const noteRes = await notesStore.getNote(noteId);
+      if (!noteRes || !noteRes.ok || !noteRes.note) continue;
+      if (!String(noteRes.note.body_markdown || '').trim()) continue;
+      noteCandidates.push(noteRes.note);
+    }
+    const feedBacklog = getDashboardStore().getSummaryBacklogStatus();
+    bundledLlmRerunJob.total = noteCandidates.length + Number((feedBacklog && feedBacklog.total_candidates) || 0);
+    for (const note of noteCandidates) {
+      bundledLlmRerunJob.current_label = String(note.title || note.id || 'note').trim();
+      await runNoteAnalysis(String(note.id || '').trim(), {
+        expectedRevision: Number(note.analysis_revision || 0) || 0,
+      }).catch((err) => {
+        bundledLlmRerunJob.last_error = String((err && err.message) || 'note_rerun_failed');
+      });
+      bundledLlmRerunJob.completed += 1;
+    }
+    await getDashboardStore().rerunSummaries({
+      force: !!options.force,
+      onProgress: ({ completed = 0, total = 0, label = '' }) => {
+        bundledLlmRerunJob.current_label = String(label || '').trim();
+        bundledLlmRerunJob.completed = noteCandidates.length + Number(completed || 0);
+        bundledLlmRerunJob.total = noteCandidates.length + Number(total || 0);
+      },
+    });
+    bundledLlmRerunJob.running = false;
+    bundledLlmRerunJob.finished_at = nowTs();
+    bundledLlmRerunJob.current_label = '';
+    return {
+      ok: true,
+      diagnostics: await computeBundledLlmTaskDiagnostics(),
+    };
+  } catch (err) {
+    bundledLlmRerunJob.running = false;
+    bundledLlmRerunJob.finished_at = nowTs();
+    bundledLlmRerunJob.last_error = String((err && err.message) || 'bundled_llm_rerun_failed');
+    return {
+      ok: false,
+      message: bundledLlmRerunJob.last_error,
+      diagnostics: await computeBundledLlmTaskDiagnostics(),
+    };
+  }
 }
 
 async function listDashboardNotifications(options = {}) {
@@ -20543,11 +20707,17 @@ ipcMain.handle('notes:get_analysis', async (_event, payload) => {
   if (!res || res.ok === false) return res;
   const analysisJob = ensureScheduledNoteAnalysis(noteId, res.note, res.analysis_summary || null, 100);
   const analysisState = String((analysisJob && analysisJob.stage) || 'ready').trim() || 'ready';
+  const freshnessState = deriveNoteFreshnessState(res.note, res.analysis_summary || null, analysisJob);
   return {
     ...res,
     analysis_job: analysisJob,
     analysis_state: analysisState,
     analysis_stage: analysisState === 'ready' ? 'stable' : analysisState,
+    note_policy: (res.analysis_summary && res.analysis_summary.note_policy) || null,
+    freshness_state: freshnessState,
+    latest_evidence_at: Number((res.analysis_summary && res.analysis_summary.latest_evidence_at) || 0) || 0,
+    next_refresh_at: Number((res.analysis_summary && res.analysis_summary.next_refresh_at) || 0) || 0,
+    analysis_source: String((res.analysis_summary && res.analysis_summary.analysis_source) || 'fallback').trim() || 'fallback',
   };
 });
 
@@ -20557,11 +20727,32 @@ ipcMain.handle('notes:get_evidence_feed', async (_event, payload) => {
   if (!res || res.ok === false) return res;
   const analysisJob = ensureScheduledNoteAnalysis(noteId, res.note, res.analysis_summary || null, 100);
   const analysisState = String((analysisJob && analysisJob.stage) || 'ready').trim() || 'ready';
+  const freshnessState = deriveNoteFreshnessState(res.note, res.analysis_summary || null, analysisJob);
   return {
     ...res,
     analysis_job: analysisJob,
     analysis_state: analysisState,
     analysis_stage: analysisState === 'ready' ? 'stable' : analysisState,
+    note_policy: (res.analysis_summary && res.analysis_summary.note_policy) || null,
+    freshness_state: freshnessState,
+    latest_evidence_at: Number((res.analysis_summary && res.analysis_summary.latest_evidence_at) || 0) || 0,
+    next_refresh_at: Number((res.analysis_summary && res.analysis_summary.next_refresh_at) || 0) || 0,
+    analysis_source: String((res.analysis_summary && res.analysis_summary.analysis_source) || 'fallback').trim() || 'fallback',
+  };
+});
+
+ipcMain.handle('notes:reanalyze', async (_event, payload) => {
+  const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  const noteRes = await getNotesStore().getNote(noteId);
+  if (!noteRes || !noteRes.ok || !noteRes.note) return noteRes || { ok: false, message: 'Note not found.' };
+  const revision = Number((noteRes.note && noteRes.note.analysis_revision) || 0) || 0;
+  const analysisJob = scheduleNoteAnalysis(noteId, 100, revision);
+  return {
+    ok: true,
+    note: noteRes.note,
+    analysis_summary: noteRes.analysis_summary || null,
+    analysis_job: analysisJob,
+    freshness_state: deriveNoteFreshnessState(noteRes.note, noteRes.analysis_summary || null, analysisJob),
   };
 });
 
@@ -24007,13 +24198,28 @@ ipcMain.handle('browser:settingsDiagnostics', async () => {
   const identity = getHyperwebIdentityDiagnostics();
   const python = await getPythonRuntimeResolver().diagnostics({ bypassCache: true });
   const referenceStore = buildOrphanReferenceScan();
+  const bundled_small_llm = await computeBundledLlmTaskDiagnostics();
   return {
     ok: true,
     settings,
     hyperweb,
     hyperweb_identity: identity,
     python,
+    bundled_small_llm,
     reference_store: referenceStore,
+  };
+});
+
+ipcMain.handle('browser:bundledLlmRerunTasks', async (_event, payload) => {
+  if (!bundledLlmRerunJob.running) {
+    void rerunBundledLlmTasks({
+      force: !!(payload && payload.force),
+    });
+  }
+  return {
+    ok: true,
+    started: true,
+    diagnostics: await computeBundledLlmTaskDiagnostics(),
   };
 });
 

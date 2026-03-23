@@ -202,6 +202,12 @@ function ensureSchema(db) {
   ensureTableColumn(db, 'analysis_runs', 'note_score', 'REAL NOT NULL DEFAULT 0');
   ensureTableColumn(db, 'analysis_runs', 'coverage_score', 'REAL NOT NULL DEFAULT 0');
   ensureTableColumn(db, 'analysis_runs', 'risk_level', "TEXT NOT NULL DEFAULT 'needs_review'");
+  ensureTableColumn(db, 'analysis_runs', 'note_policy_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureTableColumn(db, 'analysis_runs', 'analysis_source', "TEXT NOT NULL DEFAULT 'fallback'");
+  ensureTableColumn(db, 'analysis_runs', 'freshness_state', "TEXT NOT NULL DEFAULT 'stable'");
+  ensureTableColumn(db, 'analysis_runs', 'latest_evidence_at', 'INTEGER NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'analysis_runs', 'next_refresh_at', 'INTEGER NOT NULL DEFAULT 0');
+  ensureTableColumn(db, 'analysis_runs', 'policy_classified_at', 'INTEGER NOT NULL DEFAULT 0');
   db.run(`
     CREATE TABLE IF NOT EXISTS note_sources (
       id TEXT PRIMARY KEY,
@@ -331,6 +337,9 @@ function getRelevanceReasonForCitation(citation = {}) {
 
 function decorateAnalysisSummary(summary = null) {
   if (!summary) return null;
+  const notePolicy = (summary.note_policy && typeof summary.note_policy === 'object')
+    ? summary.note_policy
+    : {};
   return {
     ...summary,
     evidence_mode: NOTE_EVIDENCE_MODE,
@@ -340,6 +349,12 @@ function decorateAnalysisSummary(summary = null) {
     contradicted_count: clampNumber(summary.uncertain_count, 0, Number.MAX_SAFE_INTEGER, 0),
     mixed_count: clampNumber(summary.contested_count, 0, Number.MAX_SAFE_INTEGER, 0),
     insufficient_evidence_count: clampNumber(summary.no_evidence_count, 0, Number.MAX_SAFE_INTEGER, 0),
+    note_policy: notePolicy,
+    freshness_state: String(summary.freshness_state || 'stable').trim() || 'stable',
+    latest_evidence_at: clampNumber(summary.latest_evidence_at, 0, Number.MAX_SAFE_INTEGER, 0),
+    next_refresh_at: clampNumber(summary.next_refresh_at, 0, Number.MAX_SAFE_INTEGER, 0),
+    analysis_source: String(summary.analysis_source || 'fallback').trim() || 'fallback',
+    policy_classified_at: clampNumber(summary.policy_classified_at, 0, Number.MAX_SAFE_INTEGER, 0),
   };
 }
 
@@ -568,7 +583,7 @@ function queryNoteById(db, noteId = '') {
 
 function queryLatestAnalysisSummary(db, noteId = '') {
   const stmt = db.prepare(`
-    SELECT id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, note_score, coverage_score, risk_level, message
+    SELECT id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, note_score, coverage_score, risk_level, message, note_policy_json, analysis_source, freshness_state, latest_evidence_at, next_refresh_at, policy_classified_at
     FROM analysis_runs
     WHERE note_id = ?
     ORDER BY started_at DESC
@@ -597,6 +612,19 @@ function queryLatestAnalysisSummary(db, noteId = '') {
     coverage_score: clampUnit(row.coverage_score),
     risk_level: String(row.risk_level || 'needs_review').trim() || 'needs_review',
     message: String(row.message || '').trim(),
+    note_policy: (() => {
+      try {
+        const parsed = JSON.parse(String(row.note_policy_json || '{}'));
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch (_) {
+        return {};
+      }
+    })(),
+    analysis_source: String(row.analysis_source || 'fallback').trim() || 'fallback',
+    freshness_state: String(row.freshness_state || 'stable').trim() || 'stable',
+    latest_evidence_at: clampNumber(row.latest_evidence_at, 0, Number.MAX_SAFE_INTEGER, 0),
+    next_refresh_at: clampNumber(row.next_refresh_at, 0, Number.MAX_SAFE_INTEGER, 0),
+    policy_classified_at: clampNumber(row.policy_classified_at, 0, Number.MAX_SAFE_INTEGER, 0),
   };
 }
 
@@ -851,9 +879,10 @@ function createNotesStore(options = {}) {
 
         const runStmt = db.prepare(`
           INSERT INTO analysis_runs (
-            id, note_id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, note_score, coverage_score, risk_level, message
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, note_id, note_revision, started_at, completed_at, extractor_version, status, claim_count, supported_count, contested_count, uncertain_count, no_evidence_count, note_score, coverage_score, risk_level, message, note_policy_json, analysis_source, freshness_state, latest_evidence_at, next_refresh_at, policy_classified_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
+        const notePolicy = (payload.note_policy && typeof payload.note_policy === 'object') ? payload.note_policy : {};
         runStmt.bind([
           analysisRunId,
           note.id,
@@ -871,6 +900,12 @@ function createNotesStore(options = {}) {
           clampUnit(Object.prototype.hasOwnProperty.call(payload, 'coverage_score') ? payload.coverage_score : aggregate.coverage_score),
           String((payload && payload.risk_level) || aggregate.risk_level || 'needs_review'),
           String(payload.message || ''),
+          JSON.stringify(notePolicy),
+          String(payload.analysis_source || 'fallback'),
+          String(payload.freshness_state || 'stable'),
+          clampNumber(payload.latest_evidence_at, 0, Number.MAX_SAFE_INTEGER, 0),
+          clampNumber(payload.next_refresh_at, 0, Number.MAX_SAFE_INTEGER, 0),
+          clampNumber((payload && payload.policy_classified_at) || (notePolicy && notePolicy.classified_at), 0, Number.MAX_SAFE_INTEGER, 0),
         ]);
         runStmt.step();
         runStmt.free();

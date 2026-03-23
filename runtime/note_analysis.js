@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { hashEmbedText } = require('./embedding_runtime');
 
-const ANALYZER_VERSION = 'note-analyzer-v7';
+const ANALYZER_VERSION = 'note-analyzer-v8';
 const NOTE_EVIDENCE_MODE = 'web_only';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HIGHLIGHT_THRESHOLD = 0.72;
@@ -33,6 +33,17 @@ const BOILERPLATE_PASSAGE_PATTERNS = [
 
 const searchCache = new Map();
 const fetchCache = new Map();
+const DEFAULT_NOTE_POLICY = {
+  note_mode: 'background_brief',
+  freshness_bias: 'medium',
+  source_mix: 'mixed',
+  contradiction_scan: true,
+  result_budget: 5,
+  staleness_ttl_minutes: 1440,
+  prefer_recent_window_days: 14,
+  analysis_source: 'fallback',
+  schema_version: 1,
+};
 
 function nowTs() {
   return Date.now();
@@ -224,21 +235,63 @@ function sourceAuthorityScore(source = {}, claim = {}) {
   return 0.3;
 }
 
-function sourceFreshnessScore(source = {}, claim = {}) {
+function sourceFreshnessScore(source = {}, claim = {}, policy = DEFAULT_NOTE_POLICY) {
   const ts = Number((source && source.published_at) || (source && source.fetched_at) || 0);
   if (!ts) return 0.2;
   const ageDays = Math.max(0, (nowTs() - ts) / DAY_MS);
+  const normalizedPolicy = normalizeNotePolicy(policy);
+  const recentWindow = Math.max(1, Number(normalizedPolicy.prefer_recent_window_days || 14) || 14);
   const currentEvent = isConflictClaim(String((claim && claim.claim_text) || ''))
     || /\b(now|today|currently|latest|ongoing)\b/i.test(String((claim && claim.claim_text) || ''));
-  if (!currentEvent) return ageDays <= 365 ? 0.45 : 0.25;
-  if (ageDays <= 7) return 1;
-  if (ageDays <= 30) return 0.78;
-  if (ageDays <= 90) return 0.52;
+  const policySensitive = isFreshnessSensitivePolicy(normalizedPolicy);
+  if (!currentEvent && !policySensitive) return ageDays <= 365 ? 0.45 : 0.25;
+  if (ageDays <= Math.max(1, recentWindow / 3)) return 1;
+  if (ageDays <= recentWindow) return 0.88;
+  if (ageDays <= Math.max(30, recentWindow * 2)) return 0.62;
   return 0.24;
 }
 
 function buildHash(value = '') {
   return crypto.createHash('sha1').update(String(value || ''), 'utf8').digest('hex').slice(0, 16);
+}
+
+function normalizeNotePolicy(input = {}) {
+  const src = (input && typeof input === 'object') ? input : {};
+  const noteMode = String(src.note_mode || DEFAULT_NOTE_POLICY.note_mode).trim() || DEFAULT_NOTE_POLICY.note_mode;
+  const freshnessBias = String(src.freshness_bias || DEFAULT_NOTE_POLICY.freshness_bias).trim() || DEFAULT_NOTE_POLICY.freshness_bias;
+  const sourceMix = String(src.source_mix || DEFAULT_NOTE_POLICY.source_mix).trim() || DEFAULT_NOTE_POLICY.source_mix;
+  return {
+    note_mode: ['live_update', 'background_brief', 'historical_summary', 'analysis_opinion', 'mixed'].includes(noteMode) ? noteMode : DEFAULT_NOTE_POLICY.note_mode,
+    freshness_bias: ['low', 'medium', 'high'].includes(freshnessBias) ? freshnessBias : DEFAULT_NOTE_POLICY.freshness_bias,
+    source_mix: ['latest_news', 'official_sources', 'reference_background', 'mixed'].includes(sourceMix) ? sourceMix : DEFAULT_NOTE_POLICY.source_mix,
+    contradiction_scan: src.contradiction_scan !== false,
+    result_budget: Math.max(3, Math.min(10, Number(src.result_budget || DEFAULT_NOTE_POLICY.result_budget) || DEFAULT_NOTE_POLICY.result_budget)),
+    staleness_ttl_minutes: Math.max(30, Math.min(60 * 24 * 14, Number(src.staleness_ttl_minutes || DEFAULT_NOTE_POLICY.staleness_ttl_minutes) || DEFAULT_NOTE_POLICY.staleness_ttl_minutes)),
+    prefer_recent_window_days: Math.max(1, Math.min(3650, Number(src.prefer_recent_window_days || DEFAULT_NOTE_POLICY.prefer_recent_window_days) || DEFAULT_NOTE_POLICY.prefer_recent_window_days)),
+    analysis_source: String(src.analysis_source || DEFAULT_NOTE_POLICY.analysis_source).trim() || DEFAULT_NOTE_POLICY.analysis_source,
+    schema_version: Number(src.schema_version || DEFAULT_NOTE_POLICY.schema_version) || DEFAULT_NOTE_POLICY.schema_version,
+    classified_at: Number(src.classified_at || 0) || 0,
+    model_id: String(src.model_id || '').trim(),
+  };
+}
+
+function computeNextRefreshAt(completedAt = 0, policy = {}) {
+  const finished = Number(completedAt || 0) || 0;
+  if (!finished) return 0;
+  const ttlMinutes = Math.max(1, Number((policy && policy.staleness_ttl_minutes) || DEFAULT_NOTE_POLICY.staleness_ttl_minutes) || DEFAULT_NOTE_POLICY.staleness_ttl_minutes);
+  return finished + (ttlMinutes * 60 * 1000);
+}
+
+function isFreshnessSensitivePolicy(policy = {}) {
+  const normalized = normalizeNotePolicy(policy);
+  return normalized.note_mode === 'live_update' || normalized.freshness_bias === 'high';
+}
+
+function scorePolicyFreshness(policy = {}) {
+  const normalized = normalizeNotePolicy(policy);
+  if (normalized.freshness_bias === 'high') return 1;
+  if (normalized.freshness_bias === 'low') return 0.3;
+  return 0.65;
 }
 
 function dedupeBy(list = [], keyFn = (item) => item) {
@@ -825,6 +878,7 @@ function createNoteAnalysisEngine(options = {}) {
   const webSearch = typeof options.webSearch === 'function' ? options.webSearch : null;
   const fetchUrl = typeof options.fetchUrl === 'function' ? options.fetchUrl : null;
   const temporalGraphScorer = typeof options.temporalGraphScorer === 'function' ? options.temporalGraphScorer : null;
+  const classifyNotePolicy = typeof options.classifyNotePolicy === 'function' ? options.classifyNotePolicy : null;
   const makeId = typeof options.makeId === 'function' ? options.makeId : ((prefix) => `${prefix}_${nowTs()}_${Math.random().toString(36).slice(2, 10)}`);
 
   async function searchWithCache(query = '', maxResults = MAX_WEB_RESULTS_PER_CLAIM) {
@@ -862,6 +916,15 @@ function createNoteAnalysisEngine(options = {}) {
     const noteRevision = Number((note && note.analysis_revision) || 0);
     const body = String((note && note.body_markdown) || '');
     const analysisRunId = makeId('analysis');
+    const policyRes = classifyNotePolicy
+      ? await classifyNotePolicy({
+        id: noteId,
+        title: String((note && note.title) || ''),
+        body_markdown: body,
+      })
+      : null;
+    const notePolicy = normalizeNotePolicy(policyRes && policyRes.ok ? policyRes : DEFAULT_NOTE_POLICY);
+    const analysisSource = String(notePolicy.analysis_source || 'fallback').trim() || 'fallback';
     const explicitUrls = extractExplicitUrls(body);
     const rawClaims = resolveClaimContext(splitClaims(body)
       .map((item, idx) => {
@@ -912,6 +975,10 @@ function createNoteAnalysisEngine(options = {}) {
         completed_at: nowTs(),
         status: 'completed',
         message: 'No factual claims detected.',
+        note_policy: notePolicy,
+        analysis_source: analysisSource,
+        latest_evidence_at: 0,
+        next_refresh_at: computeNextRefreshAt(nowTs(), notePolicy),
         claims,
         sources: [],
         passages: [],
@@ -925,6 +992,8 @@ function createNoteAnalysisEngine(options = {}) {
     const passages = [];
     const citations = [];
     const sourceByCanonicalUrl = new Map();
+    const maxResultsPerClaim = Math.max(MAX_WEB_RESULTS_PER_CLAIM, Math.min(6, Number(notePolicy.result_budget || MAX_WEB_RESULTS_PER_CLAIM) || MAX_WEB_RESULTS_PER_CLAIM));
+    const maxFetchesForNote = Math.max(MAX_FETCHES_PER_NOTE, Number(notePolicy.result_budget || 0) * 4);
 
     function ensureSource(sourceInput = {}) {
       const sourceKind = String(sourceInput.source_kind || '').trim() || 'web_search';
@@ -1035,7 +1104,7 @@ function createNoteAnalysisEngine(options = {}) {
       }
     }
 
-    const explicitFetchItems = explicitUrls.slice(0, MAX_FETCHES_PER_NOTE).map((item) => ({
+    const explicitFetchItems = explicitUrls.slice(0, maxFetchesForNote).map((item) => ({
       source_kind: 'explicit_url',
       source_query: '',
       url: item.canonical_url,
@@ -1066,7 +1135,7 @@ function createNoteAnalysisEngine(options = {}) {
       };
       for (const plan of searchPlans) {
         if (hasSatisfiedSearchIntent(buckets[plan.intent], plan)) continue;
-        const results = await searchWithCache(plan.query, 4);
+        const results = await searchWithCache(plan.query, maxResultsPerClaim);
         const accepted = results
           .map((result) => ({
             ...result,
@@ -1106,7 +1175,7 @@ function createNoteAnalysisEngine(options = {}) {
       const resultGroups = Array.isArray(entry.webRes) ? entry.webRes : [];
       resultGroups.forEach((group) => {
         const results = Array.isArray(group && group.results) ? group.results : [];
-        results.slice(0, MAX_WEB_RESULTS_PER_CLAIM).forEach((item) => {
+        results.slice(0, maxResultsPerClaim).forEach((item) => {
           const canonical = normalizeUrl(item && item.url);
           if (!canonical) return;
           searchSources.push({
@@ -1123,7 +1192,7 @@ function createNoteAnalysisEngine(options = {}) {
     });
 
     const fetchQueue = dedupeBy(searchSources, (item) => `${item.source_kind}:${normalizeUrl(item.url)}`)
-      .slice(0, MAX_FETCHES_PER_NOTE);
+      .slice(0, maxFetchesForNote);
 
     const fetchResults = await runPool(fetchQueue, async (item) => {
       const preview = await fetchWithCache(item.url);
@@ -1154,7 +1223,7 @@ function createNoteAnalysisEngine(options = {}) {
           const searchIntent = getSearchIntentForSourceKind(entry.source && entry.source.source_kind);
           const queryConfidence = Number((entry.source && entry.source.query_confidence) || 0) || 0;
           const authorityScore = sourceAuthorityScore(entry.source, claim);
-          const freshnessScore = sourceFreshnessScore(entry.source, claim);
+          const freshnessScore = sourceFreshnessScore(entry.source, claim, notePolicy);
           return {
             claim,
             source: entry.source,
@@ -1228,6 +1297,9 @@ function createNoteAnalysisEngine(options = {}) {
       const supportCounts = sourceSupportCount.get(claim.id) || {};
       const supportCorroboration = Math.min(1, (Number(supportCounts.support || 0) / 3));
       const challengeCorroboration = Math.min(1, (Number(supportCounts.challenge || 0) / 2));
+      const freshnessWeight = scorePolicyFreshness(notePolicy);
+      const supportFreshnessWeight = 0.04 + (0.08 * freshnessWeight);
+      const contradictionFreshnessWeight = 0.03 + (0.06 * freshnessWeight);
       const scoreEntries = (entries = [], corroborationBase = 0, stance = 'support') => entries
         .map((entry) => {
           const temporalScore = Number(temporalScores.get(String((entry.source && entry.source.id) || '')) || 0) || 0;
@@ -1241,7 +1313,7 @@ function createNoteAnalysisEngine(options = {}) {
               + (0.12 * entry.entity_score)
               + (0.08 * entry.exact_score)
               + (0.08 * entry.authority_score)
-              + (0.06 * entry.freshness_score)
+              + (contradictionFreshnessWeight * entry.freshness_score)
               + (0.24 * entry.contradiction_score)
               + (entry.search_intent === 'challenge' ? 0.08 : 0))
             : ((0.24 * entry.semantic_score)
@@ -1253,7 +1325,7 @@ function createNoteAnalysisEngine(options = {}) {
               + (0.08 * entry.entity_score)
               + (0.12 * entry.exact_score)
               + (0.08 * entry.authority_score)
-              + (0.08 * entry.freshness_score)
+              + (supportFreshnessWeight * entry.freshness_score)
               - (0.12 * entry.contradiction_score));
           return {
             source: entry.source,
@@ -1358,6 +1430,8 @@ function createNoteAnalysisEngine(options = {}) {
 
     const summary = summarizeAnalysis(claims);
     const aggregate = buildNoteAggregate(claims);
+    const latestEvidenceAt = sources.reduce((maxTs, source) => Math.max(maxTs, Number((source && source.published_at) || (source && source.fetched_at) || 0) || 0), 0);
+    const completedAt = nowTs();
     return {
       ok: true,
       analysis_run_id: analysisRunId,
@@ -1365,9 +1439,13 @@ function createNoteAnalysisEngine(options = {}) {
       extractor_version: ANALYZER_VERSION,
       evidence_mode: NOTE_EVIDENCE_MODE,
       started_at: startedAt,
-      completed_at: nowTs(),
+      completed_at: completedAt,
       status: 'completed',
       message: summary.claim_count > 0 ? 'Evidence scan completed.' : 'No factual claims detected.',
+      note_policy: notePolicy,
+      analysis_source: analysisSource,
+      latest_evidence_at: latestEvidenceAt,
+      next_refresh_at: computeNextRefreshAt(completedAt, notePolicy),
       claims,
       sources,
       passages,

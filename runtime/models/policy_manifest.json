@@ -1,0 +1,11 @@
+{
+  "bundled": true,
+  "backend": "heuristic",
+  "model_id": "subgrapher-policy-fallback-v1",
+  "description": "Bundled small-model policy and article cleanup runtime for Notes freshness routing and Status feed summaries.",
+  "tasks": [
+    "note_policy_classification",
+    "rss_article_cleanup_summary"
+  ],
+  "schema_version": 1
+}

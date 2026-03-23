@@ -21,8 +21,24 @@ function makeTemporalScorer() {
 test('note analysis extracts URLs, finds factual claims, and ranks evidence', async () => {
   const searchQueries = [];
   const fetchedUrls = [];
+  const policyCalls = [];
 
   const engine = createNoteAnalysisEngine({
+    classifyNotePolicy: async (note) => {
+      policyCalls.push(note);
+      return {
+        ok: true,
+        note_mode: 'live_update',
+        freshness_bias: 'high',
+        source_mix: 'latest_news',
+        contradiction_scan: true,
+        result_budget: 8,
+        staleness_ttl_minutes: 90,
+        prefer_recent_window_days: 3,
+        analysis_source: 'llm',
+        classified_at: 1_710_000_000_000,
+      };
+    },
     webSearch: async ({ query }) => {
       searchQueries.push(query);
       return {
@@ -64,6 +80,9 @@ test('note analysis extracts URLs, finds factual claims, and ranks evidence', as
   });
 
   assert.equal(result.ok, true);
+  assert.equal(result.note_policy.note_mode, 'live_update');
+  assert.equal(result.analysis_source, 'llm');
+  assert.ok(result.next_refresh_at > result.completed_at);
   assert.equal(result.evidence_mode, 'web_only');
   assert.equal(result.note_revision, 4);
   assert.equal(result.explicit_urls.length, 1);
@@ -82,6 +101,26 @@ test('note analysis extracts URLs, finds factual claims, and ranks evidence', as
   assert.ok(Number(result.claims[0].truth_confidence || 0) > 0);
   assert.ok(Number(result.note_score || 0) >= 0);
   assert.ok(['clean', 'needs_review', 'high_contradiction_risk'].includes(String(result.risk_level || '')));
+  assert.equal(policyCalls.length, 1);
+});
+
+test('note analysis falls back to default note policy when classifier output is invalid', async () => {
+  const engine = createNoteAnalysisEngine({
+    classifyNotePolicy: async () => ({ ok: true, note_mode: 'weird_mode' }),
+    webSearch: async () => ({ results: [] }),
+    fetchUrl: async () => ({ ok: false }),
+    temporalGraphScorer: makeTemporalScorer(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_policy_fallback',
+    analysis_revision: 1,
+    body_markdown: 'As of today, the current conflict is ongoing.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.note_policy.note_mode, 'background_brief');
+  assert.equal(result.analysis_source, 'fallback');
 });
 
 test('compound factual sentences are split into smaller claim spans', async () => {
