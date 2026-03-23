@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { hashEmbedText } = require('./embedding_runtime');
 
-const ANALYZER_VERSION = 'note-analyzer-v6';
+const ANALYZER_VERSION = 'note-analyzer-v7';
 const NOTE_EVIDENCE_MODE = 'web_only';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HIGHLIGHT_THRESHOLD = 0.72;
@@ -162,6 +162,40 @@ function timeMatchScore(claimText = '', passageText = '') {
   const passageYears = new Set(yearTokens(passageText));
   const matches = claimYears.filter((item) => passageYears.has(item)).length;
   return matches > 0 ? 1 : 0;
+}
+
+function splitPassageSentences(text = '') {
+  return String(text || '')
+    .split(/(?<=[.!?])\s+/)
+    .map((item) => normalizeWhitespace(item))
+    .filter(Boolean);
+}
+
+function buildCitationExcerpt(claimText = '', passageText = '', maxChars = 320) {
+  const passage = normalizeWhitespace(passageText);
+  if (!passage) return '';
+  const sentences = splitPassageSentences(passage);
+  if (!sentences.length) return passage.slice(0, maxChars);
+  const ranked = sentences
+    .map((sentence, index) => ({
+      sentence,
+      index,
+      score: (
+        (0.52 * lexicalOverlapScore(claimText, sentence))
+        + (0.22 * exactnessScore(claimText, sentence))
+        + (0.12 * timeMatchScore(claimText, sentence))
+        + (0.14 * namedEntityCoverageScore(claimText, sentence))
+      ),
+    }))
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index));
+  const best = ranked[0] || null;
+  if (!best) return passage.slice(0, maxChars);
+  const window = [best.sentence];
+  const nextSentence = sentences[best.index + 1];
+  if (nextSentence && (window.join(' ') + ' ' + nextSentence).length <= maxChars) {
+    window.push(nextSentence);
+  }
+  return normalizeWhitespace(window.join(' ')).slice(0, maxChars);
 }
 
 function chunkText(text = '', size = PASSAGE_CHUNK_SIZE, overlap = PASSAGE_OVERLAP) {
@@ -1239,7 +1273,7 @@ function createNoteAnalysisEngine(options = {}) {
             exact_score: entry.exact_score,
             authority_score: entry.authority_score,
             freshness_score: entry.freshness_score,
-            excerpt: entry.passage.passage_text.slice(0, 340),
+            excerpt: buildCitationExcerpt(entry.claim && entry.claim.claim_text, entry.passage && entry.passage.passage_text, 340),
           };
         })
         .sort((a, b) => (b.score - a.score) || String((a.passage && a.passage.id) || '').localeCompare(String((b.passage && b.passage.id) || '')));

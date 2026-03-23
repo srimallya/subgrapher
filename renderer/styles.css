@@ -3972,6 +3972,10 @@ body.chat-collapsed #chat-panel-resizer {
   line-height: 1.45;
 }
 
+.notes-evidence-source-snippet.is-empty {
+  font-style: italic;
+}
+
 .notes-evidence-source-open {
   padding: 4px 8px;
   border: 1px solid var(--border);

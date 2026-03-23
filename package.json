@@ -1,6 +1,6 @@
 {
   "name": "subgrapher",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "description": "Subgrapher standalone browser workspace",
   "main": "main.js",
   "author": "Srimallya Maitra",

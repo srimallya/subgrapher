@@ -1585,6 +1585,14 @@ function cleanNoteEvidenceSnippet(value = '', fallback = '') {
   return text;
 }
 
+function getNoteVerbatimExcerpt(value = '', options = {}) {
+  const text = cleanNoteEvidenceSnippet(value, '');
+  const title = normalizeWhitespace(options && options.title);
+  if (!text) return '';
+  if (title && normalizeWhitespace(text).toLowerCase() === title.toLowerCase()) return '';
+  return text;
+}
+
 function logRendererError(scope = '', err = null, extra = null) {
   const parts = [`[renderer-error] ${String(scope || 'renderer').trim() || 'renderer'}`];
   const message = String((err && err.message) || err || '').trim();
@@ -1981,7 +1989,13 @@ function getNoteCitationRelevanceReason(citation = {}) {
 }
 
 function getNoteCitationChunkText(citation = {}) {
-  return normalizeWhitespace(String((citation && citation.passage_text) || (citation && citation.excerpt) || ''));
+  const source = citation && citation.source ? citation.source : {};
+  const excerpt = getNoteVerbatimExcerpt(
+    String((citation && citation.excerpt) || (citation && citation.passage_text) || ''),
+    { title: String(source.title || source.url || '') },
+  );
+  if (excerpt) return excerpt;
+  return 'No verbatim excerpt captured from this page yet.';
 }
 
 function renderNoteCitationItem(citation = {}) {
@@ -2192,10 +2206,11 @@ function renderNoteEvidenceSourceRow(item = {}, row = {}, kind = 'support') {
   const source = citation && citation.source ? citation.source : {};
   const claimId = String((citation && citation.claim_id) || (Array.isArray(row && row.claim_ids) ? row.claim_ids[0] : '') || '').trim();
   const sourceUrl = String(source.url || '').trim();
-  const summary = cleanNoteEvidenceSnippet(
-    String((citation && citation.passage_text) || (citation && citation.excerpt) || ''),
-    String(source.title || sourceUrl || ''),
+  const summary = getNoteVerbatimExcerpt(
+    String((citation && citation.excerpt) || (citation && citation.passage_text) || ''),
+    { title: String(source.title || sourceUrl || '') },
   );
+  const visibleSummary = summary || 'No verbatim excerpt captured from this page yet.';
   const title = String(source.title || sourceUrl || 'Source').trim() || 'Source';
   const label = kind === 'contradiction' ? 'Contradicts' : (kind === 'context' ? 'Adds context' : 'Supports');
   return `
@@ -2209,7 +2224,7 @@ function renderNoteEvidenceSourceRow(item = {}, row = {}, kind = 'support') {
         ${sourceUrl ? `<button type="button" class="notes-evidence-source-open" data-note-citation-open="${escapeHtml(String((citation && citation.id) || ''))}" data-note-citation-url="${escapeHtml(sourceUrl)}" data-note-citation-title="${escapeHtml(title)}" data-note-citation-excerpt="${escapeHtml(summary.slice(0, 600))}">Open</button>` : ''}
       </div>
       <div class="notes-evidence-source-title">${escapeHtml(title)}</div>
-      <div class="notes-evidence-source-snippet">${escapeHtml(summary)}</div>
+      <div class="notes-evidence-source-snippet${summary ? '' : ' is-empty'}">${escapeHtml(summary ? `"${visibleSummary}"` : visibleSummary)}</div>
     </article>
   `;
 }

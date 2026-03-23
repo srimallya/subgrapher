@@ -4,6 +4,8 @@ Subgrapher is a desktop app for building, browsing, and sharing knowledge as sem
 
 A semantic reference is the core unit in the app. Inside a reference you can browse the web, write notes, attach folders, attach mail threads, generate HTML visualizations, and let an AI agent reason over that context. References can be forked, shared publicly, or shared privately with trusted peers.
 
+Subgrapher also includes a dedicated Notes surface for ambient evidence-aware drafting. Notes are thought-first writing spaces where claims are identified in the background, web evidence is retrieved automatically, local regions are scored, and the note can later be promoted into Workspace with its evidence context preserved.
+
 Subgrapher also works as:
 
 - a local-first AI workspace
@@ -25,6 +27,7 @@ Subgrapher is an attempt to build for the open web and open communication instea
 ## What it does
 
 - Uses semantic references as reusable knowledge containers
+- Includes ambient Notes that detect factual claims, gather web evidence, score reliability, and carry evidence forward into Workspace promotion
 - Lets the agent reason inside a reference and open tabs or generate visualizations for you
 - Supports local models through LM Studio in a sandboxed setup
 - Supports API models from OpenAI, Google, Anthropic, and Cerebras

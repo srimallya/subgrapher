@@ -1,7 +1,7 @@
 # Subgrapher App Spec (Unified Artifact Runtime)
 
 ## Summary
-Current app version: `1.4.4`
+Current app version: `2.0.0`
 
 Subgrapher uses one artifact runtime for authored outputs:
 - `markdown` artifacts for text/image docs
@@ -17,6 +17,7 @@ Workspace surfaces currently include:
 - `files`
 - `skills`
 - `mail`
+- `notes`
 
 ## Artifact Data Model
 Artifacts are stored as:
@@ -37,6 +38,31 @@ Where:
   - a topic-filtered feed with search and open-in-reference behavior
 - Feed items open as new web tabs in the active reference.
 - Notifications are read as operational shortcuts, not passive display-only items.
+
+### Notes surface
+- A dedicated `notes` workspace surface provides an ambient writing and reading layer alongside the browser-first Workspace flow.
+- Product role split:
+  - `notes` is thought-first ambient computation for drafting and reading
+  - `web` workspace tabs remain the browser-first research surface
+- Notes behavior:
+  - users write freely in markdown/plain note form without manually triggering fact-check actions
+  - factual claims are detected continuously from the current note body
+  - web evidence retrieval runs in the background against detected claims
+  - reliability is shown at two levels:
+    - whole-note `Evidence Reliability`
+    - local sentence/region evidence states
+  - a persistent right-side evidence rail stays visible and lists supporting, contradicting, and contextual sources in realtime
+  - clicking an evidence item focuses the linked note region
+  - edit mode hides inline markers to keep writing distraction low; view mode restores evidence-linked highlights
+- Claim/evidence model:
+  - claim extraction is atomic enough to avoid coarse chunk-only judgments
+  - UI grouping remains sentence/region based for readability, scoring, and navigation
+  - contradictory claims should surface as risky
+  - partially correct claims should surface as mixed or weak, not only binary false
+  - supported claims can still receive rewrite/context nudges for dates, numbers, attribution, and scope
+- Promotion:
+  - `Create Reference` from a note preserves the note body, evidence summary, retrieved research links, and excerpt context when moving into Workspace
+  - promoted references should open with the carried research context already attached rather than requiring the user to rediscover the same sources
 
 ### Markdown artifacts
 - Code/text editor with debounced autosave.

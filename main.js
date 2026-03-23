@@ -14684,7 +14684,7 @@ function createWebTab(seed = {}) {
     title,
     favicon: null,
     pinned: false,
-    excerpt: '',
+    excerpt: String(seed.excerpt || '').trim().slice(0, 1200),
     snapshot_at: nowTs(),
     last_active: nowTs(),
   };
@@ -16035,6 +16035,18 @@ async function createReferenceFromNote(noteId = '') {
   const associatedUrls = [];
   const seenUrls = new Set();
   const citationHighlights = [];
+  function pushAssociatedUrl(item = {}, options = {}) {
+    const rawUrl = String((item && item.url) || '').trim();
+    const urlNorm = normalizeUrlForMatch(rawUrl);
+    if (!rawUrl || !urlNorm || seenUrls.has(urlNorm)) return;
+    seenUrls.add(urlNorm);
+    associatedUrls.push({
+      url: rawUrl,
+      title: String((item && item.title) || rawUrl).trim() || rawUrl,
+      excerpt: normalizeWhitespace(String((item && item.excerpt) || '')),
+      priority: Number((options && options.priority) || 0) || 0,
+    });
+  }
 
   for (let i = 0; i < claims.length; i += 1) {
     const claim = claims[i];
@@ -16042,13 +16054,13 @@ async function createReferenceFromNote(noteId = '') {
     const citations = Array.isArray(citationsRes && citationsRes.citations) ? citationsRes.citations : [];
     citations.forEach((citation) => {
       const url = normalizeUrlForMatch((citation && citation.source && citation.source.url) || '');
-      if (url && !seenUrls.has(url) && Number((citation && citation.score) || 0) >= 0.72) {
-        seenUrls.add(url);
-        associatedUrls.push({
-          url: String((citation && citation.source && citation.source.url) || ''),
-          title: String((citation && citation.source && citation.source.title) || ''),
-        });
-      }
+      pushAssociatedUrl({
+        url: String((citation && citation.source && citation.source.url) || ''),
+        title: String((citation && citation.source && citation.source.title) || ''),
+        excerpt: String((citation && citation.excerpt) || (citation && citation.passage_text) || ''),
+      }, {
+        priority: Number((citation && citation.score) || 0) || 0,
+      });
       const excerpt = normalizeWhitespace(String((citation && citation.excerpt) || ''));
       if (!excerpt || !url) return;
       citationHighlights.push({
@@ -16061,22 +16073,50 @@ async function createReferenceFromNote(noteId = '') {
     });
   }
 
+  evidenceFeed.forEach((region) => {
+    const allItems = []
+      .concat(Array.isArray(region && region.support_items) ? region.support_items : [])
+      .concat(Array.isArray(region && region.contradiction_items) ? region.contradiction_items : [])
+      .concat(Array.isArray(region && region.context_items) ? region.context_items : []);
+    allItems.forEach((item) => {
+      pushAssociatedUrl({
+        url: String((item && item.source && item.source.url) || ''),
+        title: String((item && item.source && item.source.title) || ''),
+        excerpt: String((item && item.excerpt) || (item && item.passage_text) || (region && region.region_text) || ''),
+      }, {
+        priority: Number((item && item.score) || 0) || 0,
+      });
+    });
+  });
+
   const explicitUrls = extractExplicitUrlsFromMarkdown(String(note.body_markdown || ''));
   explicitUrls.forEach((item) => {
-    const urlNorm = normalizeUrlForMatch((item && item.url) || '');
+    const rawUrl = String((item && item.url) || '').trim();
+    const urlNorm = normalizeUrlForMatch(rawUrl);
     if (!urlNorm || seenUrls.has(urlNorm)) return;
     seenUrls.add(urlNorm);
     associatedUrls.unshift({
       url: String(item.url || ''),
       title: String(item.url || ''),
+      excerpt: '',
+      priority: 1,
     });
   });
+
+  associatedUrls.sort((a, b) => Number((b && b.priority) || 0) - Number((a && a.priority) || 0));
+  const firstWorkspaceUrl = associatedUrls[0] || null;
 
   const ref = createReferenceBase({
     title: String(note.title || 'Untitled Note').trim() || 'Untitled Note',
     intent: 'Imported from note',
     relation_type: 'root',
-    current_tab: { url: getDefaultSearchHomeUrl(), title: getDefaultSearchHomeTitle() },
+    current_tab: firstWorkspaceUrl
+      ? {
+          url: String(firstWorkspaceUrl.url || ''),
+          title: String(firstWorkspaceUrl.title || firstWorkspaceUrl.url || '').trim(),
+          excerpt: String(firstWorkspaceUrl.excerpt || '').trim(),
+        }
+      : { url: getDefaultSearchHomeUrl(), title: getDefaultSearchHomeTitle() },
     source_metadata: {
       source_note_id: targetId,
       source_note_revision: Number(note.analysis_revision || 0),
@@ -16122,6 +16162,7 @@ async function createReferenceFromNote(noteId = '') {
       return createWebTab({
         url: rawUrl,
         title: String((item && item.title) || rawUrl).trim() || rawUrl,
+        excerpt: String((item && item.excerpt) || '').trim(),
       });
     })
     .filter(Boolean)

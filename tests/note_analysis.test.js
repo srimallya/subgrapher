@@ -437,3 +437,40 @@ test('note analysis filters redirect boilerplate passages and falls back to usef
   assert.ok(result.passages.every((passage) => !/redirect automatically/i.test(String((passage && passage.passage_text) || ''))));
   assert.ok(result.passages.some((passage) => /independent reporting says the conflict/i.test(String((passage && passage.passage_text) || ''))));
 });
+
+test('note analysis stores a tighter citation excerpt near the matched claim text', async () => {
+  const engine = createNoteAnalysisEngine({
+    webSearch: async () => ({
+      results: [{
+        title: 'OpenAI release note',
+        url: 'https://example.com/openai-release-note',
+        snippet: 'OpenAI released GPT-5 in 2025 according to the company announcement.',
+      }],
+    }),
+    fetchUrl: async () => ({
+      ok: true,
+      title: 'OpenAI release note',
+      markdown: [
+        'Background: this page collects several product launch notes.',
+        'OpenAI released GPT-5 in 2025 according to the company announcement.',
+        'Microsoft later discussed enterprise rollout plans.',
+      ].join(' '),
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_excerpt_focus',
+    analysis_revision: 1,
+    body_markdown: 'OpenAI released GPT-5 in 2025.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.ok(result.citations.length >= 1);
+  assert.ok(/released GPT-5 in 2025/i.test(String((result.citations[0] && result.citations[0].excerpt) || '')));
+  assert.ok(!/^background:/i.test(String((result.citations[0] && result.citations[0].excerpt) || '')));
+});
