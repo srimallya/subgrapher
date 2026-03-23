@@ -134,6 +134,42 @@ function sleep(ms = 0) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+function terminateChildProcess(child = null, forceAfterMs = 200) {
+  if (!child || !Number.isFinite(Number(child.pid)) || Number(child.pid) <= 0) return null;
+  const pid = Number(child.pid);
+  const forceKill = () => {
+    try {
+      if (process.platform === 'win32') {
+        child.kill('SIGKILL');
+        return;
+      }
+      process.kill(-pid, 'SIGKILL');
+    } catch (_) {
+      try {
+        child.kill('SIGKILL');
+      } catch (__) {
+        // noop
+      }
+    }
+  };
+  try {
+    if (process.platform === 'win32') {
+      child.kill('SIGTERM');
+    } else {
+      process.kill(-pid, 'SIGTERM');
+    }
+  } catch (_) {
+    try {
+      child.kill('SIGTERM');
+    } catch (__) {
+      // noop
+    }
+  }
+  const timer = setTimeout(forceKill, Math.max(25, Number(forceAfterMs) || 200));
+  if (typeof timer.unref === 'function') timer.unref();
+  return timer;
+}
+
 function extractFirstJsonObject(text = '') {
   const src = String(text || '');
   const start = src.indexOf('{');
@@ -375,6 +411,7 @@ class BundledSmallLlmRuntime {
     this.lastPolicyError = '';
     this.lastFeedError = '';
     this.activeTasks = new Map();
+    this.taskQueues = new Map();
   }
 
   _log(message = '', meta = null) {
@@ -556,6 +593,26 @@ class BundledSmallLlmRuntime {
     this.activeTasks.delete(String(taskId || '').trim());
   }
 
+  async _runQueuedTask(taskType = '', runner = null) {
+    const queueKey = String(taskType || '').trim() || 'default';
+    const prior = this.taskQueues.get(queueKey) || Promise.resolve();
+    let release = null;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const next = prior.finally(() => gate);
+    this.taskQueues.set(queueKey, next);
+    await prior.catch(() => null);
+    try {
+      return await (typeof runner === 'function' ? runner() : null);
+    } finally {
+      release();
+      if (this.taskQueues.get(queueKey) === next) {
+        this.taskQueues.delete(queueKey);
+      }
+    }
+  }
+
   _validateNotePolicyPayload(payload = {}) {
     const src = (payload && typeof payload === 'object') ? payload : {};
     const noteMode = String(src.note_mode || '').trim();
@@ -666,15 +723,17 @@ class BundledSmallLlmRuntime {
         ];
       const child = spawn(availability.executable_path, args, {
         cwd: path.dirname(availability.executable_path) || availability.bundled_root,
+        detached: process.platform !== 'win32',
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       let stdout = '';
       let stderr = '';
       let settled = false;
+      let killTimer = null;
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        child.kill('SIGKILL');
+        killTimer = terminateChildProcess(child);
         this._log('task:timeout', {
           task_type: String(taskType || '').trim(),
           timeout_ms: timeoutMs,
@@ -693,6 +752,7 @@ class BundledSmallLlmRuntime {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
         this._log('task:error', {
           task_type: String(taskType || '').trim(),
           error: String((err && err.message) || err || 'spawn_failed'),
@@ -704,6 +764,7 @@ class BundledSmallLlmRuntime {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
         if (code !== 0) {
           this._log('task:nonzero_exit', {
             task_type: String(taskType || '').trim(),
@@ -766,45 +827,47 @@ class BundledSmallLlmRuntime {
     const manifest = this._loadManifest();
     const maxRetries = clampNumber(manifest.max_retries, 1, 10, DEFAULT_MAX_RETRIES);
     let lastError = null;
-    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
-      try {
-        const result = await this._runBundledTask(taskType, {
-          ...payload,
-          _attempt: attempt,
-        });
-        const normalizedPayload = typeof validateFn === 'function'
-          ? validateFn.call(this, result.payload)
-          : result.payload;
-        if (attempt > 1) {
-          this._log('task:retry_recovered', {
+    return this._runQueuedTask(taskType, async () => {
+      for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+        try {
+          const result = await this._runBundledTask(taskType, {
+            ...payload,
+            _attempt: attempt,
+          });
+          const normalizedPayload = typeof validateFn === 'function'
+            ? validateFn.call(this, result.payload)
+            : result.payload;
+          if (attempt > 1) {
+            this._log('task:retry_recovered', {
+              task_type: String(taskType || '').trim(),
+              attempt,
+              label: String(payload.title || payload.id || payload.url || '').trim(),
+            });
+          }
+          return {
+            ...result,
+            payload: normalizedPayload,
+            attempt,
+            attempts: attempt,
+          };
+        } catch (err) {
+          lastError = err;
+          const retryable = this._isRetryableTaskError(err);
+          const hasMore = attempt < maxRetries;
+          this._log('task:attempt_failed', {
             task_type: String(taskType || '').trim(),
             attempt,
+            max_attempts: maxRetries,
+            retryable,
+            error: String((err && err.message) || err || 'task_failed'),
             label: String(payload.title || payload.id || payload.url || '').trim(),
           });
+          if (!retryable || !hasMore) break;
+          await sleep(Math.min(750, 80 * attempt));
         }
-        return {
-          ...result,
-          payload: normalizedPayload,
-          attempt,
-          attempts: attempt,
-        };
-      } catch (err) {
-        lastError = err;
-        const retryable = this._isRetryableTaskError(err);
-        const hasMore = attempt < maxRetries;
-        this._log('task:attempt_failed', {
-          task_type: String(taskType || '').trim(),
-          attempt,
-          max_attempts: maxRetries,
-          retryable,
-          error: String((err && err.message) || err || 'task_failed'),
-          label: String(payload.title || payload.id || payload.url || '').trim(),
-        });
-        if (!retryable || !hasMore) break;
-        await sleep(Math.min(750, 80 * attempt));
       }
-    }
-    throw lastError || new Error('bundled llm task failed');
+      throw lastError || new Error('bundled llm task failed');
+    });
   }
 
   async classifyNotePolicy(note = {}) {

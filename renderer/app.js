@@ -254,6 +254,8 @@ const state = {
     loaded: false,
     refreshPending: false,
     feedRequestSeq: 0,
+    feedBackgroundPollTimer: null,
+    feedBackgroundPollAttempts: 0,
   },
 };
 
@@ -7405,6 +7407,37 @@ async function loadStatusFeedItems(options = {}) {
   renderStatusFeed();
 }
 
+function stopStatusFeedBackgroundPolling() {
+  if (state.dashboard.feedBackgroundPollTimer) {
+    clearTimeout(state.dashboard.feedBackgroundPollTimer);
+    state.dashboard.feedBackgroundPollTimer = null;
+  }
+  state.dashboard.feedBackgroundPollAttempts = 0;
+}
+
+function scheduleStatusFeedBackgroundPolling(expectedLastRefreshedAt = 0) {
+  stopStatusFeedBackgroundPolling();
+  const baseline = Number(expectedLastRefreshedAt || 0) || 0;
+  const poll = async () => {
+    state.dashboard.feedBackgroundPollTimer = null;
+    state.dashboard.feedBackgroundPollAttempts = Number(state.dashboard.feedBackgroundPollAttempts || 0) + 1;
+    try {
+      await loadStatusFeedItems({ refresh: false });
+    } catch (_) {
+      // noop
+    }
+    const latestRefresh = Number(state.dashboard.rssLastRefreshedAt || 0) || 0;
+    const hasFreshData = latestRefresh > baseline || (baseline <= 0 && Array.isArray(state.dashboard.rssItems) && state.dashboard.rssItems.length > 0);
+    if (hasFreshData || state.dashboard.feedBackgroundPollAttempts >= 8) {
+      stopStatusFeedBackgroundPolling();
+      renderStatusSurface();
+      return;
+    }
+    state.dashboard.feedBackgroundPollTimer = setTimeout(poll, 1500);
+  };
+  state.dashboard.feedBackgroundPollTimer = setTimeout(poll, 1500);
+}
+
 async function refreshStatusData(options = {}) {
   if (!api.dashboardGet || state.dashboard.refreshPending) return;
   state.dashboard.refreshPending = true;
@@ -7415,6 +7448,7 @@ async function refreshStatusData(options = {}) {
     const stateRes = await api.dashboardGet();
     if (stateRes && stateRes.ok && stateRes.state) {
       const dashboardState = stateRes.state || {};
+      const priorLastRefreshedAt = Number(state.dashboard.rssLastRefreshedAt || 0) || 0;
       state.dashboard.events = Array.isArray(dashboardState.events) ? dashboardState.events : [];
       state.dashboard.tasks = Array.isArray(dashboardState.tasks) ? dashboardState.tasks : [];
       state.dashboard.rssSources = Array.isArray(dashboardState.rss && dashboardState.rss.sources) ? dashboardState.rss.sources : [];
@@ -7424,6 +7458,11 @@ async function refreshStatusData(options = {}) {
       state.dashboard.rssItems = Array.isArray(stateRes.feed_items) ? stateRes.feed_items : [];
       if (!String(state.dashboard.calendarCursor || '').trim()) ensureDashboardCalendarCursor();
       state.dashboard.loaded = true;
+      if (stateRes.feed_refresh_in_flight) {
+        scheduleStatusFeedBackgroundPolling(priorLastRefreshedAt || Number(((dashboardState.rss || {}).last_refreshed_at) || 0));
+      } else {
+        stopStatusFeedBackgroundPolling();
+      }
     }
     if (api.hyperwebSocialStatus) {
       try {

@@ -6710,6 +6710,8 @@ async function computeBundledLlmTaskDiagnostics() {
   const job = bundledLlmRerunJob || {};
   const bootstrapState = String(bootstrapDiag.bootstrap_state || 'missing').trim() || 'missing';
   const bootstrapWorking = bootstrapState === 'downloading' || bootstrapState === 'extracting';
+  const runtimeWorking = Number(runtimeDiag.active_count || 0) > 0;
+  const runtimeCurrentTask = Array.isArray(runtimeDiag.active_tasks) ? runtimeDiag.active_tasks[0] : null;
   const activeProgress = job.running && Number(job.total || 0) > 0
     ? Math.round((Math.max(0, Number(job.completed || 0)) / Math.max(1, Number(job.total || 0))) * 100)
     : (totalCandidates > 0 ? Math.round((completedTasks / Math.max(1, totalCandidates)) * 100) : 100);
@@ -6718,12 +6720,12 @@ async function computeBundledLlmTaskDiagnostics() {
     : Math.max(0, Math.min(100, Number(activeProgress || 0) || 0));
   return {
     ...runtimeDiag,
-    state: (job.running || bootstrapWorking) ? 'working' : (bootstrapState === 'error' ? 'error' : 'idle'),
+    state: (job.running || bootstrapWorking || runtimeWorking) ? 'working' : (bootstrapState === 'error' ? 'error' : 'idle'),
     total_candidates: totalCandidates,
     pending_tasks: pendingTasks,
     completed_tasks: completedTasks,
     progress_percent: effectiveProgress,
-    current_label: String(job.current_label || bootstrapDiag.bootstrap_current_label || '').trim(),
+    current_label: String(job.current_label || bootstrapDiag.bootstrap_current_label || (runtimeCurrentTask && runtimeCurrentTask.label) || '').trim(),
     started_at: Number(job.started_at || 0) || 0,
     finished_at: Number(job.finished_at || 0) || 0,
     last_error: String(job.last_error || runtimeDiag.last_policy_error || runtimeDiag.last_feed_error || '').trim(),
@@ -23082,16 +23084,18 @@ ipcMain.handle('browser:mailStatus', async () => {
 
 ipcMain.handle('browser:dashboardGet', async () => {
   const store = getDashboardStore();
-  if (store.shouldRefreshFeeds()) {
-    await store.refreshFeeds({ force: true, limit: 80 }).catch(() => null);
-  }
   const stateRes = store.getState();
   const selectedTopic = String((((stateRes || {}).state || {}).filters || {}).selected_topic || 'all').trim().toLowerCase() || 'all';
   const feedRes = await store.listFeedItems({ topic: selectedTopic, limit: 80 });
+  const refreshMeta = store.shouldRefreshFeeds()
+    ? store.refreshFeedsInBackground({ force: true, limit: 80 })
+    : { ok: true, refresh_started: false, refresh_in_flight: store.isFeedRefreshInFlight() };
   return {
     ok: true,
     state: stateRes && stateRes.ok ? stateRes.state : { events: [], tasks: [], filters: { selected_topic: 'all' }, rss: { sources: [], topics: ['all'], last_refreshed_at: 0 } },
     feed_items: Array.isArray(feedRes && feedRes.items) ? feedRes.items : [],
+    feed_refresh_started: !!(refreshMeta && refreshMeta.refresh_started),
+    feed_refresh_in_flight: !!(refreshMeta && refreshMeta.refresh_in_flight),
   };
 });
 

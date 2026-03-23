@@ -11,6 +11,7 @@ const DEFAULT_TOPIC = 'all';
 const OTHER_TOPIC = 'other';
 const TOPIC_KEYS = ['politics', 'world', 'econ', 'tech', OTHER_TOPIC];
 const ENRICH_CONCURRENCY = 6;
+const SUMMARY_CONCURRENCY = 1;
 const MAX_PER_SOURCE = 24;
 const MAX_REFRESH_ITEMS = 240;
 const MAX_CONTENT_CHARS = 12_000;
@@ -447,6 +448,7 @@ function createDashboardStore(options = {}) {
   const filePath = path.join(userDataPath || process.cwd(), 'dashboard_state.json');
   const getEmbeddingConfig = typeof options.getEmbeddingConfig === 'function' ? options.getEmbeddingConfig : (() => ({}));
   const summarizeArticle = typeof options.summarizeArticle === 'function' ? options.summarizeArticle : null;
+  let refreshPromise = null;
 
   function readState() {
     try {
@@ -800,7 +802,7 @@ function createDashboardStore(options = {}) {
     };
   }
 
-  async function refreshFeeds(options = {}) {
+  async function runFeedRefresh(options = {}) {
     const force = !!options.force;
     const progress = typeof options.onProgress === 'function' ? options.onProgress : null;
     const discardExisting = !!options.discardExisting;
@@ -873,7 +875,7 @@ function createDashboardStore(options = {}) {
       label: enriched.length ? 'Summarizing feeds' : 'No articles to summarize',
     });
     let summarizedCompleted = 0;
-    const summarized = await mapWithConcurrency(enriched, ENRICH_CONCURRENCY, async (item) => {
+    const summarized = await mapWithConcurrency(enriched, SUMMARY_CONCURRENCY, async (item) => {
       const existing = discardExisting ? null : existingMap.get(`url:${canonicalizeUrl(item.url || '')}`) || null;
       const summaryPatch = await buildCleanSummary(item, existing);
       summarizedCompleted += 1;
@@ -920,6 +922,56 @@ function createDashboardStore(options = {}) {
       ...listing,
       message: errors.length ? errors.join(' | ') : '',
     };
+  }
+
+  function isFeedRefreshInFlight() {
+    return !!refreshPromise;
+  }
+
+  function refreshFeedsInBackground(options = {}) {
+    const force = !!options.force;
+    if (!force && !shouldRefreshFeeds()) {
+      return {
+        ok: true,
+        refresh_started: false,
+        refresh_in_flight: isFeedRefreshInFlight(),
+      };
+    }
+    if (!refreshPromise) {
+      refreshPromise = runFeedRefresh(options)
+        .catch(() => null)
+        .finally(() => {
+          refreshPromise = null;
+        });
+      return {
+        ok: true,
+        refresh_started: true,
+        refresh_in_flight: true,
+      };
+    }
+    return {
+      ok: true,
+      refresh_started: false,
+      refresh_in_flight: true,
+    };
+  }
+
+  async function refreshFeeds(options = {}) {
+    const force = !!options.force;
+    if (!force && !shouldRefreshFeeds()) {
+      return listFeedItems({ topic: options.topic, limit: options.limit, query: options.query });
+    }
+    if (refreshPromise) {
+      await refreshPromise.catch(() => null);
+      return listFeedItems({ topic: options.topic, limit: options.limit, query: options.query });
+    }
+    refreshPromise = runFeedRefresh(options)
+      .finally(() => {
+        refreshPromise = null;
+      });
+    const result = await refreshPromise.catch(() => null);
+    if (result && result.ok) return result;
+    return listFeedItems({ topic: options.topic, limit: options.limit, query: options.query });
   }
 
   async function rerunSummaries(options = {}) {
@@ -1061,7 +1113,9 @@ function createDashboardStore(options = {}) {
     getState,
     getSummaryBacklogStatus,
     resetFeedCache,
+    isFeedRefreshInFlight,
     shouldRefreshFeeds,
+    refreshFeedsInBackground,
     listFeedItems,
     refreshFeeds,
     rerunSummaries,
