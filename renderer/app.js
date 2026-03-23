@@ -1569,6 +1569,22 @@ function normalizeWhitespace(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function cleanNoteEvidenceSnippet(value = '', fallback = '') {
+  const text = normalizeWhitespace(value);
+  if (!text) return normalizeWhitespace(fallback);
+  if (
+    /\bplease click here if the page does not redirect automatically\b/i.test(text)
+    || /\bredirect automatically\b/i.test(text)
+    || /\benable javascript\b/i.test(text)
+    || /\bsign in to continue\b/i.test(text)
+    || /\bsubscribe to continue reading\b/i.test(text)
+    || /\bcookie policy\b/i.test(text)
+  ) {
+    return normalizeWhitespace(fallback);
+  }
+  return text;
+}
+
 function logRendererError(scope = '', err = null, extra = null) {
   const parts = [`[renderer-error] ${String(scope || 'renderer').trim() || 'renderer'}`];
   const message = String((err && err.message) || err || '').trim();
@@ -1853,6 +1869,10 @@ function getActiveNoteRegionForClaim(claim = {}) {
     const regionEnd = Number((region && region.end_offset) ?? -1);
     return start >= 0 && end > start && regionStart >= 0 && regionEnd > regionStart && end > regionStart && start < regionEnd;
   }) || null;
+}
+
+function getActiveNoteMode() {
+  return String((state.activeNote && state.activeNote.active_mode) || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
 }
 
 function buildProvisionalEvidenceFeed() {
@@ -2172,7 +2192,10 @@ function renderNoteEvidenceSourceRow(item = {}, row = {}, kind = 'support') {
   const source = citation && citation.source ? citation.source : {};
   const claimId = String((citation && citation.claim_id) || (Array.isArray(row && row.claim_ids) ? row.claim_ids[0] : '') || '').trim();
   const sourceUrl = String(source.url || '').trim();
-  const summary = normalizeWhitespace(String((citation && citation.passage_text) || (citation && citation.excerpt) || source.title || sourceUrl || ''));
+  const summary = cleanNoteEvidenceSnippet(
+    String((citation && citation.passage_text) || (citation && citation.excerpt) || ''),
+    String(source.title || sourceUrl || ''),
+  );
   const title = String(source.title || sourceUrl || 'Source').trim() || 'Source';
   const label = kind === 'contradiction' ? 'Contradicts' : (kind === 'context' ? 'Adds context' : 'Supports');
   return `
@@ -2264,6 +2287,7 @@ function renderNotesEvidenceRail() {
 function focusNoteEvidenceRegion(regionId = '', options = {}) {
   const targetId = String(regionId || '').trim();
   const targetClaimId = String((options && options.claimId) || '').trim();
+  const wasActive = targetId && targetId === String(state.activeEvidenceRegionId || '').trim();
   state.activeEvidenceRegionId = targetId;
   state.noteCitationPopover = {
     ...state.noteCitationPopover,
@@ -2279,7 +2303,7 @@ function focusNoteEvidenceRegion(regionId = '', options = {}) {
     void renderNotePreview();
   }
   renderNotesEvidenceRail();
-  if (!(options && options.scroll === false) && targetId) {
+  if (!(options && options.scroll === false) && targetId && !wasActive) {
     requestAnimationFrame(() => {
       document.querySelector(`[data-note-region-id="${CSS.escape(targetId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       document.querySelector(`[data-note-preview-region-id="${CSS.escape(targetId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -2432,7 +2456,7 @@ function renderNoteHighlightLayer() {
   const input = e('notes-input');
   const layer = e('notes-highlight-layer');
   if (!pane || !input || !layer) return;
-  if (!state.activeNote) {
+  if (!state.activeNote || getActiveNoteMode() === 'edit') {
     pane.classList.remove('marker-visualized');
     layer.innerHTML = '';
     return;

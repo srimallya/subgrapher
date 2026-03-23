@@ -404,3 +404,36 @@ test('pipeline distinguishes false, partial, and correct claims with determinist
   assert.ok(Array.isArray(falseResult.claims[0].rewrite_suggestions));
   assert.ok(Array.isArray(correctResult.claims[0].rewrite_suggestions));
 });
+
+test('note analysis filters redirect boilerplate passages and falls back to useful snippets', async () => {
+  const engine = createNoteAnalysisEngine({
+    webSearch: async () => ({
+      results: [{
+        title: 'Conflict report',
+        url: 'https://example.com/conflict-redirect',
+        snippet: 'Independent reporting says the conflict included missile strikes and casualties.',
+      }],
+    }),
+    fetchUrl: async () => ({
+      ok: true,
+      title: 'Conflict report',
+      markdown: 'Please click here if the page does not redirect automatically.',
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_boilerplate',
+    analysis_revision: 1,
+    body_markdown: 'Iran and the US exchanged strikes in the latest conflict.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.ok(result.passages.length >= 1);
+  assert.ok(result.passages.every((passage) => !/redirect automatically/i.test(String((passage && passage.passage_text) || ''))));
+  assert.ok(result.passages.some((passage) => /independent reporting says the conflict/i.test(String((passage && passage.passage_text) || ''))));
+});

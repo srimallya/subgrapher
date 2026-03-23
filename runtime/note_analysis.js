@@ -22,6 +22,14 @@ const CONTRADICTION_PATTERNS = [
 const HIGH_AUTHORITY_PATTERNS = [
   /(^|\/\/)(www\.)?(reuters|apnews|ap|axios|bbc|nytimes|washingtonpost|wsj|ft)\./i,
 ];
+const BOILERPLATE_PASSAGE_PATTERNS = [
+  /\bplease click here if the page does not redirect automatically\b/i,
+  /\bredirect automatically\b/i,
+  /\benable javascript\b/i,
+  /\bsign in to continue\b/i,
+  /\bsubscribe to continue reading\b/i,
+  /\bcookie policy\b/i,
+];
 
 const searchCache = new Map();
 const fetchCache = new Map();
@@ -32,6 +40,12 @@ function nowTs() {
 
 function normalizeWhitespace(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isBoilerplatePassage(text = '') {
+  const normalized = normalizeWhitespace(text);
+  if (!normalized) return true;
+  return BOILERPLATE_PASSAGE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 function escapeRegExp(value = '') {
@@ -158,7 +172,7 @@ function chunkText(text = '', size = PASSAGE_CHUNK_SIZE, overlap = PASSAGE_OVERL
   while (start < raw.length && out.length < MAX_PASSAGES_PER_SOURCE) {
     const end = Math.min(raw.length, start + size);
     const chunk = raw.slice(start, end).trim();
-    if (chunk) out.push({ text: chunk, start, end });
+    if (chunk && !isBoilerplatePassage(chunk)) out.push({ text: chunk, start, end });
     if (end >= raw.length) break;
     start = Math.max(start + 1, end - overlap);
   }
@@ -916,7 +930,7 @@ function createNoteAnalysisEngine(options = {}) {
     function addSnippetFallback(item = {}) {
       const canonical = normalizeUrl(item.url);
       const snippetText = normalizeWhitespace(`${String(item.title || '')}. ${String(item.snippet || '')}`);
-      if (!canonical || !snippetText) return;
+      if (!canonical || !snippetText || isBoilerplatePassage(snippetText)) return;
       const source = ensureSource({
         source_kind: String(item.source_kind || 'web_search'),
         source_query: String(item.source_query || ''),
@@ -982,6 +996,9 @@ function createNoteAnalysisEngine(options = {}) {
           fetched_at: Number(source.fetched_at || startedAt),
         });
       });
+      if (!passages.some((passage) => String((passage && passage.source_id) || '') === String(source.id || ''))) {
+        addSnippetFallback(item);
+      }
     }
 
     const explicitFetchItems = explicitUrls.slice(0, MAX_FETCHES_PER_NOTE).map((item) => ({
