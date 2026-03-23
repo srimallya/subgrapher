@@ -576,15 +576,40 @@ function createDashboardStore(options = {}) {
     return !last || !items.length || (nowTs() - last) >= FEED_REFRESH_INTERVAL_MS;
   }
 
-  function getLookupMap(items = []) {
-    const map = new Map();
-    (Array.isArray(items) ? items : []).forEach((item) => {
+function getLookupMap(items = []) {
+  const map = new Map();
+  (Array.isArray(items) ? items : []).forEach((item) => {
       getItemLookupKeys(item).forEach((key) => {
         map.set(key, item);
       });
+  });
+  return map;
+}
+
+function mergeFeedItems(existingItems = [], incomingItems = []) {
+  const mergedMap = new Map();
+  (Array.isArray(existingItems) ? existingItems : []).forEach((item) => {
+    getItemLookupKeys(item).forEach((key) => {
+      if (!mergedMap.has(key)) mergedMap.set(key, item);
     });
-    return map;
-  }
+  });
+  (Array.isArray(incomingItems) ? incomingItems : []).forEach((item) => {
+    getItemLookupKeys(item).forEach((key) => {
+      mergedMap.set(key, item);
+    });
+  });
+  const unique = new Map();
+  mergedMap.forEach((item) => {
+    const normalized = normalizeStoredFeedItem(item);
+    const key = canonicalizeUrl(normalized.url || '') || `id:${normalized.id}`;
+    const existing = unique.get(key);
+    if (!existing || Number(normalized.published_at || 0) > Number(existing.published_at || 0)) {
+      unique.set(key, normalized);
+    }
+  });
+  return pruneFeedItems(Array.from(unique.values()))
+    .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0));
+}
 
   async function classifyItems(items = []) {
     const list = (Array.isArray(items) ? items : []).map((item) => normalizeStoredFeedItem(item));
@@ -868,6 +893,11 @@ function createDashboardStore(options = {}) {
       });
       return result;
     });
+    state.rss = {
+      items: mergeFeedItems(existingItems, enriched),
+      last_refreshed_at: nowTs(),
+    };
+    writeState(state);
     emitProgress({
       stage: 'summarizing_articles',
       total: enriched.length,
@@ -891,29 +921,8 @@ function createDashboardStore(options = {}) {
       });
     });
     const classified = await classifyItems(summarized);
-    const mergedMap = new Map();
-    existingItems.forEach((item) => {
-      getItemLookupKeys(item).forEach((key) => {
-        if (!mergedMap.has(key)) mergedMap.set(key, item);
-      });
-    });
-    classified.forEach((item) => {
-      getItemLookupKeys(item).forEach((key) => {
-        mergedMap.set(key, item);
-      });
-    });
-    const unique = new Map();
-    mergedMap.forEach((item) => {
-      const normalized = normalizeStoredFeedItem(item);
-      const key = canonicalizeUrl(normalized.url || '') || `id:${normalized.id}`;
-      const existing = unique.get(key);
-      if (!existing || Number(normalized.published_at || 0) > Number(existing.published_at || 0)) {
-        unique.set(key, normalized);
-      }
-    });
     state.rss = {
-      items: pruneFeedItems(Array.from(unique.values()))
-        .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0)),
+      items: mergeFeedItems(existingItems, classified),
       last_refreshed_at: nowTs(),
     };
     writeState(state);
