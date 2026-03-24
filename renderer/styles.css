@@ -2640,6 +2640,17 @@ body.workspace-status-mode .nav-bar-main input {
   line-height: 1.35;
 }
 
+.settings-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+}
+
 .settings-toggle input[type="checkbox"] {
   width: 16px;
   height: 16px;

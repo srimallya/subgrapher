@@ -117,6 +117,9 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'reference_ranking_enabled',
   'lumino_last_provider',
   'lumino_last_model',
+  'automated_tasks_backend',
+  'automated_tasks_provider',
+  'automated_tasks_model',
   'hyperweb_enabled',
   'hyperweb_display_name',
   'crawler_mode',
@@ -220,6 +223,7 @@ const RAG_EMBEDDING_SOURCE_DEFAULT = 'lmstudio';
 const RAG_EMBEDDING_MODEL_DEFAULT = 'text-embedding-nomic-embed-text-v1.5';
 const RAG_INBUILT_EMBEDDING_MODEL = 'hybrid:local-hash-embedding-v1';
 const RAG_TOP_K_DEFAULT = 8;
+const AUTOMATED_TASKS_BACKEND_DEFAULT = 'bundled';
 const PATH_B_GLOBAL_TOP_K = 12;
 const PATH_B_LINK_VERIFY_THRESHOLD = 0.42;
 const TELEGRAM_SECRET_REF_PREFIX = 'telegram_bot_token';
@@ -300,6 +304,15 @@ let bundledLlmRerunJob = {
   started_at: 0,
   finished_at: 0,
   last_error: '',
+};
+let automatedTaskRuntimeStatus = {
+  last_backend: AUTOMATED_TASKS_BACKEND_DEFAULT,
+  last_provider: '',
+  last_model: '',
+  last_task_type: '',
+  last_error: '',
+  last_error_at: 0,
+  last_success_at: 0,
 };
 const pathBMetrics = {
   pathb_reuse_count: 0,
@@ -5510,6 +5523,9 @@ function getDefaultSettings() {
     agent_mode_v1_enabled: false,
     lumino_last_provider: 'openai',
     lumino_last_model: '',
+    automated_tasks_backend: AUTOMATED_TASKS_BACKEND_DEFAULT,
+    automated_tasks_provider: 'openai',
+    automated_tasks_model: '',
     provider_key_profiles: defaultProviderKeyProfiles(),
     history_enabled: true,
     history_max_entries: HISTORY_DEFAULT_MAX_ENTRIES,
@@ -5549,6 +5565,9 @@ function readSettings() {
     const engine = String((parsed && parsed.default_search_engine) || defaults.default_search_engine).trim().toLowerCase();
     const savedProvider = String((parsed && parsed.lumino_last_provider) || defaults.lumino_last_provider).trim().toLowerCase();
     const savedModel = String((parsed && parsed.lumino_last_model) || defaults.lumino_last_model).trim();
+    const automatedTasksBackend = String((parsed && parsed.automated_tasks_backend) || defaults.automated_tasks_backend).trim().toLowerCase();
+    const automatedTasksProvider = String((parsed && parsed.automated_tasks_provider) || defaults.automated_tasks_provider).trim().toLowerCase();
+    const automatedTasksModel = String((parsed && parsed.automated_tasks_model) || defaults.automated_tasks_model).trim();
     const providerKeyProfiles = normalizeProviderKeyProfiles(parsed && parsed.provider_key_profiles);
     const telegramAllowedChatIds = Array.isArray(parsed && parsed.telegram_allowed_chat_ids)
       ? parsed.telegram_allowed_chat_ids.map((item) => String(item || '').trim()).filter(Boolean)
@@ -5596,6 +5615,9 @@ function readSettings() {
       agent_mode_v1_enabled: !!(parsed && parsed.agent_mode_v1_enabled),
       lumino_last_provider: PROVIDERS.includes(savedProvider) ? savedProvider : defaults.lumino_last_provider,
       lumino_last_model: savedModel,
+      automated_tasks_backend: automatedTasksBackend === 'provider' ? 'provider' : AUTOMATED_TASKS_BACKEND_DEFAULT,
+      automated_tasks_provider: PROVIDERS.includes(automatedTasksProvider) ? automatedTasksProvider : defaults.automated_tasks_provider,
+      automated_tasks_model: automatedTasksModel,
       provider_key_profiles: providerKeyProfiles,
       history_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'history_enabled')
         ? !!parsed.history_enabled
@@ -5671,6 +5693,21 @@ function writeSettings(next) {
     Object.prototype.hasOwnProperty.call(input, 'lumino_last_model')
       ? input.lumino_last_model
       : current.lumino_last_model
+  ).trim();
+  const requestedAutomatedTasksBackend = String(
+    Object.prototype.hasOwnProperty.call(input, 'automated_tasks_backend')
+      ? input.automated_tasks_backend
+      : current.automated_tasks_backend
+  ).trim().toLowerCase();
+  const requestedAutomatedTasksProvider = String(
+    Object.prototype.hasOwnProperty.call(input, 'automated_tasks_provider')
+      ? input.automated_tasks_provider
+      : current.automated_tasks_provider
+  ).trim().toLowerCase();
+  const requestedAutomatedTasksModel = String(
+    Object.prototype.hasOwnProperty.call(input, 'automated_tasks_model')
+      ? input.automated_tasks_model
+      : current.automated_tasks_model
   ).trim();
   const requestedHistoryMaxEntries = Number(
     Object.prototype.hasOwnProperty.call(input, 'history_max_entries')
@@ -5801,6 +5838,9 @@ function writeSettings(next) {
       : !!current.agent_mode_v1_enabled,
     lumino_last_provider: PROVIDERS.includes(requestedLastProvider) ? requestedLastProvider : 'openai',
     lumino_last_model: requestedLastModel,
+    automated_tasks_backend: requestedAutomatedTasksBackend === 'provider' ? 'provider' : AUTOMATED_TASKS_BACKEND_DEFAULT,
+    automated_tasks_provider: PROVIDERS.includes(requestedAutomatedTasksProvider) ? requestedAutomatedTasksProvider : 'openai',
+    automated_tasks_model: requestedAutomatedTasksModel,
     provider_key_profiles: requestedProviderKeyProfiles,
     history_enabled: Object.prototype.hasOwnProperty.call(input, 'history_enabled')
       ? !!input.history_enabled
@@ -6390,7 +6430,7 @@ function getDashboardStore() {
           model: String((ragEmbedding && ragEmbedding.model) || '').trim() || RAG_EMBEDDING_MODEL_DEFAULT,
         };
       },
-      summarizeArticle: async (article = {}) => getBundledSmallLlmRuntime().summarizeFeedArticle(article),
+      summarizeArticle: async (article = {}) => summarizeFeedArticleWithSelectedBackend(article, readSettings()),
     });
   }
   return dashboardStore;
@@ -6450,7 +6490,7 @@ function getNoteAnalysisEngine() {
         timeoutMs: 12_000,
       }),
       temporalGraphScorer: computeTemporalGraphScoresWithPython,
-      classifyNotePolicy: async (note = {}) => getBundledSmallLlmRuntime().classifyNotePolicy(note),
+      classifyNotePolicy: async (note = {}) => classifyNotePolicyWithSelectedBackend(note, readSettings()),
       makeId,
     });
   }
@@ -6687,6 +6727,8 @@ async function ensureFreshNoteAnalysis(noteId = '') {
 }
 
 async function computeBundledLlmTaskDiagnostics() {
+  const settings = readSettings();
+  const routing = resolveAutomatedTaskRouting(settings);
   const runtimeDiag = getBundledSmallLlmRuntime().diagnostics();
   const bootstrapDiag = getBundledLlmBootstrapManager().currentDiagnostics();
   const notesStore = getNotesStore();
@@ -6720,7 +6762,12 @@ async function computeBundledLlmTaskDiagnostics() {
     : Math.max(0, Math.min(100, Number(activeProgress || 0) || 0));
   return {
     ...runtimeDiag,
-    state: (job.running || bootstrapWorking || runtimeWorking) ? 'working' : (bootstrapState === 'error' ? 'error' : 'idle'),
+    state: (job.running || bootstrapWorking || runtimeWorking)
+      ? 'working'
+      : ((routing.backend === 'bundled' && bootstrapState === 'error') ? 'error' : 'idle'),
+    automated_tasks_backend: routing.backend,
+    automated_tasks_provider: routing.provider,
+    automated_tasks_model: routing.model,
     total_candidates: totalCandidates,
     pending_tasks: pendingTasks,
     completed_tasks: completedTasks,
@@ -6728,7 +6775,11 @@ async function computeBundledLlmTaskDiagnostics() {
     current_label: String(job.current_label || bootstrapDiag.bootstrap_current_label || (runtimeCurrentTask && runtimeCurrentTask.label) || '').trim(),
     started_at: Number(job.started_at || 0) || 0,
     finished_at: Number(job.finished_at || 0) || 0,
-    last_error: String(job.last_error || runtimeDiag.last_policy_error || runtimeDiag.last_feed_error || '').trim(),
+    last_error: String(job.last_error || automatedTaskRuntimeStatus.last_error || runtimeDiag.last_policy_error || runtimeDiag.last_feed_error || '').trim(),
+    provider_last_error: String(automatedTaskRuntimeStatus.last_error || '').trim(),
+    provider_last_error_at: Number(automatedTaskRuntimeStatus.last_error_at || 0) || 0,
+    provider_last_success_at: Number(automatedTaskRuntimeStatus.last_success_at || 0) || 0,
+    provider_last_task_type: String(automatedTaskRuntimeStatus.last_task_type || '').trim(),
     bootstrap_state: bootstrapState,
     bootstrap_progress_percent: Math.max(0, Math.min(100, Number(bootstrapDiag.bootstrap_progress_percent || 0) || 0)),
     bootstrap_current_label: String(bootstrapDiag.bootstrap_current_label || '').trim(),
@@ -6767,22 +6818,29 @@ async function processBundledLlmBacklog(options = {}) {
   };
   const forceReset = !!(options && options.forceReset);
   const trigger = String((options && options.trigger) || 'manual').trim() || 'manual';
+  const settings = readSettings();
+  const routing = resolveAutomatedTaskRouting(settings);
   safeMainLog('log', '[bundled-llm] rerun:start', {
     force_reset: forceReset,
     trigger,
+    backend: routing.backend,
+    provider: routing.provider,
+    model: routing.model,
   });
   try {
-    const bootstrapRes = await ensureBundledLlmAssets({ force: false });
-    if (!bootstrapRes || String(bootstrapRes.bootstrap_state || '').trim() !== 'ready') {
-      bundledLlmRerunJob.running = false;
-      bundledLlmRerunJob.finished_at = nowTs();
-      bundledLlmRerunJob.current_label = String((bootstrapRes && bootstrapRes.bootstrap_current_label) || '').trim();
-      bundledLlmRerunJob.last_error = String((bootstrapRes && bootstrapRes.bootstrap_error) || 'bundled_llm_setup_incomplete').trim();
-      return {
-        ok: false,
-        message: bundledLlmRerunJob.last_error || 'Bundled LLM setup is still in progress.',
-        diagnostics: await computeBundledLlmTaskDiagnostics(),
-      };
+    if (routing.backend === 'bundled') {
+      const bootstrapRes = await ensureBundledLlmAssets({ force: false });
+      if (!bootstrapRes || String(bootstrapRes.bootstrap_state || '').trim() !== 'ready') {
+        bundledLlmRerunJob.running = false;
+        bundledLlmRerunJob.finished_at = nowTs();
+        bundledLlmRerunJob.current_label = String((bootstrapRes && bootstrapRes.bootstrap_current_label) || '').trim();
+        bundledLlmRerunJob.last_error = String((bootstrapRes && bootstrapRes.bootstrap_error) || 'bundled_llm_setup_incomplete').trim();
+        return {
+          ok: false,
+          message: bundledLlmRerunJob.last_error || 'Bundled LLM setup is still in progress.',
+          diagnostics: await computeBundledLlmTaskDiagnostics(),
+        };
+      }
     }
     const notesStore = getNotesStore();
     const listRes = await notesStore.listNotes();
@@ -7063,6 +7121,308 @@ function resolveProviderRuntimeCredentials(provider, settings = readSettings(), 
     key_id: String(keyRes.key_id || ''),
     base_url: '',
   };
+}
+
+function normalizeInlineText(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function extractFirstJsonObject(text = '') {
+  const src = String(text || '');
+  const start = src.indexOf('{');
+  if (start < 0) throw new Error('provider response did not contain JSON');
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error('provider response returned incomplete JSON');
+}
+
+function notePolicyFallbackForFailure(note = {}, reason = '', routing = {}) {
+  const title = normalizeInlineText(note && note.title);
+  const body = String((note && note.body_markdown) || '');
+  const text = `${title}\n${body}`;
+  const hasLiveCue = /\b(today|latest|current|ongoing|breaking|now)\b/i.test(text);
+  return {
+    ok: true,
+    note_mode: hasLiveCue ? 'live_update' : 'background_brief',
+    freshness_bias: hasLiveCue ? 'high' : 'medium',
+    source_mix: hasLiveCue ? 'latest_news' : 'mixed',
+    contradiction_scan: true,
+    result_budget: 5,
+    staleness_ttl_minutes: hasLiveCue ? 120 : 1440,
+    prefer_recent_window_days: hasLiveCue ? 7 : 14,
+    analysis_source: 'fallback',
+    analysis_detail: 'provider_model_error',
+    fallback_reason: String(reason || 'automated_task_provider_failed').trim(),
+    classified_at: nowTs(),
+    model_id: String((routing && routing.model) || '').trim(),
+    model_name: String((routing && routing.model) || '').trim(),
+    provider: String((routing && routing.provider) || '').trim(),
+  };
+}
+
+function validateProviderNotePolicyPayload(payload = {}) {
+  const src = (payload && typeof payload === 'object') ? payload : {};
+  const noteMode = String(src.note_mode || '').trim();
+  const freshnessBias = String(src.freshness_bias || '').trim();
+  const sourceMix = String(src.source_mix || '').trim();
+  const contradictionScan = !!src.contradiction_scan;
+  const resultBudget = Math.max(3, Math.min(10, Number(src.result_budget || 5) || 5));
+  const stalenessTtlMinutes = Math.max(30, Math.min(20160, Number(src.staleness_ttl_minutes || 1440) || 1440));
+  const preferRecentWindowDays = Math.max(1, Math.min(3650, Number(src.prefer_recent_window_days || 14) || 14));
+  if (!['live_update', 'background_brief', 'historical_summary', 'analysis_opinion', 'mixed'].includes(noteMode)) {
+    throw new Error(`invalid note_mode: ${noteMode || '[empty]'}`);
+  }
+  if (!['low', 'medium', 'high'].includes(freshnessBias)) {
+    throw new Error(`invalid freshness_bias: ${freshnessBias || '[empty]'}`);
+  }
+  if (!['latest_news', 'official_sources', 'reference_background', 'mixed'].includes(sourceMix)) {
+    throw new Error(`invalid source_mix: ${sourceMix || '[empty]'}`);
+  }
+  return {
+    note_mode: noteMode,
+    freshness_bias: freshnessBias,
+    source_mix: sourceMix,
+    contradiction_scan: contradictionScan,
+    result_budget: resultBudget,
+    staleness_ttl_minutes: stalenessTtlMinutes,
+    prefer_recent_window_days: preferRecentWindowDays,
+  };
+}
+
+function validateProviderFeedSummaryPayload(payload = {}) {
+  const src = (payload && typeof payload === 'object') ? payload : {};
+  const summary = String(src.summary || '').trim();
+  const excerpt = String(src.excerpt || '').trim();
+  const contentQuality = String(src.content_quality || '').trim();
+  if (!summary) throw new Error('missing summary');
+  if (!['clean', 'noisy', 'fragmented'].includes(contentQuality)) {
+    throw new Error(`invalid content_quality: ${contentQuality || '[empty]'}`);
+  }
+  return {
+    summary,
+    excerpt: excerpt || summary.slice(0, 220).trim(),
+    entities: Array.isArray(src.entities) ? src.entities.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12) : [],
+    topics: Array.isArray(src.topics) ? src.topics.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean).slice(0, 8) : [],
+    content_quality: contentQuality,
+  };
+}
+
+function buildProviderNotePolicyPrompt(note = {}) {
+  const title = String((note && note.title) || '').trim().slice(0, 240);
+  const body = String((note && note.body_markdown) || '').slice(0, 6000);
+  return [
+    'You are Subgrapher automated note policy classification.',
+    'Read the note and return exactly one JSON object.',
+    'No prose. No markdown. No code fences.',
+    'Choose exactly one note_mode from: live_update, background_brief, historical_summary, analysis_opinion, mixed.',
+    'Choose exactly one freshness_bias from: low, medium, high.',
+    'Choose exactly one source_mix from: latest_news, official_sources, reference_background, mixed.',
+    'Set contradiction_scan as true or false.',
+    'Set result_budget between 3 and 10.',
+    'Set staleness_ttl_minutes between 30 and 20160.',
+    'Set prefer_recent_window_days between 1 and 3650.',
+    '{"note_mode":"","freshness_bias":"","source_mix":"","contradiction_scan":true,"result_budget":5,"staleness_ttl_minutes":1440,"prefer_recent_window_days":14}',
+    '',
+    `Title: ${title || '[untitled]'}`,
+    'Body:',
+    body || '[empty]',
+  ].join('\n');
+}
+
+function buildProviderFeedSummaryPrompt(article = {}) {
+  const title = String((article && article.title) || '').trim().slice(0, 240);
+  const sourceName = String((article && article.source_name) || '').trim().slice(0, 160);
+  const url = String((article && article.url) || '').trim().slice(0, 400);
+  const text = String((article && (article.raw_content_text || article.content_text)) || '').slice(0, 9000);
+  return [
+    'You are Subgrapher automated RSS feed summarisation.',
+    'Read the fetched article text and return exactly one JSON object.',
+    'No prose. No markdown. No code fences.',
+    'Remove scraper noise, repeated navigation, subscribe prompts, and site chrome.',
+    'Write the gist in 5 to 10 factual sentences.',
+    'Write excerpt under 220 characters.',
+    'Return entities as a short list of names.',
+    'Return topics as a short list of lowercase tags.',
+    'Choose content_quality from: clean, noisy, fragmented.',
+    '{"summary":"","excerpt":"","entities":[],"topics":[],"content_quality":"clean"}',
+    '',
+    `Title: ${title || '[untitled]'}`,
+    `Source: ${sourceName || '[unknown]'}`,
+    `URL: ${url || '[unknown]'}`,
+    'Raw article text:',
+    text || '[empty]',
+  ].join('\n');
+}
+
+function resolveAutomatedTaskRouting(settings = readSettings()) {
+  const src = (settings && typeof settings === 'object') ? settings : {};
+  const backend = String(src.automated_tasks_backend || AUTOMATED_TASKS_BACKEND_DEFAULT).trim().toLowerCase() === 'provider'
+    ? 'provider'
+    : AUTOMATED_TASKS_BACKEND_DEFAULT;
+  const preferredProvider = String(
+    src.automated_tasks_provider
+    || src.lumino_last_provider
+    || 'openai'
+  ).trim().toLowerCase();
+  const provider = PROVIDERS.includes(preferredProvider) ? preferredProvider : 'openai';
+  const model = String(
+    src.automated_tasks_model
+    || (backend === 'provider' ? (src.lumino_last_model || '') : '')
+    || (provider === 'lmstudio' ? src.lmstudio_default_model : '')
+    || PROVIDER_SUMMARY_MODEL_FALLBACK[provider]
+    || ''
+  ).trim();
+  return {
+    backend,
+    provider,
+    model,
+  };
+}
+
+function recordAutomatedTaskSuccess(taskType = '', routing = {}) {
+  automatedTaskRuntimeStatus = {
+    ...automatedTaskRuntimeStatus,
+    last_backend: String((routing && routing.backend) || automatedTaskRuntimeStatus.last_backend || AUTOMATED_TASKS_BACKEND_DEFAULT).trim(),
+    last_provider: String((routing && routing.provider) || automatedTaskRuntimeStatus.last_provider || '').trim(),
+    last_model: String((routing && routing.model) || automatedTaskRuntimeStatus.last_model || '').trim(),
+    last_task_type: String(taskType || '').trim(),
+    last_error: '',
+    last_success_at: nowTs(),
+  };
+}
+
+function recordAutomatedTaskError(taskType = '', routing = {}, error) {
+  automatedTaskRuntimeStatus = {
+    ...automatedTaskRuntimeStatus,
+    last_backend: String((routing && routing.backend) || automatedTaskRuntimeStatus.last_backend || AUTOMATED_TASKS_BACKEND_DEFAULT).trim(),
+    last_provider: String((routing && routing.provider) || automatedTaskRuntimeStatus.last_provider || '').trim(),
+    last_model: String((routing && routing.model) || automatedTaskRuntimeStatus.last_model || '').trim(),
+    last_task_type: String(taskType || '').trim(),
+    last_error: String((error && error.message) || error || 'automated_task_failed').trim(),
+    last_error_at: nowTs(),
+  };
+}
+
+async function runAutomatedTaskProviderCall(taskType = '', userPrompt = '', settings = readSettings()) {
+  const routing = resolveAutomatedTaskRouting(settings);
+  if (routing.backend !== 'provider') {
+    return { ok: false, message: 'Automated tasks are not configured to use a provider.', routing };
+  }
+  if (!routing.model) {
+    return { ok: false, message: 'Automated task model is not configured.', routing };
+  }
+  const creds = resolveProviderRuntimeCredentials(routing.provider, settings);
+  if (!creds || !creds.ok) {
+    return { ok: false, message: (creds && creds.message) || 'Provider credentials are unavailable.', routing };
+  }
+  try {
+    const res = await chatWithProvider({
+      provider: routing.provider,
+      model: routing.model,
+      apiKey: String(creds.apiKey || ''),
+      baseUrl: String(creds.base_url || ''),
+      systemPrompt: 'Return only valid JSON matching the requested schema.',
+      userPrompt,
+    }, { timeoutMs: 60_000 });
+    const parsed = JSON.parse(extractFirstJsonObject(String((res && res.text) || '').trim()));
+    recordAutomatedTaskSuccess(taskType, routing);
+    return { ok: true, payload: parsed, routing };
+  } catch (err) {
+    recordAutomatedTaskError(taskType, routing, err);
+    return {
+      ok: false,
+      message: String((err && err.message) || 'Provider automated task failed.').trim(),
+      routing,
+    };
+  }
+}
+
+async function classifyNotePolicyWithSelectedBackend(note = {}, settings = readSettings()) {
+  const routing = resolveAutomatedTaskRouting(settings);
+  if (routing.backend !== 'provider') {
+    return getBundledSmallLlmRuntime().classifyNotePolicy(note);
+  }
+  const providerRes = await runAutomatedTaskProviderCall('note_policy_classification', buildProviderNotePolicyPrompt(note), settings);
+  if (!providerRes || providerRes.ok === false) {
+    return notePolicyFallbackForFailure(note, providerRes && providerRes.message, providerRes && providerRes.routing);
+  }
+  try {
+    const payload = validateProviderNotePolicyPayload(providerRes.payload);
+    return {
+      ok: true,
+      ...payload,
+      analysis_source: 'llm',
+      analysis_detail: 'provider_model',
+      fallback_reason: '',
+      classified_at: nowTs(),
+      model_id: String((providerRes.routing && providerRes.routing.model) || '').trim(),
+      model_name: String((providerRes.routing && providerRes.routing.model) || '').trim(),
+      provider: String((providerRes.routing && providerRes.routing.provider) || '').trim(),
+    };
+  } catch (err) {
+    recordAutomatedTaskError('note_policy_classification', providerRes.routing, err);
+    return notePolicyFallbackForFailure(note, err, providerRes.routing);
+  }
+}
+
+async function summarizeFeedArticleWithSelectedBackend(article = {}, settings = readSettings()) {
+  const routing = resolveAutomatedTaskRouting(settings);
+  if (routing.backend !== 'provider') {
+    return getBundledSmallLlmRuntime().summarizeFeedArticle(article);
+  }
+  const providerRes = await runAutomatedTaskProviderCall('rss_feed_summarisation', buildProviderFeedSummaryPrompt(article), settings);
+  if (!providerRes || providerRes.ok === false) {
+    return {
+      ok: false,
+      message: (providerRes && providerRes.message) || 'Provider feed summarisation failed.',
+      analysis_source: 'fallback',
+      analysis_detail: 'provider_model_error',
+      model_id: String((providerRes && providerRes.routing && providerRes.routing.model) || '').trim(),
+      provider: String((providerRes && providerRes.routing && providerRes.routing.provider) || '').trim(),
+    };
+  }
+  try {
+    const payload = validateProviderFeedSummaryPayload(providerRes.payload);
+    return {
+      ok: true,
+      ...payload,
+      generated_at: nowTs(),
+      analysis_source: 'llm',
+      analysis_detail: 'provider_model',
+      model_id: String((providerRes.routing && providerRes.routing.model) || '').trim(),
+      model_name: String((providerRes.routing && providerRes.routing.model) || '').trim(),
+      provider: String((providerRes.routing && providerRes.routing.provider) || '').trim(),
+    };
+  } catch (err) {
+    recordAutomatedTaskError('rss_feed_summarisation', providerRes.routing, err);
+    return {
+      ok: false,
+      message: String((err && err.message) || 'Provider feed summarisation failed.').trim(),
+      analysis_source: 'fallback',
+      analysis_detail: 'provider_model_error',
+      model_id: String((providerRes.routing && providerRes.routing.model) || '').trim(),
+      provider: String((providerRes.routing && providerRes.routing.provider) || '').trim(),
+    };
+  }
 }
 
 function decodeHtmlEntities(text = '') {

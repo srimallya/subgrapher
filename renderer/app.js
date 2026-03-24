@@ -184,6 +184,7 @@ const state = {
   lmstudioTokenConfigured: null,
   orchestratorWebKeyConfigured: null,
   settingsLmstudioModels: [],
+  settingsAutomatedTaskModels: [],
   settingsAbstractionStatus: null,
   settingsRagStatus: null,
   historyEntries: [],
@@ -12879,6 +12880,34 @@ function renderSettingsLmstudioModelSelect(selectId, selectedValue = '') {
   }
 }
 
+function renderSettingsAutomatedTaskModelSelect(selectedValue = '') {
+  const select = e('settings-automated-tasks-model');
+  if (!select) return;
+  const models = Array.isArray(state.settingsAutomatedTaskModels) ? state.settingsAutomatedTaskModels.filter(Boolean) : [];
+  const uniqueModels = Array.from(new Set(models));
+  const preferred = String(selectedValue || '').trim();
+  if (!uniqueModels.length) {
+    if (preferred) {
+      select.innerHTML = `<option value="${escapeHtml(preferred)}">${escapeHtml(preferred)} (saved)</option>`;
+      select.value = preferred;
+    } else {
+      select.innerHTML = '<option value="">No models loaded</option>';
+      select.value = '';
+    }
+    return;
+  }
+  let options = uniqueModels.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('');
+  if (preferred && !uniqueModels.includes(preferred)) {
+    options = `<option value="${escapeHtml(preferred)}">${escapeHtml(preferred)} (saved)</option>${options}`;
+  }
+  select.innerHTML = options;
+  if (preferred) {
+    select.value = preferred;
+  } else {
+    select.value = uniqueModels[0];
+  }
+}
+
 function renderSettingsAbstractionStatus() {
   const node = e('settings-abstraction-status');
   if (!node) return;
@@ -13010,6 +13039,9 @@ function normalizeSettingsDraft(raw = {}) {
     reference_ranking_enabled: !!src.reference_ranking_enabled,
     lumino_last_provider: String(src.lumino_last_provider || 'openai').trim().toLowerCase(),
     lumino_last_model: String(src.lumino_last_model || '').trim(),
+    automated_tasks_backend: String(src.automated_tasks_backend || 'bundled').trim().toLowerCase() === 'provider' ? 'provider' : 'bundled',
+    automated_tasks_provider: String(src.automated_tasks_provider || 'openai').trim().toLowerCase(),
+    automated_tasks_model: String(src.automated_tasks_model || '').trim(),
     lmstudio_base_url: String(src.lmstudio_base_url || 'http://127.0.0.1:1234').trim(),
     lmstudio_default_model: String(src.lmstudio_default_model || '').trim(),
     orchestrator_web_provider: String(src.orchestrator_web_provider || 'ddg').trim().toLowerCase(),
@@ -13050,6 +13082,11 @@ function validateSettingsDraft(draft = {}) {
   const errors = {};
   if (!['ddg', 'google', 'bing'].includes(d.default_search_engine)) errors.default_search_engine = 'Invalid search engine.';
   if (!PROVIDERS.includes(d.lumino_last_provider)) errors.lumino_last_provider = 'Unsupported provider.';
+  if (!['bundled', 'provider'].includes(d.automated_tasks_backend)) errors.automated_tasks_backend = 'Invalid automated task backend.';
+  if (!PROVIDERS.includes(d.automated_tasks_provider)) errors.automated_tasks_provider = 'Unsupported automated task provider.';
+  if (d.automated_tasks_backend === 'provider' && !String(d.automated_tasks_model || '').trim()) {
+    errors.automated_tasks_model = 'Model is required when automated tasks use a provider.';
+  }
   if (!/^https?:\/\//i.test(d.lmstudio_base_url || '')) errors.lmstudio_base_url = 'LM Studio URL must start with http:// or https://';
   if (!['ddg', 'serpapi'].includes(d.orchestrator_web_provider)) errors.orchestrator_web_provider = 'Invalid web provider.';
   if (d.abstraction_enabled && !String(d.abstraction_model || d.image_analysis_model || '').trim()) {
@@ -13092,7 +13129,9 @@ function readSettingsDraftFromForm() {
     const key = String(node.getAttribute('data-setting') || '').trim();
     if (!key) return;
     if (node.type === 'checkbox') {
-      draft[key] = !!node.checked;
+      draft[key] = key === 'automated_tasks_backend'
+        ? (node.checked ? 'provider' : 'bundled')
+        : !!node.checked;
       return;
     }
     if (node.type === 'number') {
@@ -13152,15 +13191,19 @@ function renderAppDataProtectionStatus() {
 
 function renderSettingsForm() {
   const draft = normalizeSettingsDraft(state.settingsDraft || {});
+  const automatedTasksUseProvider = draft.automated_tasks_backend === 'provider';
   renderSettingsLmstudioModelSelect('settings-abstraction-model', draft.abstraction_model);
   renderSettingsLmstudioModelSelect('settings-image-analysis-model', draft.image_analysis_model);
   renderSettingsLmstudioModelSelect('settings-rag-embedding-model', draft.rag_embedding_model);
+  renderSettingsAutomatedTaskModelSelect(draft.automated_tasks_model);
   getSettingsFormElements().forEach((node) => {
     const key = String(node.getAttribute('data-setting') || '').trim();
     if (!key) return;
     const value = draft[key];
     if (node.type === 'checkbox') {
-      node.checked = !!value;
+      node.checked = key === 'automated_tasks_backend'
+        ? String(value || '').trim() === 'provider'
+        : !!value;
     } else {
       if (Array.isArray(value)) {
         node.value = value.join(', ');
@@ -13174,8 +13217,18 @@ function renderSettingsForm() {
   const ragUsesLmstudio = draft.rag_embedding_source !== 'inbuilt';
   const ragModelNode = e('settings-rag-embedding-model');
   const ragFetchBtn = e('settings-rag-fetch-models-btn');
+  const automatedTasksProviderNode = e('settings-automated-tasks-provider');
+  const automatedTasksModelNode = e('settings-automated-tasks-model');
+  const automatedTasksHint = e('settings-automated-tasks-hint');
   if (ragModelNode) ragModelNode.disabled = !ragUsesLmstudio;
   if (ragFetchBtn) ragFetchBtn.disabled = !ragUsesLmstudio;
+  if (automatedTasksProviderNode) automatedTasksProviderNode.disabled = !automatedTasksUseProvider;
+  if (automatedTasksModelNode) automatedTasksModelNode.disabled = !automatedTasksUseProvider;
+  if (automatedTasksHint) {
+    automatedTasksHint.textContent = automatedTasksUseProvider
+      ? 'Automated tasks will use the selected provider and model.'
+      : 'Automated tasks will use the bundled local model.';
+  }
   renderMailSettingsStatus();
   renderMailAccountsList();
   renderAppDataProtectionStatus();
@@ -13228,6 +13281,13 @@ function renderSettingsDiagnostics() {
       ? diag.bundled_small_llm
       : {};
     const lines = [];
+    lines.push(`backend: ${String(llm.automated_tasks_backend || 'bundled').trim()}`);
+    if (llm.automated_tasks_backend === 'provider') {
+      lines.push(`provider: ${String(llm.automated_tasks_provider || 'Unknown').trim() || 'Unknown'}`);
+      lines.push(`selected model: ${String(llm.automated_tasks_model || 'Unknown').trim() || 'Unknown'}`);
+      if (llm.provider_last_task_type) lines.push(`last provider task: ${String(llm.provider_last_task_type || '').trim()}`);
+      if (llm.provider_last_error) lines.push(`provider error: ${String(llm.provider_last_error || '').trim()}`);
+    }
     lines.push(`model: ${String(llm.model_name || llm.model_id || 'Unknown').trim() || 'Unknown'}`);
     lines.push(`availability: ${String(llm.available ? 'ready' : 'missing').trim()}`);
     lines.push(`state: ${String(llm.state || 'idle').trim() || 'idle'}`);
@@ -13847,6 +13907,26 @@ async function refreshSettingsLmstudioModelOptions() {
   state.settingsLmstudioModels = Array.isArray(res.models) ? res.models : [];
 }
 
+async function refreshSettingsAutomatedTaskModelOptions(provider = '', options = {}) {
+  if (!api.providerListModels) return;
+  const targetProvider = PROVIDERS.includes(String(provider || '').trim().toLowerCase())
+    ? String(provider || '').trim().toLowerCase()
+    : 'openai';
+  let res = null;
+  try {
+    res = await api.providerListModels(targetProvider, '');
+  } catch (_) {
+    res = null;
+  }
+  if (!res || !res.ok) {
+    state.settingsAutomatedTaskModels = [];
+    if (options.render !== false) renderSettingsAutomatedTaskModelSelect(options.selectedValue || '');
+    return;
+  }
+  state.settingsAutomatedTaskModels = Array.isArray(res.models) ? res.models : [];
+  if (options.render !== false) renderSettingsAutomatedTaskModelSelect(options.selectedValue || '');
+}
+
 async function refreshAbstractionStatus() {
   if (!api.abstractionStatus) return;
   const res = await api.abstractionStatus({});
@@ -13876,6 +13956,14 @@ async function loadSettingsData() {
     diagnostics = null;
   }
   try { await refreshSettingsLmstudioModelOptions(); } catch (_) {}
+  try {
+    const automatedProvider = String((prefRes && prefRes.automated_tasks_provider) || 'openai').trim().toLowerCase();
+    const automatedModel = String((prefRes && prefRes.automated_tasks_model) || '').trim();
+    await refreshSettingsAutomatedTaskModelOptions(automatedProvider, {
+      selectedValue: automatedModel,
+      render: false,
+    });
+  } catch (_) {}
   try { await refreshProviderKeysState({ renderSettings: true }); } catch (_) {}
   if (prefRes && prefRes.ok) {
     state.settingsPersisted = normalizeSettingsDraft(prefRes);
@@ -13964,6 +14052,10 @@ async function saveSettingsDraft() {
   await refreshTelegramSettingsStatus();
   await refreshLmstudioTokenStatus();
   await refreshOrchestratorWebKeyStatus();
+  await refreshSettingsAutomatedTaskModelOptions(state.settingsPersisted.automated_tasks_provider, {
+    selectedValue: state.settingsPersisted.automated_tasks_model,
+    render: false,
+  });
   await refreshMailStatus();
   await refreshAbstractionStatus();
   await refreshRagStatus();
@@ -15665,6 +15757,23 @@ function bindControls() {
       renderSettingsStatusLine();
       if (key === 'rag_embedding_source') {
         renderSettingsForm();
+        return;
+      }
+      if (key === 'automated_tasks_backend') {
+        renderSettingsForm();
+        const draft = normalizeSettingsDraft(state.settingsDraft || {});
+        if (draft.automated_tasks_backend === 'provider') {
+          void refreshSettingsAutomatedTaskModelOptions(draft.automated_tasks_provider, {
+            selectedValue: draft.automated_tasks_model,
+          });
+        }
+        return;
+      }
+      if (key === 'automated_tasks_provider') {
+        const draft = normalizeSettingsDraft(state.settingsDraft || {});
+        void refreshSettingsAutomatedTaskModelOptions(draft.automated_tasks_provider, {
+          selectedValue: draft.automated_tasks_model,
+        });
       }
     });
   });
@@ -15679,7 +15788,7 @@ function bindControls() {
 
   e('settings-bundled-llm-rerun-btn')?.addEventListener('click', async () => {
     if (!api || typeof api.bundledLlmRerunTasks !== 'function') return;
-    state.settingsSaveState = 'Rerunning bundled LLM tasks...';
+    state.settingsSaveState = 'Rerunning automated tasks...';
     renderSettingsStatusLine();
     const res = await api.bundledLlmRerunTasks(true);
     if (res && res.diagnostics && res.diagnostics.ok) {
@@ -15688,8 +15797,8 @@ function bindControls() {
       scheduleBundledLlmDiagnosticsPoll();
     }
     state.settingsSaveState = (res && res.ok)
-      ? 'Bundled LLM rerun started.'
-      : ((res && res.message) || 'Bundled LLM rerun failed.');
+      ? 'Automated task rerun started.'
+      : ((res && res.message) || 'Automated task rerun failed.');
     renderSettingsStatusLine();
   });
 

@@ -977,11 +977,44 @@
       </details>
 
       <details class="settings-section settings-accordion" id="settings-bundled-llm-section" data-settings-section="bundled-llm" open>
-        <summary>Bundled LLM</summary>
+        <summary>LLM Automated Tasks</summary>
         <div class="settings-section-content">
         <div class="settings-grid settings-grid-1">
+          <div class="settings-field settings-field-wide">
+            <span>Tasks</span>
+            <div class="settings-task-list">
+              <div>RSS feed summarisation</div>
+              <div>Note policy classification</div>
+            </div>
+          </div>
+        </div>
+        <div class="settings-grid settings-grid-3">
+          <label class="settings-field settings-boolean-field">
+            <span>Use Provider Model</span>
+            <span class="settings-toggle-card">
+              <input id="settings-automated-tasks-backend" data-setting="automated_tasks_backend" type="checkbox" value="provider" />
+              <span>Turn on to run automated tasks with an external provider instead of the bundled local model.</span>
+            </span>
+          </label>
+          <label class="settings-field">Provider
+            <select id="settings-automated-tasks-provider" data-setting="automated_tasks_provider">
+              <option value="openai">OpenAI</option>
+              <option value="cerebras">Cerebras</option>
+              <option value="google">Google</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="lmstudio">LM Studio</option>
+            </select>
+          </label>
+          <label class="settings-field">Model
+            <select id="settings-automated-tasks-model" data-setting="automated_tasks_model"></select>
+          </label>
+        </div>
+        <div class="settings-grid settings-grid-1">
+          <div id="settings-automated-tasks-hint" class="muted small"></div>
+        </div>
+        <div class="settings-grid settings-grid-1">
           <div class="settings-readout">
-            <h4>Bundled LLM</h4>
+            <h4>Diagnostics</h4>
             <pre id="settings-diagnostics-bundled-llm"></pre>
             <div class="settings-inline-actions">
               <button id="settings-bundled-llm-rerun-btn" type="button">Rerun Tasks</button>
