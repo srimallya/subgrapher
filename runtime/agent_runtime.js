@@ -290,7 +290,7 @@ function handleChat(payload = {}) {
       artifact_id: artifact.id,
       title: artifact.title,
     });
-    response.message = 'The latest assistant reply has been written into an artifact and opened.';
+    response.message = 'The latest assistant reply has been written into an artifact in the active reference.';
     return response;
   }
 

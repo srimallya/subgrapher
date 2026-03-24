@@ -10589,6 +10589,9 @@ async function loadChatThread() {
 async function applyPendingUpdates(response, targetSrId = null) {
   if (!response || typeof response !== 'object') return;
   const scopeSrId = String(targetSrId || state.activeSrId || '').trim();
+  let preferredArtifactId = '';
+  let preferredArtifactRank = -1;
+  const pendingArtifactMetaById = new Map();
 
   const pendingWeight = Array.isArray(response.pending_weight_updates) ? response.pending_weight_updates : [];
   for (const item of pendingWeight) {
@@ -10611,6 +10614,19 @@ async function applyPendingUpdates(response, targetSrId = null) {
     if (!artifact || typeof artifact !== 'object') continue;
     const srId = String((artifact.reference_id) || scopeSrId || '').trim();
     if (!srId) continue;
+    const artifactId = String((artifact && artifact.id) || '').trim();
+    const artifactType = String((artifact && artifact.type) || '').trim().toLowerCase();
+    if (artifactId) {
+      pendingArtifactMetaById.set(artifactId, {
+        srId,
+        type: artifactType,
+      });
+      const rank = artifactType === 'html' ? 2 : 1;
+      if (srId === state.activeSrId && rank > preferredArtifactRank) {
+        preferredArtifactId = artifactId;
+        preferredArtifactRank = rank;
+      }
+    }
     await api.srUpsertArtifact(srId, artifact);
   }
 
@@ -10701,6 +10717,12 @@ async function applyPendingUpdates(response, targetSrId = null) {
     if (type === 'artifact') {
       const artifactId = String((tab && tab.artifact_id) || '').trim();
       if (artifactId && srId === state.activeSrId) {
+        const artifactMeta = pendingArtifactMetaById.get(artifactId);
+        const rank = artifactMeta && artifactMeta.type === 'html' ? 3 : 1;
+        if (rank > preferredArtifactRank) {
+          preferredArtifactId = artifactId;
+          preferredArtifactRank = rank;
+        }
         state.activeSurface = makeActiveSurface('artifact', { artifactId });
         rememberSurfaceForReference(state.activeSrId, state.activeSurface);
       }
@@ -10743,6 +10765,15 @@ async function applyPendingUpdates(response, targetSrId = null) {
   renderContextFiles();
   renderFilesPanel();
   renderDiffPanel();
+  if (preferredArtifactId && scopeSrId && scopeSrId === state.activeSrId) {
+    const ref = getReferenceById(scopeSrId);
+    const artifacts = Array.isArray(ref && ref.artifacts) ? ref.artifacts : [];
+    const artifactExists = artifacts.some((artifact) => String((artifact && artifact.id) || '').trim() === preferredArtifactId);
+    if (artifactExists) {
+      state.activeSurface = makeActiveSurface('artifact', { artifactId: preferredArtifactId });
+      rememberSurfaceForReference(scopeSrId, state.activeSurface);
+    }
+  }
   await syncActiveSurface();
 }
 
