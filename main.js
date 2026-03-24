@@ -6491,6 +6491,7 @@ function getNoteAnalysisEngine() {
       }),
       temporalGraphScorer: computeTemporalGraphScoresWithPython,
       classifyNotePolicy: async (note = {}) => classifyNotePolicyWithSelectedBackend(note, readSettings()),
+      resolveClaimEntities: async (input = {}) => resolveNoteClaimsWithSelectedBackend(input, readSettings()),
       makeId,
     });
   }
@@ -7226,6 +7227,44 @@ function validateProviderFeedSummaryPayload(payload = {}) {
   };
 }
 
+function validateProviderClaimResolutionPayload(payload = {}, requestedClaims = []) {
+  const src = (payload && typeof payload === 'object') ? payload : {};
+  const requestedById = new Map(
+    (Array.isArray(requestedClaims) ? requestedClaims : [])
+      .map((item) => [String((item && item.claim_id) || '').trim(), item])
+      .filter((entry) => entry[0])
+  );
+  const claims = (Array.isArray(src.claims) ? src.claims : []).map((item) => {
+    const claimId = String((item && item.claim_id) || '').trim();
+    if (!claimId || !requestedById.has(claimId)) {
+      throw new Error(`invalid claim_id: ${claimId || '[empty]'}`);
+    }
+    const classification = String((item && item.classification) || '').trim().toLowerCase();
+    if (!['factual', 'question', 'opinion', 'ambiguous'].includes(classification)) {
+      throw new Error(`invalid classification: ${classification || '[empty]'}`);
+    }
+    const confidence = Math.max(0, Math.min(1, Number((item && item.confidence) || 0) || 0));
+    const ambiguous = !!(item && item.ambiguous);
+    const resolvedSubjectText = normalizeInlineText(item && item.resolved_subject_text);
+    const resolvedClaimText = normalizeInlineText(item && item.resolved_claim_text);
+    if (classification === 'factual' && !ambiguous && (!resolvedSubjectText || !resolvedClaimText)) {
+      throw new Error(`missing resolved claim text for ${claimId}`);
+    }
+    return {
+      claim_id: claimId,
+      resolved_subject_text: resolvedSubjectText,
+      resolved_claim_text: resolvedClaimText,
+      classification,
+      confidence,
+      ambiguous,
+      source_line_indexes: Array.isArray(item && item.source_line_indexes)
+        ? item.source_line_indexes.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0).slice(0, 8)
+        : [],
+    };
+  });
+  return { claims };
+}
+
 function buildProviderNotePolicyPrompt(note = {}) {
   const title = String((note && note.title) || '').trim().slice(0, 240);
   const body = String((note && note.body_markdown) || '').slice(0, 6000);
@@ -7270,6 +7309,56 @@ function buildProviderFeedSummaryPrompt(article = {}) {
     `URL: ${url || '[unknown]'}`,
     'Raw article text:',
     text || '[empty]',
+  ].join('\n');
+}
+
+function buildProviderClaimResolutionPrompt(input = {}) {
+  const note = (input && input.note && typeof input.note === 'object') ? input.note : {};
+  const requests = Array.isArray(input && input.resolution_requests) ? input.resolution_requests : [];
+  const title = String(note.title || '').trim().slice(0, 240);
+  const bodyLines = String(note.body_markdown || '')
+    .split('\n')
+    .slice(0, 80)
+    .map((line, index) => `${index}: ${String(line || '').slice(0, 240)}`);
+  const requestLines = requests.slice(0, 12).map((item) => {
+    const candidates = Array.isArray(item && item.anchor_candidates)
+      ? item.anchor_candidates.map((candidate) => {
+        const anchor = String((candidate && candidate.anchor) || '').trim();
+        const lineIndex = Number((candidate && candidate.line_index) || 0);
+        const score = Number((candidate && candidate.score) || 0) || 0;
+        return anchor ? `${anchor} @ line ${lineIndex} score=${score.toFixed(2)}` : '';
+      }).filter(Boolean).join(' | ')
+      : '';
+    return [
+      `claim_id: ${String((item && item.claim_id) || '').trim()}`,
+      `claim_index: ${Number((item && item.claim_index) || 0)}`,
+      `line_index: ${Number((item && item.line_index) || 0)}`,
+      `claim_text: ${String((item && item.claim_text) || '').trim()}`,
+      `subject_text: ${String((item && item.subject_text) || '').trim()}`,
+      `predicate_text: ${String((item && item.predicate_text) || '').trim()}`,
+      `object_text: ${String((item && item.object_text) || '').trim()}`,
+      `cluster_id: ${Number((item && item.cluster_id) || 0)}`,
+      `anchor_candidates: ${candidates || '[none]'}`,
+    ].join('\n');
+  });
+  return [
+    'You are Subgrapher automated claim entity resolution.',
+    'Resolve generic or underspecified claim subjects using only note context.',
+    'Do not invent entities or facts not present in the note.',
+    'If the note context is ambiguous, keep resolved_subject_text and resolved_claim_text empty, set ambiguous=true, and classification=ambiguous.',
+    'If the claim is clearly a question, set classification=question.',
+    'If the claim is clearly an opinion or analysis framing rather than a factual assertion, set classification=opinion.',
+    'Otherwise, set classification=factual and rewrite the claim with the resolved entity.',
+    'Return exactly one JSON object. No markdown. No prose. No code fences.',
+    'Schema:',
+    '{"claims":[{"claim_id":"","resolved_subject_text":"","resolved_claim_text":"","classification":"factual","confidence":0.0,"ambiguous":false,"source_line_indexes":[0]}]}',
+    '',
+    `Note title: ${title || '[untitled]'}`,
+    'Numbered note lines:',
+    bodyLines.join('\n') || '[empty]',
+    '',
+    'Claims to resolve:',
+    requestLines.join('\n\n') || '[none]',
   ].join('\n');
 }
 
@@ -7381,6 +7470,64 @@ async function classifyNotePolicyWithSelectedBackend(note = {}, settings = readS
   } catch (err) {
     recordAutomatedTaskError('note_policy_classification', providerRes.routing, err);
     return notePolicyFallbackForFailure(note, err, providerRes.routing);
+  }
+}
+
+async function resolveNoteClaimsWithSelectedBackend(input = {}, settings = readSettings()) {
+  const routing = resolveAutomatedTaskRouting(settings);
+  const requests = Array.isArray(input && input.resolution_requests) ? input.resolution_requests : [];
+  if (!requests.length) {
+    return {
+      ok: true,
+      claims: [],
+      backend: routing.backend,
+      provider: routing.provider,
+      model: routing.model,
+    };
+  }
+  if (routing.backend !== 'provider') {
+    return {
+      ok: true,
+      claims: [],
+      skipped: true,
+      reason: 'backend_not_provider',
+      backend: routing.backend,
+      provider: routing.provider,
+      model: routing.model,
+    };
+  }
+  const providerRes = await runAutomatedTaskProviderCall('note_claim_resolution', buildProviderClaimResolutionPrompt(input), settings);
+  if (!providerRes || providerRes.ok === false) {
+    return {
+      ok: false,
+      claims: [],
+      skipped: true,
+      reason: String((providerRes && providerRes.message) || 'note_claim_resolution_failed').trim(),
+      backend: routing.backend,
+      provider: routing.provider,
+      model: routing.model,
+    };
+  }
+  try {
+    const payload = validateProviderClaimResolutionPayload(providerRes.payload, requests);
+    return {
+      ok: true,
+      ...payload,
+      backend: routing.backend,
+      provider: String((providerRes.routing && providerRes.routing.provider) || '').trim(),
+      model: String((providerRes.routing && providerRes.routing.model) || '').trim(),
+    };
+  } catch (err) {
+    recordAutomatedTaskError('note_claim_resolution', providerRes.routing, err);
+    return {
+      ok: false,
+      claims: [],
+      skipped: true,
+      reason: String((err && err.message) || 'note_claim_resolution_invalid').trim(),
+      backend: routing.backend,
+      provider: String((providerRes.routing && providerRes.routing.provider) || '').trim(),
+      model: String((providerRes.routing && providerRes.routing.model) || '').trim(),
+    };
   }
 }
 

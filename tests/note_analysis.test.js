@@ -224,6 +224,133 @@ test('note analysis ignores markdown headings while keeping factual body lines',
   assert.equal(result.claims[0].claim_text, 'OpenAI released GPT-5 in 2025.');
 });
 
+test('numbered list follow-up claims inherit the nearby entity for search planning', async () => {
+  const seenQueries = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      seenQueries.push(query);
+      return {
+        results: [{
+          title: 'OpenAI plans to shift focus to coding and enterprise businesses',
+          url: 'https://example.com/openai-enterprise',
+          snippet: 'OpenAI is focusing more on enterprise and coding products.',
+        }],
+      };
+    },
+    fetchUrl: async () => ({
+      ok: true,
+      title: 'OpenAI plans to shift focus to coding and enterprise businesses',
+      markdown: 'OpenAI is focusing more on enterprise and coding products.',
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_numbered_followup',
+    analysis_revision: 1,
+    body_markdown: [
+      '1. OpenAI leadership says no more side quests.',
+      '2. The company is focusing on enterprise and coding.',
+      '3. OpenAI partners with consultants.',
+    ].join('\n'),
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.ok(result.claims.length >= 1);
+  assert.ok(seenQueries.some((query) => query.toLowerCase().includes('openai') && query.toLowerCase().includes('enterprise') && query.toLowerCase().includes('coding')));
+  assert.ok(!seenQueries.some((query) => /\bwhat is a company\b/i.test(query)));
+});
+
+test('conditional LLM claim resolution rewrites weak generic subjects before search', async () => {
+  const seenQueries = [];
+  const resolutionCalls = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      seenQueries.push(query);
+      return {
+        results: [{
+          title: 'OpenAI enterprise push',
+          url: 'https://example.com/openai-enterprise-push',
+          snippet: 'OpenAI is focusing on enterprise and coding.',
+        }],
+      };
+    },
+    fetchUrl: async () => ({
+      ok: true,
+      title: 'OpenAI enterprise push',
+      markdown: 'OpenAI is focusing on enterprise and coding.',
+    }),
+    resolveClaimEntities: async (input = {}) => {
+      resolutionCalls.push(input);
+      const request = Array.isArray(input.resolution_requests) ? input.resolution_requests[0] : null;
+      return {
+        ok: true,
+        backend: 'provider',
+        provider: 'cerebras',
+        model: 'llama3.1-8b',
+        claims: request ? [{
+          claim_id: request.claim_id,
+          resolved_subject_text: 'OpenAI',
+          resolved_claim_text: 'OpenAI is focusing on enterprise and coding',
+          classification: 'factual',
+          confidence: 0.92,
+          ambiguous: false,
+          source_line_indexes: [0],
+        }] : [],
+      };
+    },
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_llm_resolution',
+    analysis_revision: 1,
+    body_markdown: 'The company is focusing on enterprise and coding.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.equal(resolutionCalls.length, 1);
+  assert.equal(result.claims.length, 1);
+  assert.equal(result.claims[0].resolved_subject_text, 'OpenAI');
+  assert.equal(result.claims[0].parser_provenance, 'llm_resolved');
+  assert.ok(result.citations.length >= 1);
+});
+
+test('ambiguous generic claims are gated instead of issuing broad web searches', async () => {
+  const seenQueries = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      seenQueries.push(query);
+      return { results: [] };
+    },
+    fetchUrl: async () => ({ ok: false }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_ambiguous_generic',
+    analysis_revision: 1,
+    body_markdown: 'The company is focusing on enterprise and coding.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.claims.length, 1);
+  assert.equal(seenQueries.length, 0);
+  assert.equal(result.claims[0].status, 'weak_evidence');
+});
+
 test('note analysis uses orthogonal queries and snippet fallback when fetch fails', async () => {
   const seenQueries = [];
   const fetchedUrls = [];

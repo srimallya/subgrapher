@@ -11,10 +11,13 @@ const MAX_PASSAGES_PER_SOURCE = 8;
 const MAX_WEB_RESULTS_PER_CLAIM = 3;
 const MAX_FETCHES_PER_NOTE = 18;
 const MAX_CONCURRENCY = 2;
+const MAX_RESOLUTION_CANDIDATES = 8;
 const VERB_PATTERN = /\b(is|are|was|were|has|have|had|began|begin|beginning|started|start|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|broke|break|broken|wounded|wound|redirected|redirect|deployed|deploy|sent|send|targeted|target|carried|carry|carrying|kill|kills|killed)\b/i;
 const VERB_PATTERN_GLOBAL = new RegExp(VERB_PATTERN.source, 'ig');
 const WEB_NOTE_SOURCE_KINDS = new Set(['explicit_url', 'web_search', 'official_search', 'challenge_search']);
 const QUERY_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'their', 'there', 'about', 'according', 'over', 'than']);
+const GENERIC_SUBJECT_PATTERN = /^(it|its|they|their|them|this|that|these|those|the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
+const GENERIC_QUERY_PATTERN = /\b(the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
 const CONTRADICTION_PATTERNS = [
   /\b(no official record|no evidence|not true|false|falsely|fabricated|debunked|denied|denies|deny|did not|didn't|not describe|never happened|unconfirmed|rumor)\b/i,
   /\b(but|however|while)\b.{0,60}\b(not|never|denied|did not|didn't|no)\b/i,
@@ -77,6 +80,14 @@ function normalizeClaimText(text = '') {
   return normalizeWhitespace(String(text || '').toLowerCase().replace(/https?:\/\/[^\s]+/g, ' ').replace(/[^a-z0-9\s]/g, ' '));
 }
 
+function getEffectiveClaimText(claim = {}) {
+  return normalizeWhitespace(String((claim && claim.resolved_claim_text) || (claim && claim.claim_text) || ''));
+}
+
+function getEffectiveClaimSubject(claim = {}) {
+  return normalizeWhitespace(String((claim && claim.resolved_subject_text) || (claim && claim.subject_text) || ''));
+}
+
 function clampUnit(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 0;
@@ -115,7 +126,7 @@ function yearTokens(text = '') {
 function extractNamedEntityTerms(text = '') {
   const raw = String(text || '');
   const out = [];
-  const matches = raw.match(/\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}|[A-Z]{2,}|[A-Z][a-z]+-[A-Z0-9]+)\b/g);
+  const matches = raw.match(/\b(?:[A-Z][a-z]*[A-Z][A-Za-z0-9-]*|[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}|[A-Z]{2,}|[A-Z][a-z]+-[A-Z0-9]+)\b/g);
   (Array.isArray(matches) ? matches : []).forEach((item) => {
     const normalized = normalizeWhitespace(item);
     if (normalized && normalized.length >= 2) out.push(normalized);
@@ -231,7 +242,7 @@ function sourceAuthorityScore(source = {}, claim = {}) {
   if (sourceKind === 'official_search' || sourceKind === 'explicit_url') return 0.95;
   if (HIGH_AUTHORITY_PATTERNS.some((pattern) => pattern.test(url))) return 0.92;
   if (/\b(reuters|associated press|ap news|axios|bbc|new york times|washington post|wall street journal|financial times)\b/i.test(title)) return 0.9;
-  if (isConflictClaim(String((claim && claim.claim_text) || ''))) return 0.4;
+  if (isConflictClaim(getEffectiveClaimText(claim))) return 0.4;
   return 0.3;
 }
 
@@ -241,8 +252,9 @@ function sourceFreshnessScore(source = {}, claim = {}, policy = DEFAULT_NOTE_POL
   const ageDays = Math.max(0, (nowTs() - ts) / DAY_MS);
   const normalizedPolicy = normalizeNotePolicy(policy);
   const recentWindow = Math.max(1, Number(normalizedPolicy.prefer_recent_window_days || 14) || 14);
-  const currentEvent = isConflictClaim(String((claim && claim.claim_text) || ''))
-    || /\b(now|today|currently|latest|ongoing)\b/i.test(String((claim && claim.claim_text) || ''));
+  const effectiveClaimText = getEffectiveClaimText(claim);
+  const currentEvent = isConflictClaim(effectiveClaimText)
+    || /\b(now|today|currently|latest|ongoing)\b/i.test(effectiveClaimText);
   const policySensitive = isFreshnessSensitivePolicy(normalizedPolicy);
   if (!currentEvent && !policySensitive) return ageDays <= 365 ? 0.45 : 0.25;
   if (ageDays <= Math.max(1, recentWindow / 3)) return 1;
@@ -369,9 +381,10 @@ function splitClaims(markdown = '') {
   const text = String(markdown || '');
   const out = [];
   let offset = 0;
-  text.split('\n').forEach((lineRaw) => {
+  text.split('\n').forEach((lineRaw, lineIndex) => {
     const line = String(lineRaw || '');
-    const normalizedLine = isMarkdownListLine(line) ? stripMarkdownListMarker(line) : { text: line, contentOffset: 0 };
+    const listLine = isMarkdownListLine(line);
+    const normalizedLine = listLine ? stripMarkdownListMarker(line) : { text: line, contentOffset: 0 };
     const contentLine = String(normalizedLine.text || '');
     const trimmed = contentLine.trim();
     if (!trimmed || isMarkdownHeadingLine(line) || isMarkdownSeparatorLine(line)) {
@@ -386,7 +399,12 @@ function splitClaims(markdown = '') {
       if (sentence) {
         const startTrim = chunk.indexOf(sentence);
         const start = offset + Number(normalizedLine.contentOffset || 0) + match.index + Math.max(0, startTrim);
-        splitCompoundClaimSegments(sentence, start).forEach((segment) => out.push(segment));
+        splitCompoundClaimSegments(sentence, start).forEach((segment) => out.push({
+          ...segment,
+          line_index: lineIndex,
+          line_text: trimmed,
+          is_list_line: listLine,
+        }));
       }
       match = re.exec(contentLine);
     }
@@ -570,7 +588,7 @@ function parseClaimStructure(claimText = '') {
 }
 
 function deriveClaimAnchor(claim = {}) {
-  const subject = normalizeWhitespace(String((claim && claim.subject_text) || ''));
+  const subject = getEffectiveClaimSubject(claim);
   const predicate = normalizeWhitespace(String((claim && claim.predicate_text) || '')).toLowerCase();
   const object = normalizeWhitespace(String((claim && claim.object_text) || ''));
   if (!subject) return '';
@@ -580,16 +598,46 @@ function deriveClaimAnchor(claim = {}) {
   return subject;
 }
 
+function primaryNamedEntity(text = '') {
+  const terms = extractNamedEntityTerms(text);
+  return String(terms[0] || '').trim();
+}
+
+function isGenericSubject(subject = '') {
+  return GENERIC_SUBJECT_PATTERN.test(normalizeWhitespace(subject));
+}
+
+function genericSubjectSuffix(subject = '') {
+  return normalizeWhitespace(String(subject || '').replace(GENERIC_SUBJECT_PATTERN, ''));
+}
+
+function getClaimAnchorText(claim = {}) {
+  return primaryNamedEntity(String((claim && claim.subject_text) || ''))
+    || primaryNamedEntity(String((claim && claim.claim_text) || ''))
+    || normalizeWhitespace(String((claim && claim.subject_text) || ''));
+}
+
+function claimNeedsEntityResolution(claim = {}) {
+  const baseSubject = normalizeWhitespace(String((claim && claim.base_subject_text) || ''));
+  const subject = getEffectiveClaimSubject(claim);
+  const claimText = getEffectiveClaimText(claim);
+  if (baseSubject && isGenericSubject(baseSubject)) return true;
+  if (!subject) return true;
+  if (isGenericSubject(subject)) return true;
+  if (!extractNamedEntityTerms(subject).length && GENERIC_QUERY_PATTERN.test(claimText)) return true;
+  return false;
+}
+
 function resolveClaimContext(claims = []) {
   let anchor = '';
   return (Array.isArray(claims) ? claims : []).map((claim) => {
     const next = { ...claim };
     const subject = normalizeWhitespace(String(next.subject_text || ''));
-    if (/^(it|its|they|their|this|that)\b/i.test(subject) && anchor) {
-      const suffix = normalizeWhitespace(subject.replace(/^(it|its|they|their|this|that)\b/i, ''));
+    if (isGenericSubject(subject) && anchor) {
+      const suffix = genericSubjectSuffix(subject);
       next.subject_text = normalizeWhitespace(`${anchor} ${suffix}`);
     }
-    const derivedAnchor = deriveClaimAnchor(next);
+    const derivedAnchor = getClaimAnchorText(next) || deriveClaimAnchor(next);
     if (/\b([A-Z][a-z]{1,}|[A-Z]{2,}|GPT-\d+)\b/.test(derivedAnchor)) {
       anchor = derivedAnchor;
     }
@@ -640,7 +688,7 @@ async function runPool(items = [], worker, concurrency = MAX_CONCURRENCY) {
 
 function buildClaimQuery(claim = {}) {
   const parts = [
-    String((claim && claim.subject_text) || ''),
+    getEffectiveClaimSubject(claim),
     String((claim && claim.predicate_text) || ''),
     String((claim && claim.object_text) || ''),
     String((claim && claim.time_text) || ''),
@@ -677,7 +725,7 @@ function buildCoverageTerms(text = '') {
 
 function buildPredicateTerms(claim = {}) {
   const predicate = String((claim && claim.predicate_text) || '').trim().toLowerCase();
-  const claimText = String((claim && claim.claim_text) || '');
+  const claimText = getEffectiveClaimText(claim);
   if (isReleasePredicate(predicate)) return ['release', 'released', 'launch', 'launched', 'announcement'];
   if (isComparisonClaim(claimText)) return ['adoption', 'growth', 'metric', 'compare', 'comparison', 'usage'];
   if (isConflictClaim(claimText)) return ['war', 'conflict', 'fighting', 'attack', 'military'];
@@ -685,8 +733,9 @@ function buildPredicateTerms(claim = {}) {
 }
 
 function buildHeadlineStyleQuery(claim = {}) {
-  const entities = extractNamedEntityTerms(String((claim && claim.claim_text) || '')).slice(0, 4);
-  const tokens = buildCoverageTerms(String((claim && claim.claim_text) || '')).slice(0, 10);
+  const effectiveText = getEffectiveClaimText(claim);
+  const entities = extractNamedEntityTerms(effectiveText).slice(0, 4);
+  const tokens = buildCoverageTerms(effectiveText).slice(0, 10);
   return normalizeWhitespace(entities.concat(tokens).join(' '));
 }
 
@@ -694,6 +743,7 @@ function scoreSearchCandidate(claim = {}, plan = {}, result = {}) {
   const title = String((result && result.title) || '');
   const snippet = String((result && result.snippet) || '');
   const combined = normalizeWhitespace(`${title} ${snippet}`);
+  const effectiveClaimText = getEffectiveClaimText(claim);
   if (!combined) {
     return {
       query_confidence: 0,
@@ -705,13 +755,13 @@ function scoreSearchCandidate(claim = {}, plan = {}, result = {}) {
       time_score: 0,
     };
   }
-  const semanticScore = cosineSimilarity(hashEmbedText(String((claim && claim.claim_text) || '')), hashEmbedText(combined));
-  const lexicalScore = lexicalOverlapScore(String((claim && claim.claim_text) || ''), combined);
-  const subjectCoverage = tokenCoverageScore(buildCoverageTerms(String((claim && claim.subject_text) || '')), combined);
+  const semanticScore = cosineSimilarity(hashEmbedText(effectiveClaimText), hashEmbedText(combined));
+  const lexicalScore = lexicalOverlapScore(effectiveClaimText, combined);
+  const subjectCoverage = tokenCoverageScore(buildCoverageTerms(getEffectiveClaimSubject(claim)), combined);
   const objectCoverage = tokenCoverageScore(buildCoverageTerms(String((claim && claim.object_text) || '')), combined);
   const predicateCoverage = tokenCoverageScore(buildPredicateTerms(claim), combined);
-  const timeScore = timeMatchScore(String((claim && claim.claim_text) || ''), combined);
-  const entityCoverage = namedEntityCoverageScore(String((claim && claim.claim_text) || ''), combined);
+  const timeScore = timeMatchScore(effectiveClaimText, combined);
+  const entityCoverage = namedEntityCoverageScore(effectiveClaimText, combined);
   const queryConfidence = Math.max(0, Math.min(1,
     (0.22 * semanticScore)
     + (0.16 * lexicalScore)
@@ -763,13 +813,16 @@ function hasSatisfiedSearchIntent(bucket = {}, plan = {}) {
 
 function buildClaimSearchPlans(claim = {}) {
   const baseQuery = buildClaimQuery(claim);
-  const subject = String((claim && claim.subject_text) || '').trim();
+  const subject = getEffectiveClaimSubject(claim);
   const predicate = String((claim && claim.predicate_text) || '').trim().toLowerCase();
   const object = String((claim && claim.object_text) || '').trim();
   const time = String((claim && claim.time_text) || '').trim();
-  const claimText = String((claim && claim.claim_text) || '').trim();
+  const claimText = getEffectiveClaimText(claim);
   const anchor = deriveClaimAnchor(claim);
   const plans = [];
+  if (claimNeedsEntityResolution(claim) && !String((claim && claim.resolved_subject_text) || '').trim()) {
+    return [];
+  }
   function pushPlan(query, sourceKind, intent, minQueryConfidence = 0.34) {
     const normalized = normalizeWhitespace(query);
     if (!normalized) return;
@@ -816,6 +869,134 @@ function buildClaimSearchPlans(claim = {}) {
     pushPlan(`${subject} denied conflict`, 'challenge_search', 'challenge', 0.28);
   }
   return dedupeBy(plans.filter((plan) => String(plan.query || '').trim()), (plan) => `${plan.source_kind}:${normalizeClaimText(plan.query)}`);
+}
+
+function claimSemanticSimilarity(left = {}, right = {}) {
+  return cosineSimilarity(
+    hashEmbedText(getEffectiveClaimText(left)),
+    hashEmbedText(getEffectiveClaimText(right))
+  );
+}
+
+function buildClaimClusters(claims = []) {
+  const ordered = (Array.isArray(claims) ? claims : []).map((claim) => ({ ...claim })).sort((a, b) => Number(a.claim_index || 0) - Number(b.claim_index || 0));
+  let currentClusterId = -1;
+  let currentAnchors = new Set();
+  let previous = null;
+  return ordered.map((claim) => {
+    const entities = new Set(extractNamedEntityTerms(String(claim.subject_text || '')).concat(extractNamedEntityTerms(String(claim.claim_text || ''))));
+    let nextCluster = currentClusterId;
+    if (!previous) {
+      nextCluster = 0;
+      currentAnchors = new Set(entities);
+    } else {
+      const lineGap = Math.abs(Number(claim.line_index || 0) - Number(previous.line_index || 0));
+      const similarity = claimSemanticSimilarity(previous, claim);
+      const explicitEntityShift = entities.size > 0
+        && currentAnchors.size > 0
+        && !Array.from(entities).some((item) => currentAnchors.has(item));
+      if (lineGap > 2 || explicitEntityShift || (entities.size > 0 && similarity < 0.2)) {
+        nextCluster += 1;
+        currentAnchors = new Set(entities);
+      } else {
+        entities.forEach((item) => currentAnchors.add(item));
+      }
+    }
+    previous = claim;
+    currentClusterId = nextCluster;
+    return {
+      ...claim,
+      cluster_id: nextCluster,
+    };
+  });
+}
+
+function rankAnchorCandidates(target = {}, claims = []) {
+  const targetClaim = target || {};
+  const sourceClaims = Array.isArray(claims) ? claims : [];
+  const candidates = [];
+  sourceClaims.forEach((candidate) => {
+    if (!candidate || String(candidate.id || '') === String(targetClaim.id || '')) return;
+    const anchor = getClaimAnchorText(candidate);
+    if (!anchor) return;
+    const claimIndexGap = Math.abs(Number(candidate.claim_index || 0) - Number(targetClaim.claim_index || 0));
+    if (claimIndexGap > 6) return;
+    const sameCluster = Number(candidate.cluster_id || -1) === Number(targetClaim.cluster_id || -2);
+    const semanticScore = claimSemanticSimilarity(targetClaim, candidate);
+    const priorBoost = Number(candidate.claim_index || 0) < Number(targetClaim.claim_index || 0) ? 0.16 : 0.04;
+    const entityBoost = extractNamedEntityTerms(String(candidate.claim_text || '')).length > 0 ? 0.2 : 0;
+    const clusterBoost = sameCluster ? 0.28 : 0;
+    const distancePenalty = Math.min(0.22, claimIndexGap * 0.04);
+    const score = clusterBoost + priorBoost + entityBoost + (0.42 * semanticScore) - distancePenalty;
+    candidates.push({
+      anchor,
+      score,
+      claim_id: String(candidate.id || '').trim(),
+      line_index: Number(candidate.line_index || 0),
+      semantic_score: semanticScore,
+    });
+  });
+  return dedupeBy(
+    candidates.sort((a, b) => Number(b.score || 0) - Number(a.score || 0)),
+    (item) => String(item.anchor || '').toLowerCase()
+  ).slice(0, MAX_RESOLUTION_CANDIDATES);
+}
+
+function applyHeuristicClaimResolution(claims = [], contextClaims = []) {
+  const rankingPool = Array.isArray(contextClaims) && contextClaims.length ? contextClaims : claims;
+  return (Array.isArray(claims) ? claims : []).map((claim) => {
+    const next = { ...claim };
+    const subject = normalizeWhitespace(String(next.subject_text || ''));
+    const candidates = rankAnchorCandidates(next, rankingPool);
+    next.anchor_candidates = candidates;
+    next.source_line_indexes = [Number(next.line_index || 0)];
+    next.parser_provenance = 'deterministic';
+    next.resolution_confidence = 0;
+    next.resolution_ambiguous = false;
+    next.resolved_subject_text = '';
+    next.resolved_claim_text = '';
+    if (!claimNeedsEntityResolution(next)) {
+      next.resolved_subject_text = subject;
+      next.resolved_claim_text = normalizeWhitespace(`${subject} ${String(next.predicate_text || '')} ${String(next.object_text || '')}`);
+      next.parser_provenance = 'deterministic';
+      next.resolution_confidence = 1;
+      return next;
+    }
+    const best = candidates[0] || null;
+    if (best && Number(best.score || 0) >= 0.3) {
+      const suffix = genericSubjectSuffix(subject);
+      next.resolved_subject_text = normalizeWhitespace(`${best.anchor} ${suffix}`) || best.anchor;
+      next.resolved_claim_text = normalizeWhitespace(`${next.resolved_subject_text} ${String(next.predicate_text || '')} ${String(next.object_text || '')}`);
+      next.parser_provenance = 'reconciled';
+      next.resolution_confidence = clampUnit(0.35 + (Number(best.score || 0) * 0.5));
+      next.source_line_indexes = dedupeBy([Number(next.line_index || 0), Number(best.line_index || 0)], (item) => String(item));
+      return next;
+    }
+    next.resolution_ambiguous = true;
+    return next;
+  });
+}
+
+function buildResolutionRequests(claims = []) {
+  return (Array.isArray(claims) ? claims : [])
+    .filter((claim) => claimNeedsEntityResolution(claim) && !String(claim.resolved_subject_text || '').trim())
+    .map((claim) => ({
+      claim_id: String(claim.id || '').trim(),
+      claim_index: Number(claim.claim_index || 0),
+      line_index: Number(claim.line_index || 0),
+      claim_text: String(claim.claim_text || ''),
+      subject_text: String(claim.subject_text || ''),
+      predicate_text: String(claim.predicate_text || ''),
+      object_text: String(claim.object_text || ''),
+      cluster_id: Number(claim.cluster_id || 0),
+      anchor_candidates: Array.isArray(claim.anchor_candidates)
+        ? claim.anchor_candidates.map((item) => ({
+          anchor: String((item && item.anchor) || '').trim(),
+          score: Number((item && item.score) || 0) || 0,
+          line_index: Number((item && item.line_index) || 0) || 0,
+        }))
+        : [],
+    }));
 }
 
 function summarizeAnalysis(claims = []) {
@@ -902,6 +1083,7 @@ function createNoteAnalysisEngine(options = {}) {
   const fetchUrl = typeof options.fetchUrl === 'function' ? options.fetchUrl : null;
   const temporalGraphScorer = typeof options.temporalGraphScorer === 'function' ? options.temporalGraphScorer : null;
   const classifyNotePolicy = typeof options.classifyNotePolicy === 'function' ? options.classifyNotePolicy : null;
+  const resolveClaimEntities = typeof options.resolveClaimEntities === 'function' ? options.resolveClaimEntities : null;
   const makeId = typeof options.makeId === 'function' ? options.makeId : ((prefix) => `${prefix}_${nowTs()}_${Math.random().toString(36).slice(2, 10)}`);
 
   async function searchWithCache(query = '', maxResults = MAX_WEB_RESULTS_PER_CLAIM) {
@@ -962,7 +1144,7 @@ function createNoteAnalysisEngine(options = {}) {
     const notePolicy = normalizeNotePolicy(policyRes && policyRes.ok ? policyRes : DEFAULT_NOTE_POLICY);
     const analysisSource = String(notePolicy.analysis_source || 'fallback').trim() || 'fallback';
     const explicitUrls = extractExplicitUrls(body);
-    const rawClaims = resolveClaimContext(splitClaims(body)
+    const parsedSegments = resolveClaimContext(splitClaims(body)
       .map((item, idx) => {
         const structure = parseClaimStructure(item.claim_text);
         const factuality = detectFactualClaim(item.claim_text);
@@ -976,6 +1158,10 @@ function createNoteAnalysisEngine(options = {}) {
           end_offset: item.end_offset,
           claim_text: item.claim_text,
           normalized_claim_text: normalizedClaim,
+          base_subject_text: String(structure.subject_text || ''),
+          line_index: Number(item.line_index || 0),
+          line_text: String(item.line_text || ''),
+          is_list_line: !!item.is_list_line,
           time_text: yearTokens(item.claim_text).join(' '),
           ...structure,
           claim_type: classifyClaimType({ claim_text: item.claim_text, ...structure }),
@@ -998,7 +1184,69 @@ function createNoteAnalysisEngine(options = {}) {
         claim.claim_weight = getClaimTypeWeight(claim.claim_type);
         return claim;
       }));
-    const claims = rawClaims.filter((item) => item.factuality === 'factual');
+    const clusteredSegments = buildClaimClusters(parsedSegments);
+    let claims = clusteredSegments.filter((item) => item.factuality === 'factual');
+    claims = applyHeuristicClaimResolution(claims, clusteredSegments);
+    const resolutionRequests = buildResolutionRequests(claims);
+    if (resolutionRequests.length > 0 && resolveClaimEntities) {
+      emitProgress('claim_resolution_start', {
+        candidate_count: resolutionRequests.length,
+        cluster_count: new Set(claims.map((item) => Number(item.cluster_id || 0))).size,
+      });
+      try {
+        const resolutionRes = await resolveClaimEntities({
+          note: {
+            id: noteId,
+            title: String((note && note.title) || ''),
+            body_markdown: body,
+          },
+          claims,
+          resolution_requests: resolutionRequests,
+        });
+        const resolvedById = new Map(
+          (Array.isArray(resolutionRes && resolutionRes.claims) ? resolutionRes.claims : [])
+            .map((item) => [String((item && item.claim_id) || '').trim(), item])
+            .filter((entry) => entry[0])
+        );
+        claims = claims.map((claim) => {
+          const resolved = resolvedById.get(String(claim.id || '').trim());
+          if (!resolved) return claim;
+          const resolvedSubject = normalizeWhitespace(String((resolved && resolved.resolved_subject_text) || ''));
+          const resolvedClaimText = normalizeWhitespace(String((resolved && resolved.resolved_claim_text) || ''));
+          if (!resolvedSubject || !resolvedClaimText || String((resolved && resolved.classification) || '') !== 'factual') {
+            return {
+              ...claim,
+              resolution_ambiguous: true,
+            };
+          }
+          return {
+            ...claim,
+            resolved_subject_text: resolvedSubject,
+            resolved_claim_text: resolvedClaimText,
+            parser_provenance: claim.parser_provenance === 'deterministic' ? 'llm_resolved' : 'reconciled',
+            resolution_confidence: Math.max(Number(claim.resolution_confidence || 0) || 0, Number((resolved && resolved.confidence) || 0) || 0),
+            resolution_ambiguous: !!(resolved && resolved.ambiguous),
+            source_line_indexes: Array.isArray(resolved && resolved.source_line_indexes)
+              ? dedupeBy((claim.source_line_indexes || []).concat(resolved.source_line_indexes.map((item) => Number(item || 0))), (item) => String(item))
+              : claim.source_line_indexes,
+          };
+        });
+        emitProgress('claim_resolution_done', {
+          candidate_count: resolutionRequests.length,
+          resolved_count: claims.filter((claim) => String(claim.resolved_subject_text || '').trim() && String(claim.resolved_subject_text || '').trim() !== String(claim.subject_text || '').trim()).length,
+          backend: String((resolutionRes && resolutionRes.backend) || '').trim(),
+          provider: String((resolutionRes && resolutionRes.provider) || '').trim(),
+          model: String((resolutionRes && resolutionRes.model) || '').trim(),
+        });
+      } catch (err) {
+        emitProgress('claim_resolution_done', {
+          candidate_count: resolutionRequests.length,
+          resolved_count: 0,
+          skipped: true,
+          error: String((err && err.message) || err || 'claim_resolution_failed').trim(),
+        });
+      }
+    }
     emitProgress('claims_detected', {
       claim_count: claims.length,
       explicit_url_count: explicitUrls.length,
@@ -1281,15 +1529,16 @@ function createNoteAnalysisEngine(options = {}) {
     });
 
     claims.forEach((claim) => {
-      const claimVector = hashEmbedText(String(claim.claim_text || ''));
+      const effectiveClaimText = getEffectiveClaimText(claim);
+      const claimVector = hashEmbedText(effectiveClaimText);
       const ranked = passageScored
         .map((entry) => {
           const semanticScore = cosineSimilarity(claimVector, entry.passageVector);
-          const lexicalScore = lexicalOverlapScore(claim.claim_text, entry.passage.passage_text);
-          const timeScore = timeMatchScore(claim.claim_text, entry.passage.passage_text);
-          const entityScore = namedEntityCoverageScore(claim.claim_text, entry.passage.passage_text);
-          const exactScore = exactnessScore(claim.claim_text, entry.passage.passage_text);
-          const contradictionScore = contradictionCueScore(claim.claim_text, entry.passage.passage_text);
+          const lexicalScore = lexicalOverlapScore(effectiveClaimText, entry.passage.passage_text);
+          const timeScore = timeMatchScore(effectiveClaimText, entry.passage.passage_text);
+          const entityScore = namedEntityCoverageScore(effectiveClaimText, entry.passage.passage_text);
+          const exactScore = exactnessScore(effectiveClaimText, entry.passage.passage_text);
+          const contradictionScore = contradictionCueScore(effectiveClaimText, entry.passage.passage_text);
           const searchIntent = getSearchIntentForSourceKind(entry.source && entry.source.source_kind);
           const queryConfidence = Number((entry.source && entry.source.query_confidence) || 0) || 0;
           const authorityScore = sourceAuthorityScore(entry.source, claim);
@@ -1414,7 +1663,7 @@ function createNoteAnalysisEngine(options = {}) {
             exact_score: entry.exact_score,
             authority_score: entry.authority_score,
             freshness_score: entry.freshness_score,
-            excerpt: buildCitationExcerpt(entry.claim && entry.claim.claim_text, entry.passage && entry.passage.passage_text, 340),
+            excerpt: buildCitationExcerpt(getEffectiveClaimText(entry.claim), entry.passage && entry.passage.passage_text, 340),
           };
         })
         .sort((a, b) => (b.score - a.score) || String((a.passage && a.passage.id) || '').localeCompare(String((b.passage && b.passage.id) || '')));
