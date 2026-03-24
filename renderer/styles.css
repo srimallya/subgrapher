@@ -3524,7 +3524,6 @@ body.chat-collapsed #chat-panel-resizer {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
   background: var(--surface);
   position: relative;
   z-index: 3;
@@ -3726,6 +3725,7 @@ body[data-theme="light"] .status-rss-filters button.active {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--notes-evidence-rail-width);
   grid-template-rows: auto minmax(0, 1fr);
+  border-left: 1px solid var(--border);
   background: var(--surface-inset);
   position: relative;
   overflow: hidden;
@@ -4370,6 +4370,7 @@ body[data-theme="light"] .status-rss-filters button.active {
   .notes-main {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr) minmax(220px, 38vh);
+    border-left: 0;
   }
 
   .notes-citation-popover {
