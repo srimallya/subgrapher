@@ -2045,7 +2045,7 @@ body.workspace-status-mode .nav-bar-main input {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 12px;
-  background: #242424;
+  background: var(--surface-elevated-2);
 }
 
 .skill-item pre {
@@ -4496,6 +4496,7 @@ body[data-theme="light"] .status-rss-filters button.active {
 .mail-content-scroll {
   min-height: 0;
   overflow: auto;
+  background: var(--surface-elevated);
 }
 
 .mail-list-row,
