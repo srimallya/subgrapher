@@ -242,16 +242,20 @@ function buildTaskPrompt(taskType = '', payload = {}, options = {}) {
     'You are Subgrapher local feed cleanup summarizer.',
     'Read the fetched article text and output one JSON object only.',
     'No prose. No markdown. No code fences.',
-    'Remove scraper noise, nav text, subscribe prompts, repeated headlines, and legal boilerplate.',
-    'Write the gist of the story in 5 to 10 factual sentences.',
+    'Remove ads, paywall copy, subscribe prompts, cookie text, nav text, repeated site furniture, accessibility menu text, and legal boilerplate.',
+    'Summarize only the article body.',
+    'If the fetched text does not contain a usable article body, return status unavailable instead of rewriting junk.',
+    'When status is generated, write the gist of the story in 5 to 10 factual sentences.',
     'Do not include subscribe prompts, cookie banners, nav labels, social prompts, or website chrome.',
-    'Write a short excerpt under 220 characters.',
+    'Write a short excerpt under 220 characters when status is generated.',
     'Return entities as a short list of names.',
     'Return topics as a short list of lowercase tags.',
     'Choose content_quality from: clean, noisy, fragmented.',
+    'Choose status from: generated, unavailable.',
+    'Set reason to a short machine-friendly explanation when unavailable, otherwise empty string.',
     retryNote,
     'Output schema:',
-    '{"summary":"","excerpt":"","entities":[],"topics":[],"content_quality":"clean"}',
+    '{"status":"generated","summary":"","excerpt":"","entities":[],"topics":[],"content_quality":"clean","reason":""}',
     '',
     `Title: ${title || '[untitled]'}`,
     `Source: ${sourceName || '[unknown]'}`,
@@ -283,10 +287,11 @@ function getTaskJsonSchema(taskType = '') {
   return JSON.stringify({
     type: 'object',
     additionalProperties: false,
-    required: ['summary', 'excerpt', 'entities', 'topics', 'content_quality'],
+    required: ['status', 'summary', 'excerpt', 'entities', 'topics', 'content_quality', 'reason'],
     properties: {
-      summary: { type: 'string', minLength: 120, maxLength: 2200 },
-      excerpt: { type: 'string', minLength: 30, maxLength: 220 },
+      status: { type: 'string', enum: ['generated', 'unavailable'] },
+      summary: { type: 'string', maxLength: 2200 },
+      excerpt: { type: 'string', maxLength: 220 },
       entities: {
         type: 'array',
         maxItems: 12,
@@ -298,6 +303,7 @@ function getTaskJsonSchema(taskType = '') {
         items: { type: 'string', minLength: 1, maxLength: 40 },
       },
       content_quality: { type: 'string', enum: ['clean', 'noisy', 'fragmented'] },
+      reason: { type: 'string', maxLength: 160 },
     },
   });
 }
@@ -390,11 +396,13 @@ function buildFallbackFeedSummary(article = {}) {
   if (/\b(market|economy|business|finance|bank|stocks|trade|company)\b/.test(lower)) topics.push('econ');
   if (/\b(ai|software|chip|technology|tech|internet|cyber|device)\b/.test(lower)) topics.push('tech');
   return {
+    status: summary ? 'generated' : 'unavailable',
     summary,
     excerpt,
     entities: detectNamedEntities(`${title} ${rawText}`, 6),
     topics: coerceTopicList(topics, ['other']),
     content_quality: rawText.length < 80 ? 'fragmented' : (/\b(cookie|subscribe|sign up|javascript)\b/i.test(rawText) ? 'noisy' : 'clean'),
+    reason: summary ? '' : 'fallback_empty_article_body',
     analysis_source: 'fallback',
     analysis_detail: 'fallback_heuristic',
     fallback_reason: '',
@@ -641,16 +649,23 @@ class BundledSmallLlmRuntime {
 
   _validateFeedSummaryPayload(payload = {}) {
     const src = (payload && typeof payload === 'object') ? payload : {};
+    const status = String(src.status || '').trim();
+    if (!['generated', 'unavailable'].includes(status)) {
+      throw new Error(`invalid status: ${status || '[empty]'}`);
+    }
     const summary = normalizeWhitespace(src.summary || '');
     const excerpt = normalizeWhitespace(src.excerpt || '');
-    if (!summary) throw new Error('summary is required');
-    const sentenceCount = getMeaningfulSentences(summary, 12).length;
-    if (sentenceCount < 5 || sentenceCount > 10) {
-      throw new Error(`summary must contain 5 to 10 sentences, got ${sentenceCount}`);
+    if (status === 'generated') {
+      if (!summary) throw new Error('summary is required');
+      const sentenceCount = getMeaningfulSentences(summary, 12).length;
+      if (sentenceCount < 5 || sentenceCount > 10) {
+        throw new Error(`summary must contain 5 to 10 sentences, got ${sentenceCount}`);
+      }
     }
     return {
+      status,
       summary: summary.slice(0, 2200),
-      excerpt: (excerpt || firstSentences(summary, 2, 220)).slice(0, 320),
+      excerpt: (status === 'generated' ? (excerpt || firstSentences(summary, 2, 220)) : excerpt).slice(0, 320),
       entities: Array.isArray(src.entities)
         ? src.entities.map((item) => normalizeWhitespace(item)).filter(Boolean).slice(0, 12)
         : [],
@@ -658,6 +673,7 @@ class BundledSmallLlmRuntime {
       content_quality: ['clean', 'noisy', 'fragmented'].includes(String(src.content_quality || '').trim())
         ? String(src.content_quality || '').trim()
         : 'clean',
+      reason: normalizeWhitespace(src.reason || '').slice(0, 160),
       schema_version: FEED_SUMMARY_SCHEMA_VERSION,
     };
   }
@@ -816,7 +832,7 @@ class BundledSmallLlmRuntime {
       || reason.includes('incomplete json')
       || reason.includes('summary must contain 5 to 10 sentences')
       || reason.includes('summary is required')
-      || reason.includes('excerpt is required')
+      || reason.includes('invalid status')
       || reason.includes('invalid note_mode')
       || reason.includes('invalid freshness_bias')
       || reason.includes('invalid source_mix')

@@ -34,11 +34,13 @@ process.stdin.on('end', () => {
     return;
   }
   process.stdout.write(JSON.stringify({
+    status: 'generated',
     summary: 'Cleaned summary from bundled runtime. It removes scraper junk from the fetched article. It keeps the factual core of the story intact. It returns a longer gist suitable for the status panel. It stays within the structured output contract.',
     excerpt: 'Cleaned summary from bundled runtime.',
     entities: ['Iran', 'United States'],
     topics: ['world'],
-    content_quality: 'clean'
+    content_quality: 'clean',
+    reason: ''
   }));
 });
 `;
@@ -109,6 +111,7 @@ test('bundled small llm uses packaged runtime when executable and model are pres
   });
   assert.equal(summary.ok, true);
   assert.equal(summary.analysis_source, 'llm');
+  assert.equal(summary.status, 'generated');
   assert.match(summary.summary, /Cleaned summary from bundled runtime/);
 });
 
@@ -132,11 +135,13 @@ if (attempt < 3) {
   process.exit(0);
 }
 process.stdout.write(JSON.stringify({
+  status: 'generated',
   summary: 'Sentence one states the core news clearly. Sentence two adds the immediate context. Sentence three explains the reported decision. Sentence four notes who is affected. Sentence five describes the next step in the story.',
   excerpt: 'Sentence one states the core news clearly. Sentence two adds the immediate context.',
   entities: ['Microsoft'],
   topics: ['tech'],
-  content_quality: 'clean'
+  content_quality: 'clean',
+  reason: ''
 }));
 `;
   fs.writeFileSync(executablePath, script, { mode: 0o755 });
@@ -168,8 +173,60 @@ process.stdout.write(JSON.stringify({
   });
   assert.equal(summary.ok, true);
   assert.equal(summary.analysis_source, 'llm');
+  assert.equal(summary.status, 'generated');
   assert.equal(summary.attempts, 3);
   assert.match(summary.summary, /Sentence one states the core news clearly/);
+});
+
+test('bundled small llm accepts unavailable feed-summary results', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'subgrapher-llm-unavailable-'));
+  const binDir = path.join(root, 'bin');
+  const modelDir = path.join(root, 'models');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(modelDir, { recursive: true });
+  const executablePath = path.join(binDir, 'subgrapher-llm');
+  const modelPath = path.join(modelDir, 'Qwen3.5-0.8B-Q8_0.gguf');
+  const script = `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  status: 'unavailable',
+  summary: '',
+  excerpt: '',
+  entities: [],
+  topics: ['world'],
+  content_quality: 'fragmented',
+  reason: 'paywall_chrome_only'
+}));
+`;
+  fs.writeFileSync(executablePath, script, { mode: 0o755 });
+  fs.writeFileSync(modelPath, 'placeholder-model');
+  fs.writeFileSync(path.join(root, 'runtime-manifest.json'), `${JSON.stringify({
+    bundled: true,
+    backend: 'bundled-cli',
+    model_id: 'unavailable-model',
+    model_name: 'Unavailable Model',
+    tasks: ['note_policy_classification', 'rss_article_cleanup_summary'],
+    schema_version: 1,
+    prompt_versions: {
+      note_policy_classification: 1,
+      rss_article_cleanup_summary: 1,
+    },
+    executable_rel_path: 'bin/subgrapher-llm',
+    model_rel_path: 'models/Qwen3.5-0.8B-Q8_0.gguf',
+    timeout_ms: 5000,
+  }, null, 2)}\n`);
+
+  const runtime = createBundledSmallLlmRuntime({
+    projectRoot: process.cwd(),
+    bundledRootDir: root,
+  });
+  const summary = await runtime.summarizeFeedArticle({
+    title: 'Unavailable article',
+    raw_content_text: 'Subscribe to read. Sign in. Open navigation menu.',
+  });
+  assert.equal(summary.ok, true);
+  assert.equal(summary.analysis_source, 'llm');
+  assert.equal(summary.status, 'unavailable');
+  assert.equal(summary.reason, 'paywall_chrome_only');
 });
 
 test('bundled small llm runs note and rss lanes in parallel while serializing each lane', async () => {
@@ -208,12 +265,14 @@ process.stdin.on('end', async () => {
     }));
     return;
   }
-  process.stdout.write(JSON.stringify({
+process.stdout.write(JSON.stringify({
+    status: 'generated',
     summary: 'Sentence one states the core news clearly. Sentence two adds the immediate context. Sentence three explains the reported decision. Sentence four notes who is affected. Sentence five describes the next step in the story.',
     excerpt: 'Sentence one states the core news clearly. Sentence two adds the immediate context.',
     entities: ['Microsoft'],
     topics: ['tech'],
-    content_quality: 'clean'
+    content_quality: 'clean',
+    reason: ''
   }));
 });
 `;

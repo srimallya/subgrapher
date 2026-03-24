@@ -150,6 +150,7 @@ const state = {
   privateRoomEditorSaveTimer: null,
   settingsDraft: null,
   settingsPersisted: null,
+  uiTheme: 'dark',
   referenceRanking: {
     enabled: false,
     enabledAt: 0,
@@ -7542,16 +7543,20 @@ function closeStatusFeedPreviewModal() {
   const bodyNode = e('status-feed-modal-body');
   const statusNode = e('status-feed-modal-status');
   const openBtn = e('status-feed-open-btn');
+  const refreshBtn = e('status-feed-refresh-btn');
   if (overlay) overlay.classList.add('hidden');
   if (titleNode) titleNode.textContent = 'Article';
   if (metaNode) metaNode.textContent = '';
   if (bodyNode) bodyNode.textContent = '';
+  if (bodyNode) bodyNode.classList.remove('status-feed-modal-body-compact');
   if (statusNode) statusNode.textContent = '';
   if (openBtn) {
     openBtn.dataset.url = '';
     openBtn.dataset.title = '';
+    openBtn.textContent = 'Open';
     openBtn.disabled = true;
   }
+  if (refreshBtn) refreshBtn.textContent = 'Refresh Summary';
   state.dashboard.feedModal = {
     itemId: '',
     title: '',
@@ -7578,7 +7583,30 @@ function buildStatusFeedModalMeta(item = {}) {
   return parts.join(' · ');
 }
 
+function looksLikeUrlTitle(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  return /^https?:\/\//i.test(text) || /^[a-z0-9.-]+\.[a-z]{2,}\//i.test(text);
+}
+
+function buildStatusFeedModalTitle(item = {}) {
+  const displayTitle = String((item && item.display_title) || '').trim();
+  const title = String((item && item.title) || '').trim();
+  if (displayTitle && !looksLikeUrlTitle(displayTitle)) return displayTitle;
+  if (title && !looksLikeUrlTitle(title)) return title;
+  if (String((item && item.summary_status) || '').trim() === 'unavailable') return 'Unavailable article';
+  return displayTitle || title || 'Article';
+}
+
 function buildStatusFeedModalBody(item = {}) {
+  const summaryStatus = String((item && item.summary_status) || '').trim();
+  if (summaryStatus === 'unavailable') {
+    const reason = String((item && item.failure_reason) || '').trim();
+    if (reason) {
+      return `No usable article body was found for this story.\n\nReason: ${reason.replace(/_/g, ' ')}.`;
+    }
+    return 'No usable article body was found for this story.';
+  }
   const cleanSummary = String((item && item.clean_summary) || '').trim();
   if (cleanSummary) return cleanSummary;
   const content = String((item && (item.raw_content_text || item.content_text)) || '').trim();
@@ -7596,21 +7624,30 @@ function applyStatusFeedModalItem(item = {}, options = {}) {
   const openBtn = e('status-feed-open-btn');
   const refreshBtn = e('status-feed-refresh-btn');
   if (!titleNode || !metaNode || !bodyNode || !statusNode || !openBtn || !refreshBtn) return;
-  const title = String((item && (item.display_title || item.title)) || 'Article').trim() || 'Article';
+  const title = buildStatusFeedModalTitle(item);
   const url = String((item && item.url) || '').trim();
   const content = buildStatusFeedModalBody(item);
+  const summaryStatus = String((item && item.summary_status) || '').trim();
+  const manualRetryCount = Math.max(0, Number((item && item.manual_retry_count) || 0) || 0);
   const statusText = String(options.status || '').trim() || (
-    String((item && item.fetch_status) || '').trim() === 'fetched'
-      ? ''
-      : 'Showing saved summary because full fetched content was unavailable.'
+    summaryStatus === 'unavailable'
+      ? 'No usable article body was found after refetch.'
+      : (
+        String((item && item.fetch_status) || '').trim() === 'fetched'
+          ? ''
+          : 'Showing saved summary because full fetched content was unavailable.'
+      )
   );
   titleNode.textContent = title;
   metaNode.textContent = buildStatusFeedModalMeta(item);
   bodyNode.textContent = content;
+  bodyNode.classList.toggle('status-feed-modal-body-compact', summaryStatus === 'unavailable');
   statusNode.textContent = statusText;
   openBtn.dataset.url = url;
   openBtn.dataset.title = title;
+  openBtn.textContent = summaryStatus === 'unavailable' ? 'Open Source' : 'Open';
   openBtn.disabled = !url;
+  refreshBtn.textContent = manualRetryCount > 0 ? 'Retry Fetch' : 'Refresh Summary';
   refreshBtn.disabled = !!options.disableRefresh;
   state.dashboard.feedModal = {
     itemId: String((item && item.id) || state.dashboard.feedModal.itemId || '').trim(),
@@ -13089,6 +13126,7 @@ function normalizeSettingsDraft(raw = {}) {
     : 'lmstudio';
   return {
     default_search_engine: String(src.default_search_engine || 'ddg').trim().toLowerCase(),
+    ui_theme: String(src.ui_theme || 'dark').trim().toLowerCase() === 'light' ? 'light' : 'dark',
     reference_ranking_enabled: !!src.reference_ranking_enabled,
     lumino_last_provider: String(src.lumino_last_provider || 'openai').trim().toLowerCase(),
     lumino_last_model: String(src.lumino_last_model || '').trim(),
@@ -13128,6 +13166,17 @@ function normalizeSettingsDraft(raw = {}) {
     history_enabled: Object.prototype.hasOwnProperty.call(src, 'history_enabled') ? !!src.history_enabled : true,
     history_max_entries: historyMaxEntries,
   };
+}
+
+function applyUiTheme(theme = 'dark') {
+  const next = String(theme || '').trim().toLowerCase() === 'light' ? 'light' : 'dark';
+  state.uiTheme = next;
+  document.body.dataset.theme = next;
+  const toggle = e('app-theme-toggle-btn');
+  if (toggle) {
+    toggle.setAttribute('aria-label', `Switch to ${next === 'dark' ? 'light' : 'dark'} mode`);
+    toggle.setAttribute('title', `Switch to ${next === 'dark' ? 'light' : 'dark'} mode`);
+  }
 }
 
 function validateSettingsDraft(draft = {}) {
@@ -16227,7 +16276,7 @@ function bindControls() {
     const refreshBtn = e('status-feed-refresh-btn');
     if (refreshBtn) refreshBtn.disabled = true;
     const statusNode = e('status-feed-modal-status');
-    if (statusNode) statusNode.textContent = 'Refreshing summary…';
+    if (statusNode) statusNode.textContent = 'Refetching article and regenerating summary…';
     state.dashboard.feedModal.loading = true;
     const res = await api.dashboardRerunFeedItemSummary(itemId);
     if (!isModalOpen('status-feed-overlay')) return;
@@ -16237,12 +16286,34 @@ function bindControls() {
       if (statusNode) statusNode.textContent = (res && res.message) || 'Unable to refresh summary.';
       return;
     }
-    applyStatusFeedModalItem(res.item, {
-      loading: false,
-      disableRefresh: false,
-      status: 'Summary refreshed.',
-    });
-    await loadDashboardFeedItems({ refresh: false });
+    if (res.deleted) {
+      closeStatusFeedPreviewModal();
+    } else {
+      const summaryStatus = String((res.item && res.item.summary_status) || '').trim();
+      applyStatusFeedModalItem(res.item, {
+        loading: false,
+        disableRefresh: false,
+        status: summaryStatus === 'unavailable'
+          ? 'No usable article body was found after refetch.'
+          : 'Summary refreshed.',
+      });
+    }
+    await loadStatusFeedItems({ refresh: false });
+  });
+  e('app-theme-toggle-btn')?.addEventListener('click', async () => {
+    const previousTheme = state.uiTheme;
+    const nextTheme = state.uiTheme === 'light' ? 'dark' : 'light';
+    applyUiTheme(nextTheme);
+    if (!api.updatePreferences) return;
+    const res = await api.updatePreferences({ ui_theme: nextTheme });
+    if (res && res.ok) {
+      const nextSettings = normalizeSettingsDraft(res.settings || {});
+      state.settingsPersisted = nextSettings;
+      state.settingsDraft = nextSettings;
+      applyUiTheme(nextSettings.ui_theme);
+      return;
+    }
+    applyUiTheme(previousTheme);
   });
 
   if (!document.__contextPreviewEscBound) {
@@ -16710,9 +16781,11 @@ async function initialize() {
   await setBrowserMarkerMode(state.markerMode, { persist: false });
   await setupOnboardingBindings();
   setupBrowserEvents();
+  applyUiTheme(state.uiTheme);
 
   const prefRes = await api.getPreferences();
   if (prefRes && prefRes.ok) {
+    applyUiTheme(prefRes.ui_theme || 'dark');
     const engine = String(prefRes.default_search_engine || 'ddg').trim().toLowerCase();
     const topSelect = e('default-search-engine-select');
     if (topSelect) topSelect.value = engine;

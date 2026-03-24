@@ -20,6 +20,7 @@ const PATH_B_DENIED = new Set([
   'write_markdown_artifact',
   'write_html_artifact',
   'open_web_tab',
+  'open_artifact',
   'add_web_highlight',
   'add_artifact_highlight',
   'clear_highlights',

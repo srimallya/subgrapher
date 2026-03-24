@@ -117,3 +117,179 @@ test('dashboard store resetFeedCache clears stored RSS items without touching ot
   assert.equal(listed.ok, true);
   assert.equal(listed.items.length, 0);
 });
+
+test('dashboard store rerunFeedItemSummary refetches content and regenerates summary', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+    fetchArticlePreview: async () => ({
+      ok: true,
+      title: 'Recovered article title',
+      text: 'Recovered article body with the real story content after refetch.',
+      markdown: 'Recovered article body with the real story content after refetch.',
+      fetch_status: 'fetched',
+    }),
+    summarizeArticle: async (article = {}) => ({
+      ok: true,
+      status: 'generated',
+      summary: `Recovered summary from: ${String(article.raw_content_text || '').trim()} Sentence two adds context. Sentence three adds detail. Sentence four names affected parties. Sentence five covers what comes next.`,
+      excerpt: 'Recovered summary from refetch.',
+      entities: ['Example Org'],
+      topics: ['world'],
+      content_quality: 'clean',
+      model_id: 'test-model',
+      generated_at: 1_710_000_000_123,
+      analysis_source: 'llm',
+      reason: '',
+    }),
+  });
+
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: Date.now(),
+      items: [{
+        id: 'feed_retry_1',
+        url: 'https://example.com/retry',
+        title: 'Retry me',
+        display_title: 'Retry me',
+        raw_content_text: 'Old cached body.',
+        clean_summary: 'Old clean summary.',
+        clean_excerpt: 'Old excerpt.',
+        source_name: 'Example Feed',
+        source_domain: 'example.com',
+        topic: 'world',
+        source_topic: 'world',
+        published_at: Date.now(),
+        fetched_at: Date.now(),
+        content_fetched_at: Date.now(),
+        fetch_status: 'fetched',
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const res = await store.rerunFeedItemSummary('feed_retry_1');
+  assert.equal(res.ok, true);
+  assert.match(String(res.item.raw_content_text || ''), /Recovered article body/);
+  assert.match(String(res.item.clean_summary || ''), /Recovered summary from:/);
+  assert.equal(res.item.summary_status, 'generated');
+  assert.equal(res.item.manual_retry_count, 1);
+  assert.equal(res.item.hidden_from_feed, false);
+});
+
+test('dashboard store deletes item after second unavailable manual retry', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+    fetchArticlePreview: async () => ({
+      ok: false,
+      fetch_status: 'rss_only',
+    }),
+  });
+
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: Date.now(),
+      items: [{
+        id: 'feed_unavailable_1',
+        url: 'https://example.com/unavailable',
+        title: 'Unavailable story',
+        display_title: 'Unavailable story',
+        summary: '',
+        raw_content_text: '',
+        clean_summary: '',
+        clean_excerpt: '',
+        source_name: 'Example Feed',
+        source_domain: 'example.com',
+        topic: 'world',
+        source_topic: 'world',
+        published_at: Date.now(),
+        fetched_at: Date.now(),
+        content_fetched_at: Date.now(),
+        fetch_status: 'rss_only',
+        manual_retry_count: 1,
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const res = await store.rerunFeedItemSummary('feed_unavailable_1');
+  assert.equal(res.ok, true);
+  assert.equal(res.deleted, true);
+  assert.equal(res.item.summary_status, 'unavailable');
+  assert.equal(res.item.manual_retry_count, 2);
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 0);
+
+  const fetched = store.getFeedItem('feed_unavailable_1');
+  assert.equal(fetched.ok, false);
+  assert.match(String(fetched.message || ''), /not found/i);
+});
+
+test('dashboard store keeps first unavailable result visible until retry', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+    fetchArticlePreview: async () => ({
+      ok: false,
+      fetch_status: 'rss_only',
+    }),
+  });
+
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: Date.now(),
+      items: [{
+        id: 'feed_unavailable_first',
+        url: 'https://example.com/unavailable-first',
+        title: 'Unavailable story',
+        display_title: 'Unavailable story',
+        summary: '',
+        raw_content_text: '',
+        clean_summary: '',
+        clean_excerpt: '',
+        source_name: 'Example Feed',
+        source_domain: 'example.com',
+        topic: 'world',
+        source_topic: 'world',
+        published_at: Date.now(),
+        fetched_at: Date.now(),
+        content_fetched_at: Date.now(),
+        fetch_status: 'rss_only',
+        manual_retry_count: 0,
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const res = await store.rerunFeedItemSummary('feed_unavailable_first');
+  assert.equal(res.ok, true);
+  assert.equal(res.deleted, undefined);
+  assert.equal(res.item.summary_status, 'unavailable');
+  assert.equal(res.item.manual_retry_count, 1);
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 1);
+
+  const fetched = store.getFeedItem('feed_unavailable_first');
+  assert.equal(fetched.ok, true);
+  assert.equal(fetched.item.summary_status, 'unavailable');
+});

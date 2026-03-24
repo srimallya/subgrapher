@@ -342,6 +342,7 @@ function handleChat(payload = {}) {
     contextNote,
     artifactNote,
     'Use `/artifact title: content`, `/viz <title>` (creates runnable HTML artifact), or `/crawl <url>` / `/crawl status` / `/crawl stop` for direct workspace mutations.',
+    'Use `open_artifact` to switch to an existing artifact or viz in the workspace.',
     'For direct corrections, prefer write_markdown_artifact/write_html_artifact with artifact_id. `/diff artifact <id> <text>` queues an append patch for manual apply.'
   ].filter(Boolean).join(' ');
   const overrideText = String(payload.assistant_text || '').trim();
@@ -472,6 +473,7 @@ const AGENT_TOOLS = [
     description: [
       'Write or update an executable HTML artifact with full content.',
       'Use this for dynamic interactive visualizations and games that run in the workspace.',
+      'Writing an HTML artifact also queues that artifact to open in the workspace artifact surface.',
       'If artifact_id is omitted, runtime may update the active artifact for iterative fix/improve requests; otherwise a new HTML artifact is created.',
       LUMINO_HTML_ARTIFACT_TOOLING_SUMMARY,
     ].join(' '),
@@ -578,6 +580,19 @@ const AGENT_TOOLS = [
         title: { type: 'string', description: 'Optional preferred tab title.' },
       },
       required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'open_artifact',
+    allowed_callers: ['direct'],
+    description: 'Open an existing artifact in the active reference workspace. Use this when the user asks to open, show, switch to, or render an existing artifact or viz.',
+    parameters: {
+      type: 'object',
+      properties: {
+        artifact_id: { type: 'string', description: 'Artifact ID to open in the workspace.' },
+      },
+      required: ['artifact_id'],
       additionalProperties: false,
     },
   },

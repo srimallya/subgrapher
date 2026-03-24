@@ -1,7 +1,7 @@
 # Subgrapher App Spec (Unified Artifact Runtime)
 
 ## Summary
-Current app version: `2.2.8`
+Current app version: `2.3.0`
 
 Subgrapher uses one artifact runtime for authored outputs:
 - `markdown` artifacts for text/image docs
@@ -38,6 +38,12 @@ Where:
   - a topic-filtered feed with search and open-in-reference behavior
 - Feed items open as new web tabs in the active reference.
 - Notifications are read as operational shortcuts, not passive display-only items.
+- Feed preview modal behavior:
+  - `Refresh Summary` is a recovery action, not a pure resummarize action
+  - the action refetches the article first, then runs one bundled/provider LLM cleanup+summary pass on the refetched body
+  - when the fetched body is unusable, the modal shows an explicit unavailable state instead of dumping scraper or paywall junk
+  - the first unavailable result remains visible so the user can try one manual recovery
+  - if that manual retry still returns unavailable, the item is removed from stored RSS feed state and disappears from the visible feed list
 
 ### Notes surface
 - A dedicated `notes` workspace surface provides an ambient writing and reading layer alongside the browser-first Workspace flow.
@@ -83,6 +89,13 @@ Where:
 - Current bundled tasks:
   - `note_policy_classification`
   - `rss_article_cleanup_summary`
+- Feed cleanup contract:
+  - the feed summarization task returns structured cleanup output with explicit status
+  - valid status values are:
+    - `generated`
+    - `unavailable`
+  - the model is responsible for stripping nav chrome, subscribe/paywall copy, ads, cookie text, repeated site furniture, and similar boilerplate before summarizing
+  - when no usable article body is present, it must return `unavailable` instead of rewriting junk
 - Bootstrap behavior:
   - Settings shows bundled-LLM lifecycle state and progress:
     - `missing`
@@ -100,6 +113,37 @@ Where:
 - The `status` feed stores both raw fetched article text and cleaned summaries.
 - After crawler fetch, the bundled small LLM removes scraper noise and stores a concise factual gist for display/search.
 - `Rerun Tasks` in Settings discards old derived note/feed LLM outputs and rebuilds them from source content.
+- Per-item recovery flow:
+  - opening a feed item shows cleaned summary first, raw text only as fallback
+  - manual retry forces:
+    - refetch article body
+    - regenerate cleaned summary from the new fetch
+  - unavailable items are not kept indefinitely after a failed retry; they are removed from the RSS list after the retry fails
+- Stored feed item lifecycle includes:
+  - `summary_status`:
+    - `generated`
+    - `fallback`
+    - `empty`
+    - `unavailable`
+  - `manual_retry_count`
+  - `failure_reason`
+
+## Theme + UI
+- Subgrapher has two persisted UI themes:
+  - `dark`
+  - `light`
+- Theme state lives in normal app preferences as `ui_theme`.
+- The top-left `Subgrapher` brand control toggles theme and persists the choice across restarts.
+- Renderer application uses `document.body.dataset.theme` as the theme hook.
+- Light mode is intended as full first-party app chrome coverage, not only a status-tab palette swap.
+  - themed surfaces include:
+    - top bar and workspace chrome
+    - left/right rails
+    - tabs and segmented controls
+    - settings/history/mail/hyperweb shells
+    - modal chrome
+    - artifact shell and markdown/text editing surfaces
+- Embedded/source-driven content may still remain dark when the content itself is inherently code/preview driven, but surrounding chrome should follow the active theme.
 
 ### Markdown artifacts
 - Code/text editor with debounced autosave.

@@ -114,6 +114,7 @@ const HISTORY_EMBED_DIM = 96;
 const MAIL_POLL_INTERVAL_DEFAULT_SEC = 300;
 const SETTINGS_EDITABLE_KEYS = new Set([
   'default_search_engine',
+  'ui_theme',
   'reference_ranking_enabled',
   'lumino_last_provider',
   'lumino_last_model',
@@ -5512,6 +5513,7 @@ function upsertProviderPrimaryCompatibility(provider, apiKey) {
 function getDefaultSettings() {
   return {
     default_search_engine: 'ddg',
+    ui_theme: 'dark',
     reference_ranking_enabled: false,
     hyperweb_enabled: true,
     hyperweb_display_name: '',
@@ -5563,6 +5565,7 @@ function readSettings() {
     const raw = fs.readFileSync(settingsPath, 'utf8');
     const parsed = JSON.parse(raw);
     const engine = String((parsed && parsed.default_search_engine) || defaults.default_search_engine).trim().toLowerCase();
+    const uiTheme = String((parsed && parsed.ui_theme) || defaults.ui_theme).trim().toLowerCase();
     const savedProvider = String((parsed && parsed.lumino_last_provider) || defaults.lumino_last_provider).trim().toLowerCase();
     const savedModel = String((parsed && parsed.lumino_last_model) || defaults.lumino_last_model).trim();
     const automatedTasksBackend = String((parsed && parsed.automated_tasks_backend) || defaults.automated_tasks_backend).trim().toLowerCase();
@@ -5592,6 +5595,7 @@ function readSettings() {
     ).trim();
     return {
       default_search_engine: ['google', 'bing', 'ddg'].includes(engine) ? engine : 'ddg',
+      ui_theme: uiTheme === 'light' ? 'light' : 'dark',
       reference_ranking_enabled: parsed && Object.prototype.hasOwnProperty.call(parsed, 'reference_ranking_enabled')
         ? !!parsed.reference_ranking_enabled
         : defaults.reference_ranking_enabled,
@@ -5678,6 +5682,11 @@ function writeSettings(next) {
     Object.prototype.hasOwnProperty.call(input, 'default_search_engine')
       ? input.default_search_engine
       : current.default_search_engine
+  ).trim().toLowerCase();
+  const requestedUiTheme = String(
+    Object.prototype.hasOwnProperty.call(input, 'ui_theme')
+      ? input.ui_theme
+      : current.ui_theme
   ).trim().toLowerCase();
   const requestedHyperwebDisplayName = String(
     Object.prototype.hasOwnProperty.call(input, 'hyperweb_display_name')
@@ -5803,6 +5812,7 @@ function writeSettings(next) {
     default_search_engine: ['google', 'bing', 'ddg'].includes(requestedEngine)
       ? requestedEngine
       : 'ddg',
+    ui_theme: requestedUiTheme === 'light' ? 'light' : 'dark',
     reference_ranking_enabled: Object.prototype.hasOwnProperty.call(input, 'reference_ranking_enabled')
       ? !!input.reference_ranking_enabled
       : !!current.reference_ranking_enabled,
@@ -7211,19 +7221,23 @@ function validateProviderNotePolicyPayload(payload = {}) {
 
 function validateProviderFeedSummaryPayload(payload = {}) {
   const src = (payload && typeof payload === 'object') ? payload : {};
+  const status = String(src.status || '').trim().toLowerCase();
   const summary = String(src.summary || '').trim();
   const excerpt = String(src.excerpt || '').trim();
   const contentQuality = String(src.content_quality || '').trim();
-  if (!summary) throw new Error('missing summary');
+  if (!['generated', 'unavailable'].includes(status)) throw new Error(`invalid status: ${status || '[empty]'}`);
+  if (status === 'generated' && !summary) throw new Error('missing summary');
   if (!['clean', 'noisy', 'fragmented'].includes(contentQuality)) {
     throw new Error(`invalid content_quality: ${contentQuality || '[empty]'}`);
   }
   return {
+    status,
     summary,
-    excerpt: excerpt || summary.slice(0, 220).trim(),
+    excerpt: status === 'generated' ? (excerpt || summary.slice(0, 220).trim()) : excerpt,
     entities: Array.isArray(src.entities) ? src.entities.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12) : [],
     topics: Array.isArray(src.topics) ? src.topics.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean).slice(0, 8) : [],
     content_quality: contentQuality,
+    reason: String(src.reason || '').trim().slice(0, 160),
   };
 }
 
@@ -7296,13 +7310,17 @@ function buildProviderFeedSummaryPrompt(article = {}) {
     'You are Subgrapher automated RSS feed summarisation.',
     'Read the fetched article text and return exactly one JSON object.',
     'No prose. No markdown. No code fences.',
-    'Remove scraper noise, repeated navigation, subscribe prompts, and site chrome.',
-    'Write the gist in 5 to 10 factual sentences.',
-    'Write excerpt under 220 characters.',
+    'Remove ads, paywall copy, subscribe prompts, cookie text, nav text, repeated site furniture, accessibility menu text, and legal boilerplate.',
+    'Summarize only the article body.',
+    'If the fetched text does not contain a usable article body, return status unavailable instead of rewriting junk.',
+    'When status is generated, write the gist in 5 to 10 factual sentences.',
+    'Write excerpt under 220 characters when status is generated.',
     'Return entities as a short list of names.',
     'Return topics as a short list of lowercase tags.',
     'Choose content_quality from: clean, noisy, fragmented.',
-    '{"summary":"","excerpt":"","entities":[],"topics":[],"content_quality":"clean"}',
+    'Choose status from: generated, unavailable.',
+    'Set reason to a short machine-friendly explanation when unavailable, otherwise empty string.',
+    '{"status":"generated","summary":"","excerpt":"","entities":[],"topics":[],"content_quality":"clean","reason":""}',
     '',
     `Title: ${title || '[untitled]'}`,
     `Source: ${sourceName || '[unknown]'}`,
@@ -17795,6 +17813,7 @@ function buildLuminoProviderPrompts(message, activeRef, scopedRefs = [], options
       'Artifact persistence rules:',
       '- When the user asks for a detailed report, essay, article, writeup, or any long-form deliverable, use write_markdown_artifact to write the full content into a persistent deliverable artifact.',
       '- When the user asks for interactive browser visualizations/games, use write_html_artifact (or create_artifact with artifact_type="html").',
+      '- When the user asks to open, show, switch to, or render an existing artifact or viz, use open_artifact with the artifact_id instead of open_web_tab.',
       '- When the user says "write it into an artifact", "save it as an artifact", or similar, use the appropriate artifact writer with the relevant content.',
       '- For iterative edit requests (fix/improve/update/refactor/correct), update the active artifact in place by passing artifact_id.',
       '- Create a new artifact only when the user explicitly asks for a new/another/separate version.',
@@ -18613,6 +18632,7 @@ function formatToolStatusStart(toolName, args = {}) {
   if (name === 'search_local_evidence') return `Ranking local evidence for "${trimStatusText(payload.query || '', 90)}"...`;
   if (name === 'expand_local_evidence_graph') return `Expanding local evidence graph for "${trimStatusText(payload.query || '', 90)}"...`;
   if (name === 'open_web_tab') return `Opening web tab: ${summarizeUrlForStatus(payload.url)}`;
+  if (name === 'open_artifact') return `Opening artifact ${trimStatusText(payload.artifact_id || '', 40) || '(selected artifact)'}...`;
   if (name === 'add_web_highlight') return `Adding web highlight for ${summarizeUrlForStatus(payload.url)}`;
   if (name === 'add_artifact_highlight') {
     return `Adding artifact highlight for ${trimStatusText(payload.artifact_id || '', 40) || '(artifact)' }...`;
@@ -19362,6 +19382,44 @@ async function executeLuminoChat(input, options = {}) {
               type: 'web',
               reference_id: srId,
               url: parsedUrl,
+              title,
+            }],
+          };
+        }
+
+        if (name === 'open_artifact') {
+          const artifactId = String(args.artifact_id || '').trim();
+          if (!artifactId) {
+            return { ok: false, message: 'artifact_id is required.', tool_output: { ok: false, message: 'artifact_id is required.' } };
+          }
+          const refs = getReferences();
+          const refIdx = findReferenceIndex(refs, srId);
+          if (refIdx < 0) {
+            return { ok: false, message: 'Reference not found.', tool_output: { ok: false, message: 'Reference not found.' } };
+          }
+          const artifacts = Array.isArray(refs[refIdx].artifacts) ? refs[refIdx].artifacts : [];
+          const artifact = artifacts.find((item) => String((item && item.id) || '').trim() === artifactId) || null;
+          if (!artifact) {
+            return {
+              ok: false,
+              message: 'Artifact not found in the active reference.',
+              tool_output: { ok: false, message: 'Artifact not found in the active reference.' },
+            };
+          }
+          const title = String((artifact && artifact.title) || 'Artifact').trim().slice(0, 180) || 'Artifact';
+          return {
+            ok: true,
+            message: `Opened artifact "${title}".`,
+            tool_output: {
+              ok: true,
+              artifact_id: artifactId,
+              title,
+              artifact_type: String((artifact && artifact.type) || 'markdown').trim().toLowerCase(),
+            },
+            pending_workspace_tabs: [{
+              type: 'artifact',
+              reference_id: srId,
+              artifact_id: artifactId,
               title,
             }],
           };
