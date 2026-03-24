@@ -1578,6 +1578,23 @@ function normalizeWhitespace(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function stripMarkdownListMarker(line = '') {
+  const raw = String(line || '');
+  const match = raw.match(/^(\s*)([-+*]|\d+\.)\s+(.*)$/);
+  if (!match) {
+    return {
+      text: raw,
+      contentOffset: 0,
+    };
+  }
+  const content = String(match[3] || '');
+  const contentOffset = raw.indexOf(content);
+  return {
+    text: content,
+    contentOffset: Math.max(0, contentOffset),
+  };
+}
+
 function cleanNoteEvidenceSnippet(value = '', fallback = '') {
   const text = normalizeWhitespace(value);
   if (!text) return normalizeWhitespace(fallback);
@@ -1679,45 +1696,52 @@ function buildProvisionalNoteClaims(markdown = '') {
   const text = String(markdown || '');
   if (!text.trim()) return [];
   const out = [];
-  const re = /[^.!?\n]+[.!?]?/g;
-  let match = re.exec(text);
-  while (match) {
-    const chunk = String(match[0] || '');
-    const trimmed = chunk.trim();
-    if (trimmed) {
-      const localIndex = chunk.indexOf(trimmed);
-      const start = match.index + Math.max(0, localIndex);
-      const end = start + trimmed.length;
-      const lower = trimmed.toLowerCase();
-      const hasYear = /\b(19|20)\d{2}\b/.test(trimmed);
-      const hasNumber = /\b\d+([.,]\d+)?\b/.test(trimmed);
-      const hasVerb = NOTE_PREVIEW_VERB_PATTERN.test(trimmed);
-      const hasEntity = /\b(?:[A-Z][a-z]{2,}|[A-Z]{2,}|[A-Z][a-z]+\s+[A-Z][a-z]+|GPT-\d+)\b/.test(trimmed);
-      const hasCurrentCue = /\b(now|today|currently|ongoing|current|latest)\b/.test(lower);
-      const hasConflictCue = /\b(war|conflict|fight|fighting|attack|attacking|invasion|invade|invading|missile|airstrike|ceasefire|troops|military)\b/.test(lower);
-      const concreteTerms = lower
-        .replace(/https?:\/\/[^\s]+/g, ' ')
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter((item) => item.length >= 3 && !NOTE_PREVIEW_STOPWORDS.has(item));
-      const factualLike = hasVerb && (hasYear || hasNumber || hasEntity || hasConflictCue || (hasCurrentCue && concreteTerms.length >= 2));
-      if (factualLike && end > start) {
-        out.push({
-          id: `preview_${start}_${end}`,
-          claim_text: trimmed,
-          start_offset: start,
-          end_offset: end,
-          status: 'weak_evidence',
-          verdict: 'weak_evidence',
-          highlight_score: 0.34,
-          top_score: 0.34,
-          truth_confidence: 0.34,
-          provisional: true,
-        });
+  let offset = 0;
+  text.split('\n').forEach((lineRaw) => {
+    const line = String(lineRaw || '');
+    const normalizedLine = stripMarkdownListMarker(line);
+    const contentLine = String(normalizedLine.text || '');
+    const re = /[^.!?\n]+[.!?]?/g;
+    let match = re.exec(contentLine);
+    while (match) {
+      const chunk = String(match[0] || '');
+      const trimmed = chunk.trim();
+      if (trimmed) {
+        const localIndex = chunk.indexOf(trimmed);
+        const start = offset + Number(normalizedLine.contentOffset || 0) + match.index + Math.max(0, localIndex);
+        const end = start + trimmed.length;
+        const lower = trimmed.toLowerCase();
+        const hasYear = /\b(19|20)\d{2}\b/.test(trimmed);
+        const hasNumber = /\b\d+([.,]\d+)?\b/.test(trimmed);
+        const hasVerb = NOTE_PREVIEW_VERB_PATTERN.test(trimmed);
+        const hasEntity = /\b(?:[A-Z][a-z]{2,}|[A-Z]{2,}|[A-Z][a-z]+\s+[A-Z][a-z]+|GPT-\d+)\b/.test(trimmed);
+        const hasCurrentCue = /\b(now|today|currently|ongoing|current|latest)\b/.test(lower);
+        const hasConflictCue = /\b(war|conflict|fight|fighting|attack|attacking|invasion|invade|invading|missile|airstrike|ceasefire|troops|military)\b/.test(lower);
+        const concreteTerms = lower
+          .replace(/https?:\/\/[^\s]+/g, ' ')
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter((item) => item.length >= 3 && !NOTE_PREVIEW_STOPWORDS.has(item));
+        const factualLike = hasVerb && (hasYear || hasNumber || hasEntity || hasConflictCue || (hasCurrentCue && concreteTerms.length >= 2));
+        if (factualLike && end > start) {
+          out.push({
+            id: `preview_${start}_${end}`,
+            claim_text: trimmed,
+            start_offset: start,
+            end_offset: end,
+            status: 'weak_evidence',
+            verdict: 'weak_evidence',
+            highlight_score: 0.34,
+            top_score: 0.34,
+            truth_confidence: 0.34,
+            provisional: true,
+          });
+        }
       }
+      match = re.exec(contentLine);
     }
-    match = re.exec(text);
-  }
+    offset += line.length + 1;
+  });
   return out;
 }
 
@@ -1822,8 +1846,6 @@ function shouldShowProvisionalNoteAnalysis() {
   if (state.noteAnalysisPending) return true;
   if (draft !== saved) return true;
   if (!state.activeNoteAnalysis) return true;
-  if (Number((state.activeNoteAnalysis && state.activeNoteAnalysis.claim_count) || 0) <= 0) return true;
-  if (Number(state.noteScore || 0) <= 0 && (!Array.isArray(state.activeNoteClaims) || state.activeNoteClaims.length === 0)) return true;
   return false;
 }
 

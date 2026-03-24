@@ -26,6 +26,23 @@ function clampNumber(value, min, max, fallback) {
   return n;
 }
 
+function stripMarkdownListMarker(line = '') {
+  const raw = String(line || '');
+  const match = raw.match(/^(\s*)([-+*]|\d+\.)\s+(.*)$/);
+  if (!match) {
+    return {
+      text: raw,
+      contentOffset: 0,
+    };
+  }
+  const content = String(match[3] || '');
+  const contentOffset = raw.indexOf(content);
+  return {
+    text: content,
+    contentOffset: Math.max(0, contentOffset),
+  };
+}
+
 function escapeSegment(value = '') {
   return String(value || '').trim().replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 160);
 }
@@ -431,19 +448,21 @@ function buildSentenceRegions(bodyMarkdown = '', claims = []) {
     const trimmed = line.trim();
     const isHeading = !!trimmed && (/^\s{0,3}#{1,6}\s+/.test(trimmed) || /^\*\*[^*]+\*\*$/.test(trimmed) || /^__[^_]+__$/.test(trimmed));
     const isSeparator = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(trimmed);
-    const isList = /^(\s*)([-+*]|\d+\.)\s+/.test(line);
-    if (!trimmed || isHeading || isSeparator || isList) {
+    const normalizedLine = stripMarkdownListMarker(line);
+    const contentLine = String(normalizedLine.text || '');
+    const contentTrimmed = contentLine.trim();
+    if (!trimmed || isHeading || isSeparator || !contentTrimmed) {
       offset += line.length + 1;
       if (!trimmed) paragraphIndex += 1;
       return;
     }
     const re = /[^.!?]+[.!?]?/g;
-    let match = re.exec(line);
+    let match = re.exec(contentLine);
     while (match) {
       const chunk = String(match[0] || '');
       const sentence = chunk.trim();
       if (sentence) {
-        const localStart = match.index + chunk.indexOf(sentence);
+        const localStart = Number(normalizedLine.contentOffset || 0) + match.index + chunk.indexOf(sentence);
         const start = offset + localStart;
         const end = start + sentence.length;
         const linkedClaims = (Array.isArray(claims) ? claims : []).filter((claim) => {
@@ -472,7 +491,7 @@ function buildSentenceRegions(bodyMarkdown = '', claims = []) {
           });
         }
       }
-      match = re.exec(line);
+      match = re.exec(contentLine);
     }
     offset += line.length + 1;
     paragraphIndex += 1;

@@ -348,28 +348,47 @@ function isMarkdownSeparatorLine(line = '') {
   return /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(String(line || ''));
 }
 
+function stripMarkdownListMarker(line = '') {
+  const raw = String(line || '');
+  const match = raw.match(/^(\s*)([-+*]|\d+\.)\s+(.*)$/);
+  if (!match) {
+    return {
+      text: raw,
+      contentOffset: 0,
+    };
+  }
+  const content = String(match[3] || '');
+  const contentOffset = raw.indexOf(content);
+  return {
+    text: content,
+    contentOffset: Math.max(0, contentOffset),
+  };
+}
+
 function splitClaims(markdown = '') {
   const text = String(markdown || '');
   const out = [];
   let offset = 0;
   text.split('\n').forEach((lineRaw) => {
     const line = String(lineRaw || '');
-    const trimmed = line.trim();
-    if (!trimmed || isMarkdownHeadingLine(line) || isMarkdownSeparatorLine(line) || isMarkdownListLine(line)) {
+    const normalizedLine = isMarkdownListLine(line) ? stripMarkdownListMarker(line) : { text: line, contentOffset: 0 };
+    const contentLine = String(normalizedLine.text || '');
+    const trimmed = contentLine.trim();
+    if (!trimmed || isMarkdownHeadingLine(line) || isMarkdownSeparatorLine(line)) {
       offset += line.length + 1;
       return;
     }
     const re = /[^.!?]+[.!?]?/g;
-    let match = re.exec(line);
+    let match = re.exec(contentLine);
     while (match) {
       const chunk = String(match[0] || '');
       const sentence = chunk.trim();
       if (sentence) {
         const startTrim = chunk.indexOf(sentence);
-        const start = offset + match.index + Math.max(0, startTrim);
+        const start = offset + Number(normalizedLine.contentOffset || 0) + match.index + Math.max(0, startTrim);
         splitCompoundClaimSegments(sentence, start).forEach((segment) => out.push(segment));
       }
-      match = re.exec(line);
+      match = re.exec(contentLine);
     }
     offset += line.length + 1;
   });
@@ -1307,13 +1326,6 @@ function createNoteAnalysisEngine(options = {}) {
         challenge: challengeRanked,
       });
     });
-    emitProgress('scoring_done', {
-      claim_count: claims.length,
-      source_count: sources.length,
-      passage_count: passages.length,
-      citation_count: citations.length,
-    });
-
     let temporalScores = new Map();
     if (temporalGraphScorer && sources.length > 0) {
       const rows = [];
@@ -1483,6 +1495,13 @@ function createNoteAnalysisEngine(options = {}) {
           excerpt: item.excerpt,
         });
       });
+    });
+
+    emitProgress('scoring_done', {
+      claim_count: claims.length,
+      source_count: sources.length,
+      passage_count: passages.length,
+      citation_count: citations.length,
     });
 
     const summary = summarizeAnalysis(claims);
