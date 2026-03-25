@@ -21,14 +21,14 @@ const SEMANTIC_MIN_SCORE = 0.18;
 const SOURCE_BALANCE_TARGET = 2;
 
 const STARTER_FEEDS = [
-  { id: 'reuters-politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/Reuters/PoliticsNews', topic: 'politics', topic_label: 'Politics', source_kind: 'publisher' },
-  { id: 'reuters-world', name: 'Reuters World', url: 'https://feeds.reuters.com/Reuters/worldNews', topic: 'world', topic_label: 'World', source_kind: 'publisher' },
-  { id: 'reuters-business', name: 'Reuters Business', url: 'https://feeds.reuters.com/reuters/businessNews', topic: 'econ', topic_label: 'Business', source_kind: 'publisher' },
-  { id: 'reuters-tech', name: 'Reuters Technology', url: 'https://feeds.reuters.com/reuters/technologyNews', topic: 'tech', topic_label: 'Technology', source_kind: 'publisher' },
-  { id: 'ap-politics', name: 'AP Politics', url: 'https://apnews.com/politics?output=rss', topic: 'politics', topic_label: 'Politics', source_kind: 'publisher' },
+  { id: 'reuters-politics', name: 'The Guardian Politics', url: 'https://www.theguardian.com/politics/rss', topic: 'politics', topic_label: 'Politics', source_kind: 'publisher' },
+  { id: 'reuters-world', name: 'BBC World', url: 'https://feeds.bbci.co.uk/news/world/rss.xml', topic: 'world', topic_label: 'World', source_kind: 'publisher' },
+  { id: 'reuters-business', name: 'BBC Business', url: 'https://feeds.bbci.co.uk/news/business/rss.xml', topic: 'econ', topic_label: 'Business', source_kind: 'publisher' },
+  { id: 'reuters-tech', name: 'TechCrunch', url: 'https://techcrunch.com/feed/', topic: 'tech', topic_label: 'Technology', source_kind: 'publisher' },
+  { id: 'ap-politics', name: 'NPR Politics', url: 'https://feeds.npr.org/1014/rss.xml', topic: 'politics', topic_label: 'Politics', source_kind: 'publisher' },
   { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech', topic_label: 'Technology', source_kind: 'publisher' },
   { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', topic: 'tech', topic_label: 'Technology', source_kind: 'publisher' },
-  { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: OTHER_TOPIC, topic_label: 'Top News', source_kind: 'publisher' },
+  { id: 'ap-top', name: 'NPR News', url: 'https://feeds.npr.org/1001/rss.xml', topic: OTHER_TOPIC, topic_label: 'Top News', source_kind: 'publisher' },
 ];
 
 function normalizeFeedSettings(raw = {}) {
@@ -95,24 +95,30 @@ function escapeRegex(value = '') {
 }
 
 function decodeXmlEntities(value = '') {
-  return String(value || '')
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, '\'')
-    .replace(/&#39;/g, '\'')
-    .replace(/&#x27;/gi, '\'')
-    .replace(/&#x2F;/gi, '/')
-    .replace(/&#(\d+);/g, (_match, code) => {
-      const num = Number(code || 0);
-      return Number.isFinite(num) ? String.fromCharCode(num) : '';
-    })
-    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
-      const num = parseInt(code || '0', 16);
-      return Number.isFinite(num) ? String.fromCharCode(num) : '';
-    });
+  let decoded = String(value || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+  // Some feeds double-encode entities, e.g. "&amp;#x27;".
+  for (let i = 0; i < 3; i += 1) {
+    const next = decoded
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, '\'')
+      .replace(/&#39;/g, '\'')
+      .replace(/&#x27;/gi, '\'')
+      .replace(/&#x2F;/gi, '/')
+      .replace(/&#(\d+);/g, (_match, code) => {
+        const num = Number(code || 0);
+        return Number.isFinite(num) ? String.fromCharCode(num) : '';
+      })
+      .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
+        const num = parseInt(code || '0', 16);
+        return Number.isFinite(num) ? String.fromCharCode(num) : '';
+      });
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
 }
 
 function stripXmlTags(value = '') {

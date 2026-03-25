@@ -15559,7 +15559,10 @@ function bindControls() {
       await refreshStatusData({ notifications: false });
       if (res && res.ok) {
         const itemCount = Array.isArray(res.items) ? res.items.length : 0;
-        state.settingsRssRefreshState = `RSS refreshed. ${itemCount} visible item(s).`;
+        const warning = String((res && res.message) || '').trim();
+        state.settingsRssRefreshState = warning
+          ? `RSS refreshed. ${itemCount} visible item(s). ${warning}`
+          : `RSS refreshed. ${itemCount} visible item(s).`;
       } else {
         state.settingsRssRefreshState = (res && res.message) ? res.message : 'RSS refresh failed.';
       }

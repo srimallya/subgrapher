@@ -442,7 +442,7 @@ test('dashboard store uses RSS category metadata before semantic fallback', asyn
   const originalFetch = global.fetch;
   global.fetch = async (url) => {
     const target = String(url || '');
-    if (target === 'https://apnews.com/hub/ap-top-news/rss.xml') {
+    if (target === 'https://feeds.npr.org/1001/rss.xml') {
       return new Response(`<?xml version="1.0" encoding="UTF-8"?>
         <rss version="2.0">
           <channel>
@@ -503,6 +503,73 @@ test('dashboard store uses RSS category metadata before semantic fallback', asyn
     assert.deepEqual(refreshed.items[0].rss_topics, ['politics']);
     assert.ok(Array.isArray(refreshed.items[0].rss_tags));
     assert.ok(refreshed.items[0].rss_tags.includes('Politics'));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('dashboard store decodes double-encoded XML entities from RSS titles and summaries', async () => {
+  const tempDir = makeTempDir();
+  const now = Date.now();
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const target = String(url || '');
+    if (target === 'https://feeds.bbci.co.uk/news/world/rss.xml') {
+      return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Fannie Masemola: South Africa&amp;#x27;s police boss to appear in court over Vusimuzi &amp;#x27;Cat&amp;#x27; Matlala deal</title>
+              <link>https://example.com/bbc-story</link>
+              <pubDate>${new Date(now).toUTCString()}</pubDate>
+              <description>South Africa&amp;#x27;s police commissioner faces questions over the Vusimuzi &amp;#x27;Cat&amp;#x27; Matlala contract.</description>
+            </item>
+          </channel>
+        </rss>`, { status: 200 });
+    }
+    return new Response('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel></channel></rss>', { status: 200 });
+  };
+
+  try {
+    const disabledSourceIds = [
+      'reuters-politics',
+      'reuters-business',
+      'reuters-tech',
+      'ap-politics',
+      'verge',
+      'ars',
+      'ap-top',
+    ];
+    const store = createDashboardStore({
+      userDataPath: tempDir,
+      getEmbeddingConfig: () => ({}),
+      getFeedSettings: () => ({ rss_disabled_source_ids: disabledSourceIds }),
+      fetchArticlePreview: async () => ({
+        ok: true,
+        title: 'Fannie Masemola: South Africa\'s police boss to appear in court over Vusimuzi \'Cat\' Matlala deal',
+        text: 'South Africa\'s police commissioner faces questions over the contract.',
+        markdown: 'South Africa\'s police commissioner faces questions over the contract.',
+        fetch_status: 'fetched',
+      }),
+      summarizeArticle: async () => ({
+        ok: true,
+        status: 'generated',
+        summary: 'South Africa\'s police commissioner faces questions over the contract.',
+        excerpt: 'South Africa\'s police commissioner faces questions over the contract.',
+        entities: [],
+        content_quality: 'clean',
+        model_id: 'test-model',
+        generated_at: now,
+        analysis_source: 'llm',
+      }),
+    });
+
+    const refreshed = await store.refreshFeeds({ force: true, topic: 'all', limit: 20 });
+    assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.items.length, 1);
+    assert.equal(refreshed.items[0].title.includes('&#x27;'), false);
+    assert.equal(refreshed.items[0].title.includes('South Africa\'s'), true);
+    assert.equal(refreshed.items[0].summary.includes('&#x27;'), false);
   } finally {
     global.fetch = originalFetch;
   }
