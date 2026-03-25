@@ -149,6 +149,8 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'rag_embedding_source',
   'rag_embedding_model',
   'rag_top_k',
+  'rss_strict_source_topics',
+  'rss_disabled_source_ids',
 ]);
 const FOLDER_MOUNT_MAX_FILES = 500;
 const CONTEXT_FILE_MAX_BYTES = 32 * 1024 * 1024;
@@ -5552,6 +5554,8 @@ function getDefaultSettings() {
     rag_embedding_source: RAG_EMBEDDING_SOURCE_DEFAULT,
     rag_embedding_model: RAG_EMBEDDING_MODEL_DEFAULT,
     rag_top_k: RAG_TOP_K_DEFAULT,
+    rss_strict_source_topics: true,
+    rss_disabled_source_ids: [],
   };
 }
 
@@ -5589,6 +5593,9 @@ function readSettings() {
     const ragEmbeddingSource = normalizeRagEmbeddingSource((parsed && parsed.rag_embedding_source) || defaults.rag_embedding_source);
     const ragEmbeddingModel = String((parsed && parsed.rag_embedding_model) || defaults.rag_embedding_model).trim();
     const ragTopK = Number((parsed && parsed.rag_top_k) || defaults.rag_top_k);
+    const rssDisabledSourceIds = Array.isArray(parsed && parsed.rss_disabled_source_ids)
+      ? parsed.rss_disabled_source_ids.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
     const hyperwebDisplayName = String(
       (parsed && parsed.hyperweb_display_name)
       || defaults.hyperweb_display_name
@@ -5668,6 +5675,10 @@ function readSettings() {
       rag_top_k: Number.isFinite(ragTopK)
         ? Math.max(1, Math.min(24, Math.round(ragTopK)))
         : defaults.rag_top_k,
+      rss_strict_source_topics: parsed && Object.prototype.hasOwnProperty.call(parsed, 'rss_strict_source_topics')
+        ? !!parsed.rss_strict_source_topics
+        : defaults.rss_strict_source_topics,
+      rss_disabled_source_ids: Array.from(new Set(rssDisabledSourceIds)),
     };
   } catch (_) {
     return defaults;
@@ -5808,6 +5819,17 @@ function writeSettings(next) {
       ? input.rag_top_k
       : current.rag_top_k
   );
+  const requestedRssDisabledSourceIds = Array.isArray(
+    Object.prototype.hasOwnProperty.call(input, 'rss_disabled_source_ids')
+      ? input.rss_disabled_source_ids
+      : current.rss_disabled_source_ids
+  )
+    ? (
+      Object.prototype.hasOwnProperty.call(input, 'rss_disabled_source_ids')
+        ? input.rss_disabled_source_ids
+        : current.rss_disabled_source_ids
+    ).map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
   const settings = {
     default_search_engine: ['google', 'bing', 'ddg'].includes(requestedEngine)
       ? requestedEngine
@@ -5907,6 +5929,10 @@ function writeSettings(next) {
     rag_top_k: Number.isFinite(requestedRagTopK)
       ? Math.max(1, Math.min(24, Math.round(requestedRagTopK)))
       : RAG_TOP_K_DEFAULT,
+    rss_strict_source_topics: Object.prototype.hasOwnProperty.call(input, 'rss_strict_source_topics')
+      ? !!input.rss_strict_source_topics
+      : !!current.rss_strict_source_topics,
+    rss_disabled_source_ids: Array.from(new Set(requestedRssDisabledSourceIds)),
   };
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
   return settings;
@@ -6432,6 +6458,7 @@ function getDashboardStore() {
   if (!dashboardStore) {
     dashboardStore = createDashboardStore({
       userDataPath: app.getPath('userData'),
+      getFeedSettings: () => readSettings(),
       getEmbeddingConfig: () => {
         const settings = readSettings();
         const ragEmbedding = resolveRagEmbeddingSettings(settings);
@@ -6444,6 +6471,17 @@ function getDashboardStore() {
     });
   }
   return dashboardStore;
+}
+
+function buildRssFeedCatalog() {
+  try {
+    const stateRes = getDashboardStore().getState();
+    return Array.isArray(stateRes && stateRes.state && stateRes.state.rss && stateRes.state.rss.sources)
+      ? stateRes.state.rss.sources
+      : [];
+  } catch (_) {
+    return [];
+  }
 }
 
 function getNotesStore() {
@@ -24357,7 +24395,7 @@ ipcMain.handle('browser:openDefaultBrowserSettings', () => {
 });
 
 ipcMain.handle('browser:getPreferences', () => {
-  return { ok: true, ...readSettings() };
+  return { ok: true, ...readSettings(), rss_feed_catalog: buildRssFeedCatalog() };
 });
 
 ipcMain.handle('browser:telegramStatus', async () => {
@@ -24639,6 +24677,7 @@ ipcMain.handle('browser:updatePreferences', async (_event, payload) => {
   return {
     ok: true,
     settings: updated,
+    rss_feed_catalog: buildRssFeedCatalog(),
     applied_runtime: appliedRuntime,
   };
 });

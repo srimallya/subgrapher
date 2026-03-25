@@ -18,19 +18,38 @@ const MAX_CONTENT_CHARS = 12_000;
 const MAX_EMBED_INPUT_CHARS = 2_500;
 const KEYWORD_WEIGHT = 3;
 const SEMANTIC_MIN_SCORE = 0.18;
+const SOURCE_BALANCE_TARGET = 2;
 
 const STARTER_FEEDS = [
-  { id: 'reuters-politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/Reuters/PoliticsNews', topic: 'politics' },
-  { id: 'reuters-world', name: 'Reuters World', url: 'https://feeds.reuters.com/Reuters/worldNews', topic: 'world' },
-  { id: 'reuters-business', name: 'Reuters Business', url: 'https://feeds.reuters.com/reuters/businessNews', topic: 'econ' },
-  { id: 'reuters-tech', name: 'Reuters Technology', url: 'https://feeds.reuters.com/reuters/technologyNews', topic: 'tech' },
-  { id: 'ap-politics', name: 'AP Politics', url: 'https://apnews.com/politics?output=rss', topic: 'politics' },
-  { id: 'ft-world', name: 'Financial Times World', url: 'https://www.ft.com/world?format=rss', topic: 'world' },
-  { id: 'ft-companies', name: 'Financial Times Companies', url: 'https://www.ft.com/companies?format=rss', topic: 'econ' },
-  { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech' },
-  { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', topic: 'tech' },
-  { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: OTHER_TOPIC },
+  { id: 'reuters-politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/Reuters/PoliticsNews', topic: 'politics', source_kind: 'publisher' },
+  { id: 'reuters-world', name: 'Reuters World', url: 'https://feeds.reuters.com/Reuters/worldNews', topic: 'world', source_kind: 'publisher' },
+  { id: 'reuters-business', name: 'Reuters Business', url: 'https://feeds.reuters.com/reuters/businessNews', topic: 'econ', source_kind: 'publisher' },
+  { id: 'reuters-tech', name: 'Reuters Technology', url: 'https://feeds.reuters.com/reuters/technologyNews', topic: 'tech', source_kind: 'publisher' },
+  { id: 'ap-politics', name: 'AP Politics', url: 'https://apnews.com/politics?output=rss', topic: 'politics', source_kind: 'publisher' },
+  { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech', source_kind: 'publisher' },
+  { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', topic: 'tech', source_kind: 'publisher' },
+  { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: OTHER_TOPIC, source_kind: 'publisher' },
+  { id: 'google-politics', name: 'Google News Politics', url: 'https://news.google.com/rss/search?q=politics&hl=en-US&gl=US&ceid=US:en', topic: 'politics', source_kind: 'aggregator' },
+  { id: 'google-world', name: 'Google News World', url: 'https://news.google.com/rss/search?q=world&hl=en-US&gl=US&ceid=US:en', topic: 'world', source_kind: 'aggregator' },
+  { id: 'google-business', name: 'Google News Business', url: 'https://news.google.com/rss/search?q=business&hl=en-US&gl=US&ceid=US:en', topic: 'econ', source_kind: 'aggregator' },
+  { id: 'google-tech', name: 'Google News Technology', url: 'https://news.google.com/rss/search?q=technology&hl=en-US&gl=US&ceid=US:en', topic: 'tech', source_kind: 'aggregator' },
 ];
+
+function normalizeFeedSettings(raw = {}) {
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const knownSourceIds = new Set(STARTER_FEEDS.map((feed) => String(feed.id || '').trim()).filter(Boolean));
+  const disabledSourceIds = Array.isArray(src.rss_disabled_source_ids)
+    ? src.rss_disabled_source_ids
+      .map((item) => String(item || '').trim())
+      .filter((item) => item && knownSourceIds.has(item))
+    : [];
+  return {
+    rss_strict_source_topics: Object.prototype.hasOwnProperty.call(src, 'rss_strict_source_topics')
+      ? !!src.rss_strict_source_topics
+      : true,
+    rss_disabled_source_ids: Array.from(new Set(disabledSourceIds)),
+  };
+}
 
 const TOPIC_PROTOTYPE_TEXT = {
   politics: 'government election congress parliament senate law policy diplomacy campaign administration white house ministry political party leadership constitution sanctions public office legislation voting',
@@ -124,6 +143,16 @@ function extractLink(block = '') {
   return decodeXmlEntities(String(simple || '').trim());
 }
 
+function extractSourceMeta(block = '') {
+  const raw = String(block || '');
+  const match = raw.match(/<source\b[^>]*url=(?:"([^"]+)"|'([^']+)')[^>]*>([\s\S]*?)<\/source>/i);
+  if (!match) return { name: '', url: '' };
+  return {
+    name: stripXmlTags(match[3] || ''),
+    url: decodeXmlEntities(String(match[1] || match[2] || '').trim()),
+  };
+}
+
 function normalizeUrl(value = '') {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -147,6 +176,134 @@ function canonicalizeUrl(value = '') {
   } catch (_) {
     return raw.toLowerCase();
   }
+}
+
+function normalizeSourceKind(value = '') {
+  return String(value || '').trim().toLowerCase() === 'aggregator' ? 'aggregator' : 'publisher';
+}
+
+function isGoogleNewsArticleUrl(value = '') {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const host = String(parsed.hostname || '').toLowerCase();
+    const parts = String(parsed.pathname || '').split('/').filter(Boolean);
+    return host === 'news.google.com' && (parts.includes('articles') || parts.includes('read'));
+  } catch (_) {
+    return false;
+  }
+}
+
+function extractGoogleNewsArticleId(value = '') {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const parts = String(parsed.pathname || '').split('/').filter(Boolean);
+    if (!parts.length) return '';
+    const idx = Math.max(parts.lastIndexOf('articles'), parts.lastIndexOf('read'));
+    if (idx < 0 || idx >= parts.length - 1) return '';
+    return String(parts[idx + 1] || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function decodeGoogleNewsArticleIdLocally(articleId = '') {
+  const id = String(articleId || '').trim();
+  if (!id) return { ok: false, needsBatch: false, url: '', id: '' };
+  try {
+    const decodedBytes = Buffer.from(id, 'base64url');
+    let decoded = decodedBytes.toString('latin1');
+    const prefix = Buffer.from([0x08, 0x13, 0x22]).toString('latin1');
+    if (decoded.startsWith(prefix)) decoded = decoded.slice(prefix.length);
+    const suffix = Buffer.from([0xd2, 0x01, 0x00]).toString('latin1');
+    if (decoded.endsWith(suffix)) decoded = decoded.slice(0, -suffix.length);
+    const bytes = Buffer.from(decoded, 'latin1');
+    if (!bytes.length) return { ok: false, needsBatch: false, url: '', id };
+    const first = bytes[0];
+    const start = first >= 0x80 ? 2 : 1;
+    const end = (first >= 0x80 ? bytes[1] : first) + 1;
+    const candidate = bytes.subarray(start, end).toString('latin1');
+    if (candidate.startsWith('AU_yqL')) return { ok: false, needsBatch: true, url: '', id };
+    const normalized = normalizeUrl(candidate);
+    return normalized ? { ok: true, needsBatch: false, url: normalized, id } : { ok: false, needsBatch: false, url: '', id };
+  } catch (_) {
+    return { ok: false, needsBatch: false, url: '', id };
+  }
+}
+
+async function decodeGoogleNewsArticleIdsViaBatch(articleIds = [], fetchImpl = fetch) {
+  const ids = (Array.isArray(articleIds) ? articleIds : []).map((item) => String(item || '').trim()).filter(Boolean);
+  if (!ids.length) return new Map();
+  const envelopes = ids.map((id, index) => (
+    `["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"${id}\\"]",null,"${index + 1}"]`
+  ));
+  const body = `[[${envelopes.join(',')}]]`;
+  const response = await fetchImpl('https://news.google.com/_/DotsSplashUi/data/batchexecute?rpcids=Fbv4je', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded;charset=utf-8',
+      referer: 'https://news.google.com/',
+    },
+    body: new URLSearchParams({ 'f.req': body }),
+  });
+  if (!response || !response.ok) return new Map();
+  const text = await response.text();
+  const urls = [];
+  let rest = text;
+  const header = '[\\"garturlres\\",\\"';
+  const footer = '\\",';
+  while (rest.includes(header)) {
+    const start = rest.split(header, 2)[1] || '';
+    if (!start.includes(footer)) break;
+    const url = start.split(footer, 1)[0] || '';
+    urls.push(normalizeUrl(url.replace(/\\u003d/g, '=').replace(/\\u0026/g, '&').replace(/\\"/g, '"')));
+    rest = start.split(footer, 2)[1] || '';
+  }
+  const out = new Map();
+  ids.forEach((id, index) => {
+    const resolved = String(urls[index] || '').trim();
+    if (resolved) out.set(id, resolved);
+  });
+  return out;
+}
+
+async function resolveGoogleNewsUrls(items = [], fetchImpl = fetch) {
+  const list = Array.isArray(items) ? items : [];
+  const pendingIds = [];
+  const pendingByIndex = new Map();
+  const resolvedItems = list.map((item, index) => {
+    const normalized = { ...(item || {}) };
+    if (normalizeSourceKind(normalized.source_kind) !== 'aggregator' || !isGoogleNewsArticleUrl(normalized.url)) {
+      return normalized;
+    }
+    const articleId = extractGoogleNewsArticleId(normalized.url);
+    const local = decodeGoogleNewsArticleIdLocally(articleId);
+    if (local.ok && local.url) {
+      normalized.canonical_article_url = local.url;
+      normalized.aggregator_resolved = true;
+      normalized.url = local.url;
+      return normalized;
+    }
+    if (local.needsBatch && articleId) {
+      pendingIds.push(articleId);
+      pendingByIndex.set(index, articleId);
+    }
+    normalized.canonical_article_url = '';
+    normalized.aggregator_resolved = false;
+    return normalized;
+  });
+  if (!pendingIds.length) return resolvedItems;
+  const batchResolved = await decodeGoogleNewsArticleIdsViaBatch(pendingIds, fetchImpl).catch(() => new Map());
+  pendingByIndex.forEach((articleId, index) => {
+    const resolved = String(batchResolved.get(articleId) || '').trim();
+    if (!resolved) return;
+    resolvedItems[index] = {
+      ...resolvedItems[index],
+      canonical_article_url: resolved,
+      aggregator_resolved: true,
+      url: resolved,
+    };
+  });
+  return resolvedItems;
 }
 
 function getDomain(value = '') {
@@ -240,7 +397,7 @@ function buildSearchText(item = {}) {
 
 function getItemLookupKeys(item = {}) {
   const keys = [];
-  const canonical = canonicalizeUrl(item.url || '');
+  const canonical = canonicalizeUrl(item.canonical_article_url || item.url || '');
   const id = String(item.id || '').trim();
   if (canonical) keys.push(`url:${canonical}`);
   if (id) keys.push(`id:${id}`);
@@ -254,9 +411,103 @@ function pruneFeedItems(items = []) {
     .filter((item) => item && (Number(item.published_at || 0) >= cutoff || Number(item.fetched_at || 0) >= cutoff));
 }
 
+function deriveReadabilityState(src = {}) {
+  const summaryStatus = String(src.summary_status || '').trim().toLowerCase();
+  const fetchStatus = String(src.fetch_status || '').trim().toLowerCase();
+  const failureReason = String(src.failure_reason || '').trim();
+  const hasFullContent = !!(src.has_full_content || (Number(src.content_fetched_at || 0) > 0 && String(src.raw_content_text || src.content_text || '').trim()));
+  if (normalizeSourceKind(src.source_kind) === 'aggregator' && !src.aggregator_resolved) return 'unavailable';
+  if (summaryStatus === 'unavailable') return 'unavailable';
+  if (hasFullContent && fetchStatus === 'fetched') return 'readable';
+  if (failureReason && !hasFullContent) return 'headline_only';
+  return 'headline_only';
+}
+
+function getReadabilityRank(item = {}) {
+  const state = String(item.readability_state || '').trim().toLowerCase();
+  if (state === 'readable') return 0;
+  if (state === 'headline_only') return 1;
+  return 2;
+}
+
+function sortFeedItemsByQualityAndRecency(items = []) {
+  return [...(Array.isArray(items) ? items : [])].sort((a, b) => {
+    const rankDiff = getReadabilityRank(a) - getReadabilityRank(b);
+    if (rankDiff !== 0) return rankDiff;
+    return Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0);
+  });
+}
+
+function applySourceBalance(items = [], limit = 80, options = {}) {
+  const list = Array.isArray(items) ? items.slice() : [];
+  if (!list.length) return [];
+  const visibleLimit = Math.max(1, Number(limit || list.length) || list.length);
+  const perSourceLimit = Math.max(1, Number(options.perSourceLimit || SOURCE_BALANCE_TARGET) || SOURCE_BALANCE_TARGET);
+  const strictUntil = Math.min(visibleLimit, Math.max(6, perSourceLimit * 5));
+  const picked = [];
+  const pickedIds = new Set();
+  const sourceCounts = new Map();
+  const sourceOf = (item = {}) => String(item.source_id || item.source_domain || item.source_name || 'unknown').trim().toLowerCase() || 'unknown';
+  const sorted = list.slice();
+  let cursor = 0;
+  while (picked.length < Math.min(visibleLimit, sorted.length)) {
+    let chosenIndex = -1;
+    for (let i = 0; i < sorted.length; i += 1) {
+      const candidate = sorted[i];
+      if (!candidate) continue;
+      const id = String(candidate.id || '').trim();
+      if (id && pickedIds.has(id)) continue;
+      const sourceKey = sourceOf(candidate);
+      const used = Number(sourceCounts.get(sourceKey) || 0);
+      const inStrictWindow = picked.length < strictUntil;
+      if (!inStrictWindow || used < perSourceLimit) {
+        chosenIndex = i;
+        break;
+      }
+    }
+    if (chosenIndex < 0) {
+      for (let i = cursor; i < sorted.length; i += 1) {
+        const candidate = sorted[i];
+        if (!candidate) continue;
+        const id = String(candidate.id || '').trim();
+        if (!id || !pickedIds.has(id)) {
+          chosenIndex = i;
+          break;
+        }
+      }
+    }
+    if (chosenIndex < 0) break;
+    const chosen = sorted[chosenIndex];
+    const id = String(chosen.id || '').trim();
+    const sourceKey = sourceOf(chosen);
+    picked.push(chosen);
+    if (id) pickedIds.add(id);
+    sourceCounts.set(sourceKey, Number(sourceCounts.get(sourceKey) || 0) + 1);
+    cursor = chosenIndex + 1;
+  }
+  return picked;
+}
+
+function finalizeFeedListing(items = [], options = {}) {
+  const limit = Math.max(1, Number(options.limit || 80) || 80);
+  const hideUnavailable = options.hideUnavailable !== false;
+  const readableFirst = sortFeedItemsByQualityAndRecency(
+    (Array.isArray(items) ? items : []).filter((item) => {
+      if (!item) return false;
+      if (normalizeSourceKind(item.source_kind) === 'aggregator' && !item.aggregator_resolved) return false;
+      return !hideUnavailable || String((item && item.readability_state) || '').trim() !== 'unavailable';
+    })
+  );
+  const balanced = applySourceBalance(readableFirst, limit, {
+    perSourceLimit: options.perSourceLimit,
+  });
+  return balanced.slice(0, limit);
+}
+
 function normalizeStoredFeedItem(input = {}) {
   const src = (input && typeof input === 'object') ? input : {};
-  const canonicalUrl = normalizeUrl(src.url || '');
+  const canonicalArticleUrl = normalizeUrl(src.canonical_article_url || src.url || '');
+  const canonicalUrl = normalizeUrl(src.url || canonicalArticleUrl || '');
   const displayTitle = String(
     src.display_title
     || src.crawler_title
@@ -268,9 +519,15 @@ function normalizeStoredFeedItem(input = {}) {
   const cleanSummary = String(src.clean_summary || src.summary || '').trim().slice(0, MAX_CONTENT_CHARS);
   const cleanExcerpt = String(src.clean_excerpt || buildContentExcerpt(cleanSummary || rawContentText || src.summary || '')).trim();
   const contentMarkdown = String(src.content_markdown || '').trim().slice(0, MAX_CONTENT_CHARS);
+  const readabilityState = deriveReadabilityState({
+    ...src,
+    raw_content_text: rawContentText,
+    content_text: rawContentText,
+  });
   return {
     id: String(src.id || hashText(`${canonicalUrl}|${displayTitle}|${src.published_at || 0}`)).trim(),
     url: canonicalUrl,
+    canonical_article_url: canonicalArticleUrl,
     title: String(src.title || displayTitle).trim() || displayTitle,
     crawler_title: String(src.crawler_title || '').trim(),
     display_title: displayTitle,
@@ -283,7 +540,12 @@ function normalizeStoredFeedItem(input = {}) {
     content_markdown: contentMarkdown,
     source_id: String(src.source_id || '').trim(),
     source_name: String(src.source_name || '').trim(),
-    source_domain: String(src.source_domain || getDomain(canonicalUrl)).trim(),
+    source_domain: String(src.source_domain || getDomain(canonicalArticleUrl || canonicalUrl)).trim(),
+    source_kind: normalizeSourceKind(src.source_kind || 'publisher'),
+    discovery_source_id: String(src.discovery_source_id || '').trim(),
+    discovery_source_name: String(src.discovery_source_name || '').trim(),
+    discovery_source_domain: String(src.discovery_source_domain || '').trim(),
+    aggregator_resolved: !!src.aggregator_resolved,
     topic: normalizeClassifiedTopic(src.topic || src.source_topic || OTHER_TOPIC),
     topic_source: String(src.topic_source || 'legacy').trim() || 'legacy',
     source_topic: normalizeClassifiedTopic(src.source_topic || src.topic || OTHER_TOPIC),
@@ -309,6 +571,7 @@ function normalizeStoredFeedItem(input = {}) {
     embedding: toNumberArray(src.embedding),
     fetch_status: String(src.fetch_status || (rawContentText ? 'cached' : 'rss_only')).trim() || 'rss_only',
     has_full_content: !!(src.has_full_content || (Number(src.content_fetched_at || 0) > 0 && rawContentText)),
+    readability_state: readabilityState,
   };
 }
 
@@ -319,6 +582,7 @@ function parseFeedXml(xmlText = '', source = {}) {
   const blocks = itemMatches.length > 0 ? itemMatches : entryMatches;
   const fetchedAt = nowTs();
   return blocks.map((block) => {
+    const sourceMeta = extractSourceMeta(block);
     const title = stripXmlTags(extractTagText(block, 'title'));
     const url = normalizeUrl(extractLink(block));
     const publishedAt = parseFeedDate(
@@ -334,14 +598,22 @@ function parseFeedXml(xmlText = '', source = {}) {
       || extractTagText(block, 'content:encoded')
     );
     if (!title && !url) return null;
+    const sourceKind = normalizeSourceKind(source.source_kind || 'publisher');
+    const publisherName = sourceKind === 'aggregator' ? String(sourceMeta.name || '').trim() : '';
     return {
       id: hashText(`${source.id || 'feed'}|${url}|${title}|${publishedAt}`),
       title: title || url || 'Untitled',
       url,
+      canonical_article_url: sourceKind === 'aggregator' ? '' : url,
       summary,
       source_id: String(source.id || '').trim(),
-      source_name: String(source.name || '').trim(),
-      source_domain: getDomain(url || source.url || ''),
+      source_name: publisherName || String(source.name || '').trim(),
+      source_domain: getDomain(sourceMeta.url || url || source.url || ''),
+      source_kind: sourceKind,
+      discovery_source_id: sourceKind === 'aggregator' ? String(source.id || '').trim() : '',
+      discovery_source_name: sourceKind === 'aggregator' ? String(source.name || '').trim() : '',
+      discovery_source_domain: sourceKind === 'aggregator' ? getDomain(source.url || '') : '',
+      aggregator_resolved: sourceKind === 'aggregator' ? false : true,
       source_topic: normalizeClassifiedTopic(source.topic),
       topic: normalizeClassifiedTopic(source.topic),
       topic_source: 'source',
@@ -469,9 +741,46 @@ function createDashboardStore(options = {}) {
   const userDataPath = String(options.userDataPath || '').trim();
   const filePath = path.join(userDataPath || process.cwd(), 'dashboard_state.json');
   const getEmbeddingConfig = typeof options.getEmbeddingConfig === 'function' ? options.getEmbeddingConfig : (() => ({}));
+  const getFeedSettings = typeof options.getFeedSettings === 'function' ? options.getFeedSettings : (() => ({}));
   const summarizeArticle = typeof options.summarizeArticle === 'function' ? options.summarizeArticle : null;
   const fetchArticlePreview = typeof options.fetchArticlePreview === 'function' ? options.fetchArticlePreview : fetchWebPagePreview;
+  const resolveAggregatorItems = typeof options.resolveAggregatorItems === 'function'
+    ? options.resolveAggregatorItems
+    : ((items = []) => resolveGoogleNewsUrls(items, fetch));
   let refreshPromise = null;
+
+  function getConfiguredFeedSettings() {
+    return normalizeFeedSettings(getFeedSettings() || {});
+  }
+
+  function isSourceEnabled(sourceId = '', settings = getConfiguredFeedSettings()) {
+    const id = String(sourceId || '').trim();
+    if (!id) return true;
+    const disabled = new Set(Array.isArray(settings.rss_disabled_source_ids) ? settings.rss_disabled_source_ids : []);
+    return !disabled.has(id);
+  }
+
+  function getFeedSourcesWithSettings(settings = getConfiguredFeedSettings()) {
+    return clone(STARTER_FEEDS).map((feed) => ({
+      ...feed,
+      topic: normalizeClassifiedTopic(feed.topic),
+      domain: getDomain(feed.url),
+      enabled: isSourceEnabled(feed.id, settings),
+    }));
+  }
+
+  function getActiveFeedSources(settings = getConfiguredFeedSettings()) {
+    return getFeedSourcesWithSettings(settings).filter((feed) => !!feed.enabled);
+  }
+
+  function shouldIncludeFeedItem(item = {}, settings = getConfiguredFeedSettings()) {
+    return isSourceEnabled(String((item && item.source_id) || '').trim(), settings);
+  }
+
+  function getFeedTopicForListing(item = {}, settings = getConfiguredFeedSettings()) {
+    if (settings.rss_strict_source_topics) return normalizeClassifiedTopic(item && item.source_topic);
+    return normalizeClassifiedTopic(item && item.topic);
+  }
 
   function readState() {
     try {
@@ -530,6 +839,7 @@ function createDashboardStore(options = {}) {
 
   function getState() {
     const state = readState();
+    const feedSettings = getConfiguredFeedSettings();
     const events = state.events
       .map((item) => normalizeEvent(item, item))
       .filter((item) => item && item.ok && item.event)
@@ -548,11 +858,7 @@ function createDashboardStore(options = {}) {
         filters: { selected_topic: normalizeTopic(state.filters.selected_topic) },
         rss: {
           last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
-          sources: clone(STARTER_FEEDS).map((feed) => ({
-            ...feed,
-            topic: normalizeClassifiedTopic(feed.topic),
-            domain: getDomain(feed.url),
-          })),
+          sources: getFeedSourcesWithSettings(feedSettings),
           topics: getTopics(),
         },
       },
@@ -624,9 +930,15 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
   const unique = new Map();
   mergedMap.forEach((item) => {
     const normalized = normalizeStoredFeedItem(item);
-    const key = canonicalizeUrl(normalized.url || '') || `id:${normalized.id}`;
+    const key = canonicalizeUrl(normalized.canonical_article_url || normalized.url || '') || `id:${normalized.id}`;
     const existing = unique.get(key);
-    if (!existing || Number(normalized.published_at || 0) > Number(existing.published_at || 0)) {
+    const existingKind = normalizeSourceKind(existing && existing.source_kind);
+    const nextKind = normalizeSourceKind(normalized.source_kind);
+    if (
+      !existing
+      || (existingKind === 'aggregator' && nextKind === 'publisher')
+      || (existingKind === nextKind && Number(normalized.published_at || 0) > Number(existing.published_at || 0))
+    ) {
       unique.set(key, normalized);
     }
   });
@@ -809,10 +1121,12 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
     const topic = normalizeTopic(options.topic || DEFAULT_TOPIC);
     const limit = Math.max(1, Math.min(200, Number(options.limit || 80)));
     const query = String(options.query || '').trim();
+    const feedSettings = getConfiguredFeedSettings();
     const state = readState();
-    const sourceItems = pruneFeedItems(state.rss && state.rss.items);
+    const sourceItems = mergeFeedItems([], pruneFeedItems(state.rss && state.rss.items));
     let items = sourceItems
-      .filter((item) => topic === DEFAULT_TOPIC || normalizeClassifiedTopic(item && item.topic) === topic);
+      .filter((item) => shouldIncludeFeedItem(item, feedSettings))
+      .filter((item) => topic === DEFAULT_TOPIC || getFeedTopicForListing(item, feedSettings) === topic);
     if (query) {
       const config = getEmbeddingConfig() || {};
       const queryEmbeddingRes = await embedTexts([query], config);
@@ -832,14 +1146,20 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
         .filter((entry) => entry.keywordScore > 0 || entry.semanticScore >= SEMANTIC_MIN_SCORE)
         .sort((a, b) => {
           if (b.score !== a.score) return b.score - a.score;
+          const rankDiff = getReadabilityRank(a.item) - getReadabilityRank(b.item);
+          if (rankDiff !== 0) return rankDiff;
           return Number((b.item && b.item.published_at) || 0) - Number((a.item && a.item.published_at) || 0);
         })
-        .slice(0, limit)
         .map((entry) => entry.item);
+      items = finalizeFeedListing(items, {
+        limit,
+        perSourceLimit: Math.max(2, Math.floor(limit / 8) || 2),
+      });
     } else {
-      items = items
-        .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0))
-        .slice(0, limit);
+      items = finalizeFeedListing(items, {
+        limit,
+        perSourceLimit: Math.max(2, Math.floor(limit / 10) || 2),
+      });
     }
     return {
       ok: true,
@@ -871,18 +1191,20 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
     const existingMap = getLookupMap(existingItems);
     const discoveredMap = new Map();
     const errors = [];
+    const feedSettings = getConfiguredFeedSettings();
+    const activeSources = getActiveFeedSources(feedSettings);
     emitProgress({
       stage: 'fetching_feeds',
-      total: STARTER_FEEDS.length,
+      total: activeSources.length,
       completed: 0,
       label: 'Fetching RSS sources',
     });
-    const results = await Promise.allSettled(STARTER_FEEDS.map(async (source) => {
+    const results = await Promise.allSettled(activeSources.map(async (source) => {
       const xml = await fetchTextWithTimeout(source.url);
       return parseFeedXml(xml, source).slice(0, MAX_PER_SOURCE);
     }));
     results.forEach((result, index) => {
-      const source = STARTER_FEEDS[index];
+      const source = activeSources[index];
       if (result.status !== 'fulfilled') {
         errors.push(`${source.name}: ${String((result.reason && result.reason.message) || result.reason || 'Unable to fetch.')}`);
         return;
@@ -896,22 +1218,26 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
         }
       });
     });
-    const discovered = Array.from(discoveredMap.values())
+    const discovered = await resolveAggregatorItems(Array.from(discoveredMap.values()))
+      .then((items) => Array.isArray(items) ? items : Array.from(discoveredMap.values()))
+      .catch(() => Array.from(discoveredMap.values()));
+    const orderedDiscovered = discovered
       .sort((a, b) => Number((b && b.published_at) || 0) - Number((a && a.published_at) || 0))
       .slice(0, MAX_REFRESH_ITEMS);
     emitProgress({
       stage: 'enriching_articles',
-      total: discovered.length,
+      total: orderedDiscovered.length,
       completed: 0,
-      label: discovered.length ? 'Fetching article text' : 'No feed items discovered',
+      label: orderedDiscovered.length ? 'Fetching article text' : 'No feed items discovered',
     });
     let enrichedCompleted = 0;
-    const enriched = await mapWithConcurrency(discovered, ENRICH_CONCURRENCY, async (candidate) => {
-      const result = await enrichFeedCandidate(candidate, discardExisting ? null : existingMap.get(`url:${canonicalizeUrl(candidate.url || '')}`) || null);
+    const enriched = await mapWithConcurrency(orderedDiscovered, ENRICH_CONCURRENCY, async (candidate) => {
+      const lookupKey = canonicalizeUrl(candidate.canonical_article_url || candidate.url || '');
+      const result = await enrichFeedCandidate(candidate, discardExisting ? null : existingMap.get(`url:${lookupKey}`) || null);
       enrichedCompleted += 1;
       emitProgress({
         stage: 'enriching_articles',
-        total: discovered.length,
+        total: orderedDiscovered.length,
         completed: enrichedCompleted,
         label: String((candidate && (candidate.title || candidate.url)) || 'article').trim(),
       });
@@ -930,7 +1256,7 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
     });
     let summarizedCompleted = 0;
     const summarized = await mapWithConcurrency(enriched, SUMMARY_CONCURRENCY, async (item) => {
-      const existing = discardExisting ? null : existingMap.get(`url:${canonicalizeUrl(item.url || '')}`) || null;
+      const existing = discardExisting ? null : existingMap.get(`url:${canonicalizeUrl(item.canonical_article_url || item.url || '')}`) || null;
       const summaryPatch = await buildCleanSummary(item, existing);
       summarizedCompleted += 1;
       emitProgress({

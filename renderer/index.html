@@ -530,6 +530,26 @@
         </div>
       </details>
 
+      <details class="settings-section settings-accordion" data-settings-section="rss">
+        <summary>RSS Feed</summary>
+        <div class="settings-section-content">
+        <p class="muted small">Choose which feeds power the status panel and keep topic tabs tied to source topics.</p>
+        <div class="settings-grid settings-grid-2">
+          <label class="settings-field settings-boolean-field">
+            <span>Strict Topic Tabs</span>
+            <span class="settings-toggle-card">
+              <input id="settings-rss-strict-source-topics" data-setting="rss_strict_source_topics" type="checkbox" />
+              <span>Use each feed source’s assigned topic instead of semantic reclassification when filtering politics, world, econ, tech, and other.</span>
+            </span>
+          </label>
+          <div class="settings-field settings-field-wide">
+            <span>Sources</span>
+            <div id="settings-rss-sources" class="settings-rss-sources"></div>
+          </div>
+        </div>
+        </div>
+      </details>
+
       <details class="settings-section settings-accordion" data-settings-section="hyperweb">
         <summary>Hyperweb</summary>
         <div class="settings-section-content">

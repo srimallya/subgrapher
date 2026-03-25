@@ -7393,13 +7393,32 @@ function renderStatusFeed() {
       >
         <div class="status-rss-item-head">
           <span class="status-rss-source">${escapeHtml(String((item && item.source_name) || (item && item.source_domain) || 'feed'))}</span>
-          <span class="status-rss-time muted">${Number((item && item.published_at) || 0) > 0 ? escapeHtml(formatAgo(Number(item.published_at || 0))) : ''}</span>
+          <span class="status-rss-time muted">${escapeHtml(buildStatusFeedRowMeta(item))}</span>
         </div>
         <div class="status-rss-title">${escapeHtml(String((item && (item.display_title || item.title)) || 'Untitled'))}</div>
-        ${String((item && (item.clean_excerpt || item.content_excerpt)) || '').trim() ? `<div class="status-rss-excerpt muted">${escapeHtml(String((item && (item.clean_excerpt || item.content_excerpt)) || '').trim())}</div>` : ''}
+        ${buildStatusFeedRowExcerpt(item)}
       </button>
     `).join('')
     : `<div class="status-empty muted">${query ? 'No matches.' : 'No feed items.'}</div>`;
+}
+
+function buildStatusFeedRowMeta(item = {}) {
+  const parts = [];
+  const readabilityState = String((item && item.readability_state) || '').trim();
+  const publishedAt = Number((item && item.published_at) || 0);
+  if (readabilityState === 'headline_only') parts.push('Open source');
+  if (publishedAt > 0) parts.push(formatAgo(publishedAt));
+  return parts.join(' · ');
+}
+
+function buildStatusFeedRowExcerpt(item = {}) {
+  const readabilityState = String((item && item.readability_state) || '').trim();
+  const excerpt = String((item && (item.clean_excerpt || item.content_excerpt)) || '').trim();
+  if (excerpt) return `<div class="status-rss-excerpt muted">${escapeHtml(excerpt)}</div>`;
+  if (readabilityState === 'headline_only') {
+    return '<div class="status-rss-excerpt muted">Full article text was not fetched. Open the source page to read this story.</div>';
+  }
+  return '';
 }
 
 function renderStatusSurface() {
@@ -7599,6 +7618,7 @@ function buildStatusFeedModalTitle(item = {}) {
 }
 
 function buildStatusFeedModalBody(item = {}) {
+  const readabilityState = String((item && item.readability_state) || '').trim();
   const summaryStatus = String((item && item.summary_status) || '').trim();
   if (summaryStatus === 'unavailable') {
     const reason = String((item && item.failure_reason) || '').trim();
@@ -7613,6 +7633,9 @@ function buildStatusFeedModalBody(item = {}) {
   if (content) return content;
   const excerpt = String((item && item.content_excerpt) || '').trim();
   if (excerpt) return excerpt;
+  if (readabilityState === 'headline_only') {
+    return 'This story is available as a headline-only feed item. Open the source page to read the full article.';
+  }
   return 'No fetched article content was available for this link.';
 }
 
@@ -7628,14 +7651,19 @@ function applyStatusFeedModalItem(item = {}, options = {}) {
   const url = String((item && item.url) || '').trim();
   const content = buildStatusFeedModalBody(item);
   const summaryStatus = String((item && item.summary_status) || '').trim();
+  const readabilityState = String((item && item.readability_state) || '').trim();
   const manualRetryCount = Math.max(0, Number((item && item.manual_retry_count) || 0) || 0);
   const statusText = String(options.status || '').trim() || (
     summaryStatus === 'unavailable'
       ? 'No usable article body was found after refetch.'
       : (
-        String((item && item.fetch_status) || '').trim() === 'fetched'
-          ? ''
-          : 'Showing saved summary because full fetched content was unavailable.'
+        readabilityState === 'headline_only'
+          ? 'Full article text was not fetched. Open the source page for the complete story.'
+          : (
+            String((item && item.fetch_status) || '').trim() === 'fetched'
+              ? ''
+              : 'Showing saved summary because full fetched content was unavailable.'
+          )
       )
   );
   titleNode.textContent = title;
@@ -7645,7 +7673,7 @@ function applyStatusFeedModalItem(item = {}, options = {}) {
   statusNode.textContent = statusText;
   openBtn.dataset.url = url;
   openBtn.dataset.title = title;
-  openBtn.textContent = summaryStatus === 'unavailable' ? 'Open Source' : 'Open';
+  openBtn.textContent = (summaryStatus === 'unavailable' || readabilityState === 'headline_only') ? 'Open Source' : 'Open';
   openBtn.disabled = !url;
   refreshBtn.textContent = manualRetryCount > 0 ? 'Retry Fetch' : 'Refresh Summary';
   refreshBtn.disabled = !!options.disableRefresh;
@@ -7823,7 +7851,8 @@ async function setStatusFeedTopic(topic = 'all') {
   } else {
     state.dashboard.rssSelectedTopic = next;
   }
-  await loadStatusFeedItems({ refresh: true });
+  await loadStatusFeedItems({ refresh: false });
+  void refreshStatusData({ notifications: false });
 }
 
 async function saveStatusTaskFromInput() {
@@ -13113,6 +13142,9 @@ function normalizeSettingsDraft(raw = {}) {
   const telegramAllowedChatIds = parseCommaSeparatedList(src.telegram_allowed_chat_ids);
   const telegramAllowedUsernames = parseCommaSeparatedList(src.telegram_allowed_usernames)
     .map((item) => item.toLowerCase().replace(/^@/, ''));
+  const rssDisabledSourceIds = Array.isArray(src.rss_disabled_source_ids)
+    ? src.rss_disabled_source_ids.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
   const historyMaxRaw = Number(src.history_max_entries);
   const historyMaxEntries = Number.isFinite(historyMaxRaw)
     ? Math.max(500, Math.min(10000, Math.round(historyMaxRaw)))
@@ -13149,6 +13181,10 @@ function normalizeSettingsDraft(raw = {}) {
     rag_top_k: Number.isFinite(Number(src.rag_top_k))
       ? Math.max(1, Math.min(24, Math.round(Number(src.rag_top_k))))
       : RAG_TOP_K_DEFAULT,
+    rss_strict_source_topics: Object.prototype.hasOwnProperty.call(src, 'rss_strict_source_topics')
+      ? !!src.rss_strict_source_topics
+      : true,
+    rss_disabled_source_ids: Array.from(new Set(rssDisabledSourceIds)),
     telegram_enabled: !!src.telegram_enabled,
     telegram_allowed_chat_ids: telegramAllowedChatIds,
     telegram_allowed_usernames: telegramAllowedUsernames,
@@ -13268,6 +13304,71 @@ function renderSettingsStatusLine() {
   if (cancelBtn) cancelBtn.disabled = !dirty;
 }
 
+function normalizeSettingsRssFeedCatalog(list = []) {
+  const topicOrder = { politics: 0, world: 1, econ: 2, tech: 3, other: 4 };
+  return (Array.isArray(list) ? list : [])
+    .map((item) => ({
+      id: String((item && item.id) || '').trim(),
+      name: String((item && item.name) || '').trim(),
+      topic: String((item && item.topic) || 'other').trim().toLowerCase() || 'other',
+      source_kind: String((item && item.source_kind) || 'publisher').trim().toLowerCase() === 'aggregator' ? 'aggregator' : 'publisher',
+      domain: String((item && item.domain) || '').trim(),
+      enabled: !Object.prototype.hasOwnProperty.call(item || {}, 'enabled') || !!item.enabled,
+    }))
+    .filter((item) => item.id && item.name)
+    .sort((a, b) => {
+      const topicDiff = Number(topicOrder[a.topic] ?? 99) - Number(topicOrder[b.topic] ?? 99);
+      if (topicDiff !== 0) return topicDiff;
+      return a.name.localeCompare(b.name);
+    });
+}
+
+function renderSettingsRssSources() {
+  const node = e('settings-rss-sources');
+  if (!node) return;
+  const draft = normalizeSettingsDraft(state.settingsDraft || {});
+  const disabled = new Set(Array.isArray(draft.rss_disabled_source_ids) ? draft.rss_disabled_source_ids : []);
+  const catalog = normalizeSettingsRssFeedCatalog(state.settingsRssFeedCatalog || []);
+  if (!catalog.length) {
+    node.innerHTML = '<div class="muted small">RSS source settings are unavailable right now.</div>';
+    return;
+  }
+  node.innerHTML = catalog.map((source) => {
+    const detail = [
+      source.topic,
+      source.source_kind === 'aggregator' ? 'aggregator' : 'publisher',
+      source.domain,
+    ].filter(Boolean).join(' · ');
+    return `
+      <label class="settings-rss-source-row">
+        <input type="checkbox" data-settings-rss-source="${escapeHtml(source.id)}" ${disabled.has(source.id) ? '' : 'checked'} />
+        <span class="settings-rss-source-meta">
+          <span class="settings-rss-source-name">${escapeHtml(source.name)}</span>
+          <span class="settings-rss-source-detail">${escapeHtml(detail)}</span>
+        </span>
+      </label>
+    `;
+  }).join('');
+  node.querySelectorAll('input[data-settings-rss-source]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const sourceId = String(checkbox.getAttribute('data-settings-rss-source') || '').trim();
+      if (!sourceId) return;
+      const currentDraft = normalizeSettingsDraft(state.settingsDraft || {});
+      const nextDisabled = new Set(Array.isArray(currentDraft.rss_disabled_source_ids) ? currentDraft.rss_disabled_source_ids : []);
+      if (checkbox.checked) nextDisabled.delete(sourceId);
+      else nextDisabled.add(sourceId);
+      state.settingsDraft = normalizeSettingsDraft({
+        ...currentDraft,
+        rss_disabled_source_ids: Array.from(nextDisabled),
+      });
+      state.settingsValidationErrors = validateSettingsDraft(state.settingsDraft);
+      state.settingsDirty = isSettingsDirty();
+      state.settingsSaveState = '';
+      renderSettingsStatusLine();
+    });
+  });
+}
+
 function renderAppDataProtectionStatus() {
   const node = e('settings-appdata-lock-status');
   const touchBtn = e('settings-appdata-unlock-touchid-btn');
@@ -13331,6 +13432,7 @@ function renderSettingsForm() {
       ? 'Automated tasks will use the selected provider and model.'
       : 'Automated tasks will use the bundled local model.';
   }
+  renderSettingsRssSources();
   renderMailSettingsStatus();
   renderMailAccountsList();
   renderAppDataProtectionStatus();
@@ -14068,6 +14170,7 @@ async function loadSettingsData() {
   } catch (_) {}
   try { await refreshProviderKeysState({ renderSettings: true }); } catch (_) {}
   if (prefRes && prefRes.ok) {
+    state.settingsRssFeedCatalog = normalizeSettingsRssFeedCatalog(prefRes.rss_feed_catalog);
     state.settingsPersisted = normalizeSettingsDraft(prefRes);
     state.settingsDraft = normalizeSettingsDraft(prefRes);
     state.settingsValidationErrors = {};
@@ -14142,6 +14245,7 @@ async function saveSettingsDraft() {
   }
   state.settingsPersisted = normalizeSettingsDraft(res.settings || state.settingsDraft || {});
   state.settingsDraft = normalizeSettingsDraft(res.settings || state.settingsDraft || {});
+  state.settingsRssFeedCatalog = normalizeSettingsRssFeedCatalog(res.rss_feed_catalog);
   state.settingsDirty = false;
   state.settingsSaveState = 'Saved.';
   applySettingsToTopbar(state.settingsPersisted);
@@ -14162,6 +14266,7 @@ async function saveSettingsDraft() {
   await refreshAbstractionStatus();
   await refreshRagStatus();
   await refreshHyperwebStatus();
+  try { await refreshStatusData({ notifications: false }); } catch (_) {}
   renderSettingsForm();
   renderReferences();
   const diagnostics = await api.settingsDiagnostics();

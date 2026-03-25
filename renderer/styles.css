@@ -2723,6 +2723,46 @@ body.workspace-status-mode .nav-bar-main input {
   color: var(--text);
 }
 
+.settings-rss-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.settings-rss-source-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklab, var(--border) 92%, transparent);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.settings-rss-source-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.settings-rss-source-meta {
+  min-width: 0;
+}
+
+.settings-rss-source-name {
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.settings-rss-source-detail {
+  margin-top: 2px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
 .settings-toggle input[type="checkbox"] {
   width: 16px;
   height: 16px;

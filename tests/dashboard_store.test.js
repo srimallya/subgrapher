@@ -238,7 +238,148 @@ test('dashboard store deletes item after second unavailable manual retry', async
   assert.match(String(fetched.message || ''), /not found/i);
 });
 
-test('dashboard store keeps first unavailable result visible until retry', async () => {
+test('dashboard store balances sources and prioritizes readable items in listings', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+  });
+
+  const now = Date.now();
+  const makeItem = (id, sourceName, minutesAgo, extra = {}) => ({
+    id,
+    url: `https://${sourceName.toLowerCase().replace(/\s+/g, '')}.example.com/${id}`,
+    title: id,
+    display_title: id,
+    source_name: sourceName,
+    source_domain: `${sourceName.toLowerCase().replace(/\s+/g, '')}.example.com`,
+    topic: 'tech',
+    source_topic: 'tech',
+    published_at: now - (minutesAgo * 60 * 1000),
+    fetched_at: now,
+    ...extra,
+  });
+
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: now,
+      items: [
+        makeItem('verge-1', 'The Verge', 1, {
+          raw_content_text: 'Readable Verge body 1',
+          clean_summary: 'Readable Verge summary 1',
+          clean_excerpt: 'Readable Verge excerpt 1',
+          content_fetched_at: now,
+          fetch_status: 'fetched',
+          has_full_content: true,
+        }),
+        makeItem('verge-2', 'The Verge', 2, {
+          raw_content_text: 'Readable Verge body 2',
+          clean_summary: 'Readable Verge summary 2',
+          clean_excerpt: 'Readable Verge excerpt 2',
+          content_fetched_at: now,
+          fetch_status: 'fetched',
+          has_full_content: true,
+        }),
+        makeItem('verge-3', 'The Verge', 3, {
+          raw_content_text: 'Readable Verge body 3',
+          clean_summary: 'Readable Verge summary 3',
+          clean_excerpt: 'Readable Verge excerpt 3',
+          content_fetched_at: now,
+          fetch_status: 'fetched',
+          has_full_content: true,
+        }),
+        makeItem('ap-1', 'AP Top News', 4, {
+          raw_content_text: 'Readable AP body',
+          clean_summary: 'Readable AP summary',
+          clean_excerpt: 'Readable AP excerpt',
+          content_fetched_at: now,
+          fetch_status: 'fetched',
+          has_full_content: true,
+        }),
+        makeItem('ars-1', 'Ars Technica', 5, {
+          raw_content_text: 'Readable Ars body',
+          clean_summary: 'Readable Ars summary',
+          clean_excerpt: 'Readable Ars excerpt',
+          content_fetched_at: now,
+          fetch_status: 'fetched',
+          has_full_content: true,
+        }),
+        makeItem('headline-1', 'Reuters Technology', 0, {
+          summary: 'Headline-only summary',
+          clean_excerpt: 'Headline-only excerpt',
+          fetch_status: 'rss_only',
+          content_fetched_at: 0,
+          has_full_content: false,
+        }),
+      ],
+    },
+  }, null, 2), 'utf8');
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 5, query: '' });
+  assert.equal(listed.ok, true);
+  assert.deepEqual(
+    listed.items.map((item) => item.id),
+    ['verge-1', 'verge-2', 'ap-1', 'ars-1', 'headline-1']
+  );
+  assert.equal(listed.items[0].readability_state, 'readable');
+  assert.equal(listed.items[4].readability_state, 'headline_only');
+});
+
+test('dashboard store excludes unavailable items from default listings and starter feeds omit FT', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+  });
+
+  const now = Date.now();
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: now,
+      items: [{
+        id: 'unavailable-story',
+        url: 'https://example.com/unavailable-story',
+        title: 'Unavailable story',
+        display_title: 'Unavailable story',
+        source_name: 'Example Feed',
+        source_domain: 'example.com',
+        topic: 'world',
+        source_topic: 'world',
+        published_at: now,
+        fetched_at: now,
+        fetch_status: 'rss_only',
+        summary_status: 'unavailable',
+        failure_reason: 'refetch_empty_article_body',
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 0);
+
+  const fetched = store.getFeedItem('unavailable-story');
+  assert.equal(fetched.ok, true);
+  assert.equal(fetched.item.readability_state, 'unavailable');
+
+  const state = store.getState();
+  assert.equal(state.ok, true);
+  const sourceIds = (state.state.rss.sources || []).map((item) => item.id);
+  assert.equal(sourceIds.includes('ft-world'), false);
+  assert.equal(sourceIds.includes('ft-companies'), false);
+});
+
+test('dashboard store keeps first unavailable result retrievable but hidden from listings', async () => {
   const tempDir = makeTempDir();
   const store = createDashboardStore({
     userDataPath: tempDir,
@@ -287,9 +428,309 @@ test('dashboard store keeps first unavailable result visible until retry', async
 
   const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
   assert.equal(listed.ok, true);
-  assert.equal(listed.items.length, 1);
+  assert.equal(listed.items.length, 0);
 
   const fetched = store.getFeedItem('feed_unavailable_first');
   assert.equal(fetched.ok, true);
   assert.equal(fetched.item.summary_status, 'unavailable');
+  assert.equal(fetched.item.readability_state, 'unavailable');
+});
+
+test('dashboard store resolves Google News entries to publisher article URLs before listing', async () => {
+  const tempDir = makeTempDir();
+  const now = Date.now();
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const target = String(url || '');
+    const emptyRss = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel></channel></rss>';
+    if (target.includes('news.google.com/rss/search?q=technology')) {
+      return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Aggregator story</title>
+              <link>https://news.google.com/rss/articles/CBMiFakeGoogleId?oc=5</link>
+              <pubDate>${new Date(now).toUTCString()}</pubDate>
+              <description>Aggregator summary</description>
+              <source url="https://publisher.example.com">Publisher Example</source>
+            </item>
+          </channel>
+        </rss>`, { status: 200 });
+    }
+    return new Response(emptyRss, { status: 200 });
+  };
+
+  try {
+    const store = createDashboardStore({
+      userDataPath: tempDir,
+      getEmbeddingConfig: () => ({}),
+      resolveAggregatorItems: async (items = []) => items.map((item) => (
+        String(item.source_kind || '') === 'aggregator'
+          ? {
+            ...item,
+            url: 'https://publisher.example.com/articles/story-1',
+            canonical_article_url: 'https://publisher.example.com/articles/story-1',
+            aggregator_resolved: true,
+          }
+          : item
+      )),
+      fetchArticlePreview: async (url) => ({
+        ok: true,
+        title: `Fetched ${url}`,
+        text: 'Resolved publisher article body.',
+        markdown: 'Resolved publisher article body.',
+        fetch_status: 'fetched',
+      }),
+      summarizeArticle: async () => ({
+        ok: true,
+        status: 'generated',
+        summary: 'Resolved publisher summary.',
+        excerpt: 'Resolved publisher summary.',
+        entities: [],
+        content_quality: 'clean',
+        model_id: 'test-model',
+        generated_at: now,
+        analysis_source: 'llm',
+      }),
+    });
+
+    const refreshed = await store.refreshFeeds({ force: true, topic: 'all', limit: 20 });
+    assert.equal(refreshed.ok, true);
+    assert.ok(refreshed.items.some((item) => item.url === 'https://publisher.example.com/articles/story-1'));
+
+    const item = refreshed.items.find((entry) => entry.url === 'https://publisher.example.com/articles/story-1');
+    assert.equal(item.source_kind, 'aggregator');
+    assert.equal(item.discovery_source_id, 'google-tech');
+    assert.equal(item.aggregator_resolved, true);
+    assert.equal(item.source_name, 'Publisher Example');
+    assert.equal(item.readability_state, 'readable');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('dashboard store hides unresolved aggregator entries from default feed listings', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+  });
+
+  const now = Date.now();
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: now,
+      items: [{
+        id: 'google-unresolved-1',
+        url: 'https://news.google.com/rss/articles/CBMiUnresolved?oc=5',
+        canonical_article_url: '',
+        title: 'Unresolved aggregator story',
+        display_title: 'Unresolved aggregator story',
+        source_id: 'google-tech',
+        source_name: 'Publisher Example',
+        source_domain: 'publisher.example.com',
+        source_kind: 'aggregator',
+        discovery_source_id: 'google-tech',
+        discovery_source_name: 'Google News Technology',
+        discovery_source_domain: 'news.google.com',
+        aggregator_resolved: false,
+        topic: 'tech',
+        source_topic: 'tech',
+        published_at: now,
+        fetched_at: now,
+        fetch_status: 'rss_only',
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 0);
+});
+
+test('dashboard store prefers direct publisher items over aggregator duplicates', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+  });
+
+  const now = Date.now();
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: now,
+      items: [
+        {
+          id: 'google-dup-1',
+          url: 'https://publisher.example.com/articles/story-dup',
+          canonical_article_url: 'https://publisher.example.com/articles/story-dup',
+          title: 'Duplicate story',
+          display_title: 'Duplicate story',
+          source_id: 'google-tech',
+          source_name: 'Publisher Example',
+          source_domain: 'publisher.example.com',
+          source_kind: 'aggregator',
+          discovery_source_id: 'google-tech',
+          discovery_source_name: 'Google News Technology',
+          discovery_source_domain: 'news.google.com',
+          aggregator_resolved: true,
+          topic: 'tech',
+          source_topic: 'tech',
+          published_at: now - 1000,
+          fetched_at: now - 1000,
+          fetch_status: 'fetched',
+          content_fetched_at: now - 1000,
+          has_full_content: true,
+          raw_content_text: 'Aggregator body',
+          clean_summary: 'Aggregator summary',
+        },
+        {
+          id: 'publisher-dup-1',
+          url: 'https://publisher.example.com/articles/story-dup',
+          canonical_article_url: 'https://publisher.example.com/articles/story-dup',
+          title: 'Duplicate story',
+          display_title: 'Duplicate story',
+          source_id: 'reuters-tech',
+          source_name: 'Reuters Technology',
+          source_domain: 'publisher.example.com',
+          source_kind: 'publisher',
+          aggregator_resolved: true,
+          topic: 'tech',
+          source_topic: 'tech',
+          published_at: now - 2000,
+          fetched_at: now - 2000,
+          fetch_status: 'fetched',
+          content_fetched_at: now - 2000,
+          has_full_content: true,
+          raw_content_text: 'Publisher body',
+          clean_summary: 'Publisher summary',
+        },
+      ],
+    },
+  }, null, 2), 'utf8');
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 1);
+  assert.equal(listed.items[0].source_kind, 'publisher');
+  assert.equal(listed.items[0].source_id, 'reuters-tech');
+  assert.equal(listed.items[0].discovery_source_id, '');
+});
+
+test('dashboard store can filter topic tabs by source topic instead of classified topic', async () => {
+  const tempDir = makeTempDir();
+  const now = Date.now();
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: now,
+      items: [{
+        id: 'feed_topic_1',
+        url: 'https://example.com/doge-lawsuit',
+        canonical_article_url: 'https://example.com/doge-lawsuit',
+        title: 'A tech story that looks political',
+        display_title: 'A tech story that looks political',
+        source_id: 'ars',
+        source_name: 'Ars Technica',
+        source_domain: 'arstechnica.com',
+        source_kind: 'publisher',
+        topic: 'politics',
+        topic_source: 'embedding',
+        source_topic: 'tech',
+        published_at: now,
+        fetched_at: now,
+        content_fetched_at: now,
+        fetch_status: 'fetched',
+        raw_content_text: 'This story mentions DOGE and Congress but is still a tech publication story.',
+        clean_summary: 'A tech publication covered a political angle.',
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const strictStore = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+    getFeedSettings: () => ({ rss_strict_source_topics: true }),
+  });
+  const strictListed = await strictStore.listFeedItems({ topic: 'politics', limit: 20, query: '' });
+  assert.equal(strictListed.ok, true);
+  assert.equal(strictListed.items.length, 0);
+
+  const looseStore = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+    getFeedSettings: () => ({ rss_strict_source_topics: false }),
+  });
+  const looseListed = await looseStore.listFeedItems({ topic: 'politics', limit: 20, query: '' });
+  assert.equal(looseListed.ok, true);
+  assert.equal(looseListed.items.length, 1);
+  assert.equal(looseListed.items[0].id, 'feed_topic_1');
+});
+
+test('dashboard store hides disabled RSS sources from state and listings', async () => {
+  const tempDir = makeTempDir();
+  const now = Date.now();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+    getFeedSettings: () => ({ rss_disabled_source_ids: ['google-tech'] }),
+  });
+
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: now,
+      items: [{
+        id: 'feed_google_1',
+        url: 'https://www.theverge.com/example-story',
+        canonical_article_url: 'https://www.theverge.com/example-story',
+        title: 'Resolved Google story',
+        display_title: 'Resolved Google story',
+        source_id: 'google-tech',
+        source_name: 'The Verge',
+        source_domain: 'theverge.com',
+        source_kind: 'aggregator',
+        discovery_source_id: 'google-tech',
+        discovery_source_name: 'Google News Technology',
+        discovery_source_domain: 'news.google.com',
+        aggregator_resolved: true,
+        topic: 'tech',
+        source_topic: 'tech',
+        published_at: now,
+        fetched_at: now,
+        content_fetched_at: now,
+        fetch_status: 'fetched',
+        raw_content_text: 'Resolved article body.',
+        clean_summary: 'Resolved article summary.',
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const stateRes = store.getState();
+  assert.equal(stateRes.ok, true);
+  const googleSource = stateRes.state.rss.sources.find((item) => String((item && item.id) || '') === 'google-tech');
+  assert.equal(!!googleSource, true);
+  assert.equal(googleSource.enabled, false);
+
+  const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 0);
 });
