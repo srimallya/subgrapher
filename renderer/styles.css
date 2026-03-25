@@ -2117,8 +2117,8 @@ body.workspace-status-mode .nav-bar-main input {
 }
 
 #workspace-panel.browser-has-uncommitted #browser-commit-tab-btn {
-  border-color: #6d5441;
-  background: #2f261f;
+  border-color: color-mix(in oklab, var(--accent) 42%, var(--border-strong));
+  background: color-mix(in oklab, var(--accent-soft) 58%, var(--surface-active));
 }
 
 #workspace-panel.browser-has-uncommitted #browser-new-root-btn,
