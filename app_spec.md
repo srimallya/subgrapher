@@ -112,6 +112,7 @@ Where:
 ### Status feed cleanup
 - The `status` feed stores both raw fetched article text and cleaned summaries.
 - After crawler fetch, the bundled small LLM removes scraper noise and stores a concise factual gist for display/search.
+- RSS titles, excerpts, and summaries are normalized on ingest and on cached-item read so malformed/double-encoded XML entities do not leak into UI text.
 - `Rerun Tasks` in Settings discards old derived note/feed LLM outputs and rebuilds them from source content.
 - Per-item recovery flow:
   - opening a feed item shows cleaned summary first, raw text only as fallback

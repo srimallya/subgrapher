@@ -575,6 +575,54 @@ test('dashboard store decodes double-encoded XML entities from RSS titles and su
   }
 });
 
+test('dashboard store normalizes double-encoded cached titles on read', async () => {
+  const tempDir = makeTempDir();
+  const now = Date.now();
+  const statePath = path.join(tempDir, 'dashboard_state.json');
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    events: [],
+    tasks: [],
+    filters: { selected_topic: 'all' },
+    rss: {
+      last_refreshed_at: now,
+      items: [{
+        id: 'bbc_cached_1',
+        url: 'https://example.com/bbc-cached-story',
+        title: 'https://example.com/bbc-cached-story',
+        display_title: '&#x27;Men need to be perp-walked&#x27; after Epstein files release, Massie tells BBC',
+        crawler_title: '&#x27;Men need to be perp-walked&#x27; after Epstein files release, Massie tells BBC',
+        source_id: 'reuters-world',
+        source_name: 'BBC World',
+        source_domain: 'bbc.com',
+        topic: 'world',
+        source_topic: 'world',
+        published_at: now,
+        fetched_at: now,
+        content_fetched_at: now,
+        fetch_status: 'fetched',
+        raw_content_text: 'Body text.',
+        clean_summary: 'Summary text.',
+      }],
+    },
+  }, null, 2), 'utf8');
+
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+  });
+
+  const itemRes = store.getFeedItem('bbc_cached_1');
+  assert.equal(itemRes.ok, true);
+  assert.equal(itemRes.item.display_title.includes('&#x27;'), false);
+  assert.equal(itemRes.item.display_title.startsWith('\''), true);
+
+  const listed = await store.listFeedItems({ topic: 'world', limit: 20, query: '' });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.items.length, 1);
+  assert.equal(listed.items[0].display_title.includes('&#x27;'), false);
+});
+
 test('dashboard store hides removed-source cached entries from default feed listings', async () => {
   const tempDir = makeTempDir();
   const store = createDashboardStore({

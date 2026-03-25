@@ -566,16 +566,25 @@ function normalizeStoredFeedItem(input = {}) {
   const src = (input && typeof input === 'object') ? input : {};
   const canonicalArticleUrl = normalizeUrl(src.canonical_article_url || src.url || '');
   const canonicalUrl = normalizeUrl(src.url || canonicalArticleUrl || '');
+  const decodedDisplayTitle = normalizeWhitespace(decodeXmlEntities(String(src.display_title || src.crawler_title || src.title || '').trim()));
+  const decodedTitle = normalizeWhitespace(decodeXmlEntities(String(src.title || src.display_title || '').trim()));
+  const decodedCrawlerTitle = normalizeWhitespace(decodeXmlEntities(String(src.crawler_title || '').trim()));
+  const decodedSummary = normalizeWhitespace(decodeXmlEntities(String(src.summary || '').trim()));
   const displayTitle = String(
-    src.display_title
-    || src.crawler_title
-    || src.title
+    decodedDisplayTitle
+    || decodedCrawlerTitle
+    || decodedTitle
     || canonicalUrl
     || 'Untitled'
   ).trim() || 'Untitled';
-  const rawContentText = String(src.raw_content_text || src.content_text || src.summary || '').replace(/\u0000/g, '').trim().slice(0, MAX_CONTENT_CHARS);
-  const cleanSummary = String(src.clean_summary || src.summary || '').trim().slice(0, MAX_CONTENT_CHARS);
-  const cleanExcerpt = String(src.clean_excerpt || buildContentExcerpt(cleanSummary || rawContentText || src.summary || '')).trim();
+  const rawContentText = decodeXmlEntities(String(src.raw_content_text || src.content_text || src.summary || ''))
+    .replace(/\u0000/g, '')
+    .trim()
+    .slice(0, MAX_CONTENT_CHARS);
+  const cleanSummary = decodeXmlEntities(String(src.clean_summary || decodedSummary || ''))
+    .trim()
+    .slice(0, MAX_CONTENT_CHARS);
+  const cleanExcerpt = decodeXmlEntities(String(src.clean_excerpt || buildContentExcerpt(cleanSummary || rawContentText || decodedSummary || '')).trim());
   const contentMarkdown = String(src.content_markdown || '').trim().slice(0, MAX_CONTENT_CHARS);
   const readabilityState = deriveReadabilityState({
     ...src,
@@ -586,15 +595,15 @@ function normalizeStoredFeedItem(input = {}) {
     id: String(src.id || hashText(`${canonicalUrl}|${displayTitle}|${src.published_at || 0}`)).trim(),
     url: canonicalUrl,
     canonical_article_url: canonicalArticleUrl,
-    title: String(src.title || displayTitle).trim() || displayTitle,
-    crawler_title: String(src.crawler_title || '').trim(),
+    title: decodedTitle || displayTitle,
+    crawler_title: decodedCrawlerTitle,
     display_title: displayTitle,
-    summary: String(src.summary || '').trim(),
+    summary: decodedSummary,
     raw_content_text: rawContentText,
     content_text: rawContentText,
     clean_summary: cleanSummary,
     clean_excerpt: cleanExcerpt,
-    content_excerpt: String(src.content_excerpt || cleanExcerpt || buildContentExcerpt(rawContentText || src.summary || '')).trim(),
+    content_excerpt: decodeXmlEntities(String(src.content_excerpt || cleanExcerpt || buildContentExcerpt(rawContentText || decodedSummary || '')).trim()),
     content_markdown: contentMarkdown,
     source_id: String(src.source_id || '').trim(),
     source_name: String(src.source_name || '').trim(),
