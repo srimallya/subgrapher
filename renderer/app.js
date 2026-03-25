@@ -226,6 +226,7 @@ const state = {
     rssItems: [],
     rssSources: [],
     rssTopics: ['all'],
+    rssTopicLabels: { all: 'All' },
     rssSelectedTopic: 'all',
     rssSearchQuery: '',
     rssLastRefreshedAt: 0,
@@ -7366,13 +7367,11 @@ function renderStatusFeed() {
     ? state.dashboard.rssTopics
     : ['all'];
   const selected = String(state.dashboard.rssSelectedTopic || 'all').trim().toLowerCase() || 'all';
-  const formatTopicLabel = (topic = '') => {
-    const clean = String(topic || '').trim();
-    if (!clean) return '';
-    return clean.charAt(0).toUpperCase() + clean.slice(1);
-  };
+  const topicLabels = (state.dashboard.rssTopicLabels && typeof state.dashboard.rssTopicLabels === 'object')
+    ? state.dashboard.rssTopicLabels
+    : { all: 'All' };
   filtersNode.innerHTML = topics.map((topic) => `
-    <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(formatTopicLabel(topic))}</button>
+    <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(String(topicLabels[topic] || topic).trim() || topic)}</button>
   `).join('');
   const query = String(state.dashboard.rssSearchQuery || '').trim();
   if (searchInput.value !== query) searchInput.value = query;
@@ -7443,6 +7442,7 @@ async function loadStatusFeedItems(options = {}) {
     state.dashboard.rssItems = Array.isArray(res.items) ? res.items : [];
     state.dashboard.rssLastRefreshedAt = Number(res.last_refreshed_at || state.dashboard.rssLastRefreshedAt || 0);
     state.dashboard.rssTopics = Array.isArray(res.topics) ? res.topics : state.dashboard.rssTopics;
+    state.dashboard.rssTopicLabels = (res.topic_labels && typeof res.topic_labels === 'object') ? res.topic_labels : state.dashboard.rssTopicLabels;
   }
   renderStatusFeed();
 }
@@ -7493,6 +7493,9 @@ async function refreshStatusData(options = {}) {
       state.dashboard.tasks = Array.isArray(dashboardState.tasks) ? dashboardState.tasks : [];
       state.dashboard.rssSources = Array.isArray(dashboardState.rss && dashboardState.rss.sources) ? dashboardState.rss.sources : [];
       state.dashboard.rssTopics = Array.isArray(dashboardState.rss && dashboardState.rss.topics) ? dashboardState.rss.topics : ['all'];
+      state.dashboard.rssTopicLabels = (dashboardState.rss && dashboardState.rss.topic_labels && typeof dashboardState.rss.topic_labels === 'object')
+        ? dashboardState.rss.topic_labels
+        : { all: 'All' };
       state.dashboard.rssSelectedTopic = String(((dashboardState.filters || {}).selected_topic) || 'all').trim().toLowerCase() || 'all';
       state.dashboard.rssLastRefreshedAt = Number(((dashboardState.rss || {}).last_refreshed_at) || 0);
       state.dashboard.rssItems = Array.isArray(stateRes.feed_items) ? stateRes.feed_items : [];

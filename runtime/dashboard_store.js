@@ -21,14 +21,14 @@ const SEMANTIC_MIN_SCORE = 0.18;
 const SOURCE_BALANCE_TARGET = 2;
 
 const STARTER_FEEDS = [
-  { id: 'reuters-politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/Reuters/PoliticsNews', topic: 'politics', source_kind: 'publisher' },
-  { id: 'reuters-world', name: 'Reuters World', url: 'https://feeds.reuters.com/Reuters/worldNews', topic: 'world', source_kind: 'publisher' },
-  { id: 'reuters-business', name: 'Reuters Business', url: 'https://feeds.reuters.com/reuters/businessNews', topic: 'econ', source_kind: 'publisher' },
-  { id: 'reuters-tech', name: 'Reuters Technology', url: 'https://feeds.reuters.com/reuters/technologyNews', topic: 'tech', source_kind: 'publisher' },
-  { id: 'ap-politics', name: 'AP Politics', url: 'https://apnews.com/politics?output=rss', topic: 'politics', source_kind: 'publisher' },
-  { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech', source_kind: 'publisher' },
-  { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', topic: 'tech', source_kind: 'publisher' },
-  { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: OTHER_TOPIC, source_kind: 'publisher' },
+  { id: 'reuters-politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/Reuters/PoliticsNews', topic: 'politics', topic_label: 'Politics', source_kind: 'publisher' },
+  { id: 'reuters-world', name: 'Reuters World', url: 'https://feeds.reuters.com/Reuters/worldNews', topic: 'world', topic_label: 'World', source_kind: 'publisher' },
+  { id: 'reuters-business', name: 'Reuters Business', url: 'https://feeds.reuters.com/reuters/businessNews', topic: 'econ', topic_label: 'Business', source_kind: 'publisher' },
+  { id: 'reuters-tech', name: 'Reuters Technology', url: 'https://feeds.reuters.com/reuters/technologyNews', topic: 'tech', topic_label: 'Technology', source_kind: 'publisher' },
+  { id: 'ap-politics', name: 'AP Politics', url: 'https://apnews.com/politics?output=rss', topic: 'politics', topic_label: 'Politics', source_kind: 'publisher' },
+  { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech', topic_label: 'Technology', source_kind: 'publisher' },
+  { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', topic: 'tech', topic_label: 'Technology', source_kind: 'publisher' },
+  { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: OTHER_TOPIC, topic_label: 'Top News', source_kind: 'publisher' },
 ];
 
 function normalizeFeedSettings(raw = {}) {
@@ -829,6 +829,7 @@ function createDashboardStore(options = {}) {
     return clone(STARTER_FEEDS).map((feed) => ({
       ...feed,
       topic: normalizeClassifiedTopic(feed.topic),
+      topic_label: String(feed.topic_label || feed.topic || '').trim(),
       domain: getDomain(feed.url),
       enabled: isSourceEnabled(feed.id, settings),
     }));
@@ -913,6 +914,18 @@ function createDashboardStore(options = {}) {
     return [DEFAULT_TOPIC, ...Array.from(new Set(topics))];
   }
 
+  function getTopicLabels(settings = getConfiguredFeedSettings()) {
+    const labels = { [DEFAULT_TOPIC]: 'All' };
+    getFeedSourcesWithSettings(settings)
+      .filter((source) => !!source.enabled)
+      .forEach((source) => {
+        const topic = normalizeClassifiedTopic(source.topic);
+        if (!topic || labels[topic]) return;
+        labels[topic] = String(source.topic_label || source.topic || '').trim() || topic;
+      });
+    return labels;
+  }
+
   function getState() {
     const state = readState();
     const feedSettings = getConfiguredFeedSettings();
@@ -936,6 +949,7 @@ function createDashboardStore(options = {}) {
           last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
           sources: getFeedSourcesWithSettings(feedSettings),
           topics: getTopics(feedSettings),
+          topic_labels: getTopicLabels(feedSettings),
         },
       },
     };
@@ -1246,6 +1260,7 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
       items: clone(items),
       last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
       topics: getTopics(feedSettings),
+      topic_labels: getTopicLabels(feedSettings),
     };
   }
 
