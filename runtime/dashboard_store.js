@@ -135,6 +135,20 @@ function extractTagText(block = '', tagName = '') {
   return match ? String(match[1] || '') : '';
 }
 
+function extractTagTexts(block = '', tagName = '') {
+  const pattern = new RegExp(`<${escapeRegex(tagName)}\\b[^>]*>([\\s\\S]*?)<\\/${escapeRegex(tagName)}>`, 'gi');
+  return [...String(block || '').matchAll(pattern)]
+    .map((match) => String(match[1] || ''))
+    .filter(Boolean);
+}
+
+function extractTagAttributeValues(block = '', tagName = '', attrName = '') {
+  const pattern = new RegExp(`<${escapeRegex(tagName)}\\b[^>]*\\b${escapeRegex(attrName)}=(?:"([^"]+)"|'([^']+)')[^>]*\\/?>`, 'gi');
+  return [...String(block || '').matchAll(pattern)]
+    .map((match) => decodeXmlEntities(String(match[1] || match[2] || '').trim()))
+    .filter(Boolean);
+}
+
 function extractLink(block = '') {
   const raw = String(block || '');
   const atomHref = raw.match(/<link\b[^>]*href=(?:"([^"]+)"|'([^']+)')[^>]*\/?>/i);
@@ -151,6 +165,47 @@ function extractSourceMeta(block = '') {
     name: stripXmlTags(match[3] || ''),
     url: decodeXmlEntities(String(match[1] || match[2] || '').trim()),
   };
+}
+
+function splitFeedTagText(value = '') {
+  return String(value || '')
+    .split(/[|,/;>]+/)
+    .map((item) => normalizeWhitespace(stripXmlTags(item)))
+    .filter(Boolean);
+}
+
+const RSS_TOPIC_KEYWORDS = {
+  politics: ['politics', 'political', 'government', 'policy', 'policies', 'election', 'elections', 'congress', 'senate', 'house', 'white house', 'campaign', 'diplomacy', 'trump', 'biden'],
+  world: ['world', 'international', 'global', 'foreign', 'middle east', 'europe', 'asia', 'africa', 'americas', 'ukraine', 'iran', 'china', 'india'],
+  econ: ['business', 'economy', 'economics', 'finance', 'financial', 'markets', 'market', 'companies', 'company', 'banking', 'trade', 'stocks', 'money', 'earnings'],
+  tech: ['technology', 'tech', 'ai', 'artificial intelligence', 'software', 'hardware', 'cybersecurity', 'internet', 'gadgets', 'mobile', 'apps', 'computing', 'chip', 'chips', 'semiconductor', 'science'],
+  other: ['science', 'health', 'sports', 'culture', 'entertainment', 'weather', 'education', 'environment'],
+};
+
+function deriveRssTopicsFromTags(tags = []) {
+  const normalizedTags = (Array.isArray(tags) ? tags : [])
+    .map((tag) => normalizeWhitespace(String(tag || '').toLowerCase()))
+    .filter(Boolean);
+  if (!normalizedTags.length) return [];
+  const scores = new Map(TOPIC_KEYS.map((topic) => [topic, 0]));
+  normalizedTags.forEach((tag) => {
+    Object.entries(RSS_TOPIC_KEYWORDS).forEach(([topic, keywords]) => {
+      keywords.forEach((keyword) => {
+        const needle = String(keyword || '').trim().toLowerCase();
+        if (!needle) return;
+        if (tag === needle) scores.set(topic, Number(scores.get(topic) || 0) + 3);
+        else if (tag.includes(needle) || needle.includes(tag)) scores.set(topic, Number(scores.get(topic) || 0) + 1);
+      });
+    });
+  });
+  const ranked = Array.from(scores.entries())
+    .filter((entry) => Number(entry[1] || 0) > 0)
+    .sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0].localeCompare(b[0]);
+    })
+    .map((entry) => entry[0]);
+  return ranked.slice(0, 3);
 }
 
 function normalizeUrl(value = '') {
@@ -389,6 +444,7 @@ function buildSearchText(item = {}) {
     String(item.clean_summary || ''),
     String(item.raw_content_text || item.content_text || ''),
     String(item.summary || ''),
+    Array.isArray(item.rss_tags) ? item.rss_tags.join(' ') : '',
     String(item.source_name || ''),
     String(item.source_domain || ''),
     String(item.url || ''),
@@ -546,6 +602,8 @@ function normalizeStoredFeedItem(input = {}) {
     discovery_source_name: String(src.discovery_source_name || '').trim(),
     discovery_source_domain: String(src.discovery_source_domain || '').trim(),
     aggregator_resolved: !!src.aggregator_resolved,
+    rss_tags: Array.isArray(src.rss_tags) ? src.rss_tags.map((item) => normalizeWhitespace(String(item || ''))).filter(Boolean).slice(0, 16) : [],
+    rss_topics: Array.isArray(src.rss_topics) ? src.rss_topics.map((item) => normalizeClassifiedTopic(item)).filter(Boolean).slice(0, 4) : [],
     topic: normalizeClassifiedTopic(src.topic || src.source_topic || OTHER_TOPIC),
     topic_source: String(src.topic_source || 'legacy').trim() || 'legacy',
     source_topic: normalizeClassifiedTopic(src.source_topic || src.topic || OTHER_TOPIC),
@@ -585,6 +643,15 @@ function parseFeedXml(xmlText = '', source = {}) {
     const sourceMeta = extractSourceMeta(block);
     const title = stripXmlTags(extractTagText(block, 'title'));
     const url = normalizeUrl(extractLink(block));
+    const rawTags = [
+      ...extractTagTexts(block, 'category').flatMap((item) => splitFeedTagText(item)),
+      ...extractTagTexts(block, 'dc:subject').flatMap((item) => splitFeedTagText(item)),
+      ...extractTagTexts(block, 'media:keywords').flatMap((item) => splitFeedTagText(item)),
+      ...extractTagTexts(block, 'news:keywords').flatMap((item) => splitFeedTagText(item)),
+      ...extractTagAttributeValues(block, 'category', 'term').flatMap((item) => splitFeedTagText(item)),
+    ];
+    const rssTags = Array.from(new Set(rawTags.map((item) => normalizeWhitespace(item)).filter(Boolean))).slice(0, 16);
+    const rssTopics = deriveRssTopicsFromTags(rssTags);
     const publishedAt = parseFeedDate(
       extractTagText(block, 'pubDate')
       || extractTagText(block, 'updated')
@@ -614,6 +681,8 @@ function parseFeedXml(xmlText = '', source = {}) {
       discovery_source_name: sourceKind === 'aggregator' ? String(source.name || '').trim() : '',
       discovery_source_domain: sourceKind === 'aggregator' ? getDomain(source.url || '') : '',
       aggregator_resolved: sourceKind === 'aggregator' ? false : true,
+      rss_tags: rssTags,
+      rss_topics: rssTopics,
       source_topic: normalizeClassifiedTopic(source.topic),
       topic: normalizeClassifiedTopic(source.topic),
       topic_source: 'source',
@@ -960,21 +1029,23 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
     }));
     return list.map((item, idx) => {
       const vector = toNumberArray(vectors[prototypeTexts.length + idx]);
-      let bestTopic = normalizeClassifiedTopic(item.source_topic || item.topic || OTHER_TOPIC);
+      const rssTopics = Array.isArray(item.rss_topics) ? item.rss_topics.map((topic) => normalizeClassifiedTopic(topic)).filter(Boolean) : [];
+      const rssTopic = rssTopics[0] || '';
+      let bestTopic = rssTopic || normalizeClassifiedTopic(item.source_topic || item.topic || OTHER_TOPIC);
       let bestScore = -1;
       prototypeVectors.forEach((entry) => {
         const score = cosineSimilarity(vector, entry.vector);
         if (score > bestScore) {
           bestScore = score;
-          bestTopic = entry.topic;
+          if (!rssTopic) bestTopic = entry.topic;
         }
       });
-      const classifiedTopic = bestScore >= SEMANTIC_MIN_SCORE ? bestTopic : OTHER_TOPIC;
+      const classifiedTopic = rssTopic || (bestScore >= SEMANTIC_MIN_SCORE ? bestTopic : OTHER_TOPIC);
       return normalizeStoredFeedItem({
         ...item,
         embedding: vector,
         topic: classifiedTopic,
-        topic_source: vector.length ? 'embedding' : 'source_fallback',
+        topic_source: rssTopic ? 'rss_tag' : (vector.length ? 'embedding' : 'source_fallback'),
       });
     });
   }

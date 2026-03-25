@@ -509,6 +509,82 @@ test('dashboard store resolves Google News entries to publisher article URLs bef
   }
 });
 
+test('dashboard store uses RSS category metadata before semantic fallback', async () => {
+  const tempDir = makeTempDir();
+  const now = Date.now();
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const target = String(url || '');
+    if (target === 'https://apnews.com/hub/ap-top-news/rss.xml') {
+      return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Congress returns to Washington</title>
+              <link>https://example.com/politics-story</link>
+              <pubDate>${new Date(now).toUTCString()}</pubDate>
+              <description>Top news summary.</description>
+              <category>Politics</category>
+              <dc:subject>Congress, Government</dc:subject>
+            </item>
+          </channel>
+        </rss>`, { status: 200 });
+    }
+    return new Response('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel></channel></rss>', { status: 200 });
+  };
+
+  try {
+    const allSourceIds = [
+      'reuters-politics',
+      'reuters-world',
+      'reuters-business',
+      'reuters-tech',
+      'ap-politics',
+      'verge',
+      'ars',
+      'google-politics',
+      'google-world',
+      'google-business',
+      'google-tech',
+    ];
+    const store = createDashboardStore({
+      userDataPath: tempDir,
+      getEmbeddingConfig: () => ({}),
+      getFeedSettings: () => ({ rss_disabled_source_ids: allSourceIds }),
+      fetchArticlePreview: async () => ({
+        ok: true,
+        title: 'Congress returns to Washington',
+        text: 'Lawmakers are back in Washington for a new session.',
+        markdown: 'Lawmakers are back in Washington for a new session.',
+        fetch_status: 'fetched',
+      }),
+      summarizeArticle: async () => ({
+        ok: true,
+        status: 'generated',
+        summary: 'A politics story.',
+        excerpt: 'A politics story.',
+        entities: [],
+        content_quality: 'clean',
+        model_id: 'test-model',
+        generated_at: now,
+        analysis_source: 'llm',
+      }),
+    });
+
+    const refreshed = await store.refreshFeeds({ force: true, topic: 'all', limit: 20 });
+    assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.items.length, 1);
+    assert.equal(refreshed.items[0].source_topic, 'other');
+    assert.equal(refreshed.items[0].topic, 'politics');
+    assert.equal(refreshed.items[0].topic_source, 'rss_tag');
+    assert.deepEqual(refreshed.items[0].rss_topics, ['politics']);
+    assert.ok(Array.isArray(refreshed.items[0].rss_tags));
+    assert.ok(refreshed.items[0].rss_tags.includes('Politics'));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('dashboard store hides unresolved aggregator entries from default feed listings', async () => {
   const tempDir = makeTempDir();
   const store = createDashboardStore({

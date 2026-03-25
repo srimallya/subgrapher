@@ -13304,6 +13304,26 @@ function renderSettingsStatusLine() {
   if (cancelBtn) cancelBtn.disabled = !dirty;
 }
 
+function renderSettingsRssStatus() {
+  const node = e('settings-rss-status');
+  const button = e('settings-rss-refresh-btn');
+  if (button) button.disabled = !!state.settingsRssRefreshPending || !!state.settingsDirty || !api.dashboardRefreshFeeds;
+  if (!node) return;
+  if (state.settingsRssRefreshPending) {
+    node.textContent = 'Refreshing RSS feeds...';
+    return;
+  }
+  if (String(state.settingsRssRefreshState || '').trim()) {
+    node.textContent = String(state.settingsRssRefreshState || '').trim();
+    return;
+  }
+  if (state.settingsDirty) {
+    node.textContent = 'Save RSS settings before refreshing feeds.';
+    return;
+  }
+  node.textContent = 'Uses saved RSS source settings.';
+}
+
 function normalizeSettingsRssFeedCatalog(list = []) {
   const topicOrder = { politics: 0, world: 1, econ: 2, tech: 3, other: 4 };
   return (Array.isArray(list) ? list : [])
@@ -13433,6 +13453,7 @@ function renderSettingsForm() {
       : 'Automated tasks will use the bundled local model.';
   }
   renderSettingsRssSources();
+  renderSettingsRssStatus();
   renderMailSettingsStatus();
   renderMailAccountsList();
   renderAppDataProtectionStatus();
@@ -15523,6 +15544,33 @@ function bindControls() {
     await saveSettingsDraft();
   });
 
+  e('settings-rss-refresh-btn')?.addEventListener('click', async () => {
+    if (!api.dashboardRefreshFeeds) return;
+    if (state.settingsDirty) {
+      state.settingsRssRefreshState = 'Save RSS settings before refreshing feeds.';
+      renderSettingsRssStatus();
+      return;
+    }
+    state.settingsRssRefreshPending = true;
+    state.settingsRssRefreshState = '';
+    renderSettingsRssStatus();
+    try {
+      const res = await api.dashboardRefreshFeeds('all', 80, '');
+      await refreshStatusData({ notifications: false });
+      if (res && res.ok) {
+        const itemCount = Array.isArray(res.items) ? res.items.length : 0;
+        state.settingsRssRefreshState = `RSS refreshed. ${itemCount} visible item(s).`;
+      } else {
+        state.settingsRssRefreshState = (res && res.message) ? res.message : 'RSS refresh failed.';
+      }
+    } catch (err) {
+      state.settingsRssRefreshState = String((err && err.message) || 'RSS refresh failed.');
+    } finally {
+      state.settingsRssRefreshPending = false;
+      renderSettingsRssStatus();
+    }
+  });
+
   e('settings-import-chrome-btn')?.addEventListener('click', () => {
     state.settingsSaveState = '';
     renderSettingsStatusLine();
@@ -15702,6 +15750,7 @@ function bindControls() {
     state.settingsValidationErrors = {};
     state.settingsDirty = false;
     state.settingsSaveState = 'Changes reverted.';
+    state.settingsRssRefreshState = '';
     renderSettingsForm();
   });
 
