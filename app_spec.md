@@ -1,7 +1,7 @@
 # Subgrapher App Spec (Unified Artifact Runtime)
 
 ## Summary
-Current app version: `2.4.2`
+Current app version: `2.4.3`
 
 Subgrapher uses one artifact runtime for authored outputs:
 - `markdown` artifacts for text/image docs
