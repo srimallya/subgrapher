@@ -906,14 +906,6 @@ function createDashboardStore(options = {}) {
     fs.writeFileSync(filePath, JSON.stringify(next, null, 2), 'utf8');
   }
 
-  function getTopics(settings = getConfiguredFeedSettings()) {
-    const topics = getFeedSourcesWithSettings(settings)
-      .filter((source) => !!source.enabled)
-      .map((source) => normalizeClassifiedTopic(source.topic))
-      .filter(Boolean);
-    return [DEFAULT_TOPIC, ...Array.from(new Set(topics))];
-  }
-
   function getTopicLabels(settings = getConfiguredFeedSettings()) {
     const labels = { [DEFAULT_TOPIC]: 'All' };
     getFeedSourcesWithSettings(settings)
@@ -926,9 +918,26 @@ function createDashboardStore(options = {}) {
     return labels;
   }
 
+  function getAvailableTopics(items = [], settings = getConfiguredFeedSettings()) {
+    const labels = getTopicLabels(settings);
+    const topics = (Array.isArray(items) ? items : [])
+      .filter((item) => shouldIncludeFeedItem(item, settings))
+      .filter((item) => String((item && item.readability_state) || '').trim() !== 'unavailable')
+      .map((item) => getFeedTopicForListing(item, settings))
+      .filter(Boolean);
+    return {
+      topics: [DEFAULT_TOPIC, ...Array.from(new Set(topics))],
+      topic_labels: Object.fromEntries(
+        Object.entries(labels).filter(([topic]) => topic === DEFAULT_TOPIC || topics.includes(topic))
+      ),
+    };
+  }
+
   function getState() {
     const state = readState();
     const feedSettings = getConfiguredFeedSettings();
+    const sourceItems = mergeFeedItems([], pruneFeedItems(state.rss && state.rss.items));
+    const availableTopics = getAvailableTopics(sourceItems, feedSettings);
     const events = state.events
       .map((item) => normalizeEvent(item, item))
       .filter((item) => item && item.ok && item.event)
@@ -948,8 +957,8 @@ function createDashboardStore(options = {}) {
         rss: {
           last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
           sources: getFeedSourcesWithSettings(feedSettings),
-          topics: getTopics(feedSettings),
-          topic_labels: getTopicLabels(feedSettings),
+          topics: availableTopics.topics,
+          topic_labels: availableTopics.topic_labels,
         },
       },
     };
@@ -1216,6 +1225,7 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
     const feedSettings = getConfiguredFeedSettings();
     const state = readState();
     const sourceItems = mergeFeedItems([], pruneFeedItems(state.rss && state.rss.items));
+    const availableTopics = getAvailableTopics(sourceItems, feedSettings);
     let items = sourceItems
       .filter((item) => shouldIncludeFeedItem(item, feedSettings))
       .filter((item) => topic === DEFAULT_TOPIC || getFeedTopicForListing(item, feedSettings) === topic);
@@ -1259,8 +1269,8 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
       query,
       items: clone(items),
       last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
-      topics: getTopics(feedSettings),
-      topic_labels: getTopicLabels(feedSettings),
+      topics: availableTopics.topics,
+      topic_labels: availableTopics.topic_labels,
     };
   }
 

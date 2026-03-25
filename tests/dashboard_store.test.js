@@ -648,8 +648,9 @@ test('dashboard store hides disabled RSS sources from state and listings', async
   assert.equal(!!apTopSource, true);
   assert.equal(apTopSource.enabled, false);
   assert.equal(stateRes.state.rss.topic_labels.all, 'All');
-  assert.equal(stateRes.state.rss.topic_labels.econ, 'Business');
-  assert.equal(stateRes.state.rss.topic_labels.tech, 'Technology');
+  assert.deepEqual(stateRes.state.rss.topics, ['all']);
+  assert.equal(stateRes.state.rss.topic_labels.econ, undefined);
+  assert.equal(stateRes.state.rss.topic_labels.tech, undefined);
 
   const listed = await store.listFeedItems({ topic: 'all', limit: 20, query: '' });
   assert.equal(listed.ok, true);
