@@ -29,10 +29,6 @@ const STARTER_FEEDS = [
   { id: 'verge', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml', topic: 'tech', source_kind: 'publisher' },
   { id: 'ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', topic: 'tech', source_kind: 'publisher' },
   { id: 'ap-top', name: 'AP Top News', url: 'https://apnews.com/hub/ap-top-news/rss.xml', topic: OTHER_TOPIC, source_kind: 'publisher' },
-  { id: 'google-politics', name: 'Google News Politics', url: 'https://news.google.com/rss/search?q=politics&hl=en-US&gl=US&ceid=US:en', topic: 'politics', source_kind: 'aggregator' },
-  { id: 'google-world', name: 'Google News World', url: 'https://news.google.com/rss/search?q=world&hl=en-US&gl=US&ceid=US:en', topic: 'world', source_kind: 'aggregator' },
-  { id: 'google-business', name: 'Google News Business', url: 'https://news.google.com/rss/search?q=business&hl=en-US&gl=US&ceid=US:en', topic: 'econ', source_kind: 'aggregator' },
-  { id: 'google-tech', name: 'Google News Technology', url: 'https://news.google.com/rss/search?q=technology&hl=en-US&gl=US&ceid=US:en', topic: 'tech', source_kind: 'aggregator' },
 ];
 
 function normalizeFeedSettings(raw = {}) {
@@ -838,12 +834,19 @@ function createDashboardStore(options = {}) {
     }));
   }
 
+  function isKnownFeedSourceId(sourceId = '') {
+    const id = String(sourceId || '').trim();
+    if (!id) return true;
+    return STARTER_FEEDS.some((feed) => String(feed.id || '').trim() === id);
+  }
+
   function getActiveFeedSources(settings = getConfiguredFeedSettings()) {
     return getFeedSourcesWithSettings(settings).filter((feed) => !!feed.enabled);
   }
 
   function shouldIncludeFeedItem(item = {}, settings = getConfiguredFeedSettings()) {
-    return isSourceEnabled(String((item && item.source_id) || '').trim(), settings);
+    const sourceId = String((item && item.source_id) || '').trim();
+    return isKnownFeedSourceId(sourceId) && isSourceEnabled(sourceId, settings);
   }
 
   function getFeedTopicForListing(item = {}, settings = getConfiguredFeedSettings()) {
@@ -902,8 +905,12 @@ function createDashboardStore(options = {}) {
     fs.writeFileSync(filePath, JSON.stringify(next, null, 2), 'utf8');
   }
 
-  function getTopics() {
-    return [DEFAULT_TOPIC, ...TOPIC_KEYS];
+  function getTopics(settings = getConfiguredFeedSettings()) {
+    const topics = getFeedSourcesWithSettings(settings)
+      .filter((source) => !!source.enabled)
+      .map((source) => normalizeClassifiedTopic(source.topic))
+      .filter(Boolean);
+    return [DEFAULT_TOPIC, ...Array.from(new Set(topics))];
   }
 
   function getState() {
@@ -928,7 +935,7 @@ function createDashboardStore(options = {}) {
         rss: {
           last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
           sources: getFeedSourcesWithSettings(feedSettings),
-          topics: getTopics(),
+          topics: getTopics(feedSettings),
         },
       },
     };
@@ -1238,7 +1245,7 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
       query,
       items: clone(items),
       last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
-      topics: getTopics(),
+      topics: getTopics(feedSettings),
     };
   }
 

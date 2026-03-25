@@ -7366,16 +7366,13 @@ function renderStatusFeed() {
     ? state.dashboard.rssTopics
     : ['all'];
   const selected = String(state.dashboard.rssSelectedTopic || 'all').trim().toLowerCase() || 'all';
-  const topicLabels = {
-    all: 'all',
-    politics: 'politics',
-    world: 'world',
-    econ: 'econ',
-    tech: 'tech',
-    other: 'other',
+  const formatTopicLabel = (topic = '') => {
+    const clean = String(topic || '').trim();
+    if (!clean) return '';
+    return clean.charAt(0).toUpperCase() + clean.slice(1);
   };
   filtersNode.innerHTML = topics.map((topic) => `
-    <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(topicLabels[topic] || topic)}</button>
+    <button type="button" class="${selected === topic ? 'active' : ''}" data-status-topic="${escapeHtml(topic)}">${escapeHtml(formatTopicLabel(topic))}</button>
   `).join('');
   const query = String(state.dashboard.rssSearchQuery || '').trim();
   if (searchInput.value !== query) searchInput.value = query;
