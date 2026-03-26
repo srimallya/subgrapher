@@ -118,6 +118,47 @@ test('dashboard store resetFeedCache clears stored RSS items without touching ot
   assert.equal(listed.items.length, 0);
 });
 
+test('dashboard store refreshFeeds preserves tasks while updating rss state', async () => {
+  const tempDir = makeTempDir();
+  const store = createDashboardStore({
+    userDataPath: tempDir,
+    getEmbeddingConfig: () => ({}),
+    fetchArticlePreview: async () => ({
+      ok: true,
+      title: 'Fetched article',
+      text: 'Fetched article body.',
+      markdown: 'Fetched article body.',
+      fetch_status: 'fetched',
+    }),
+    summarizeArticle: async () => ({
+      ok: true,
+      status: 'generated',
+      summary: 'Generated summary. Sentence two. Sentence three. Sentence four. Sentence five.',
+      excerpt: 'Generated summary.',
+      entities: [],
+      topics: ['world'],
+      content_quality: 'clean',
+      model_id: 'test-model',
+      generated_at: 1_710_000_000_123,
+      analysis_source: 'llm',
+      reason: '',
+    }),
+    fetchTextWithTimeout: async () => `<?xml version="1.0"?><rss><channel><item><title>Story</title><link>https://example.com/story</link><pubDate>Wed, 20 Mar 2026 12:00:00 GMT</pubDate><description>Summary</description></item></channel></rss>`,
+  });
+
+  const saved = store.saveTask({ title: 'Keep me' });
+  assert.equal(saved.ok, true);
+
+  const refreshed = await store.refreshFeeds({ force: true, topic: 'all', limit: 20 });
+  assert.equal(refreshed.ok, true);
+
+  const nextState = store.getState();
+  assert.equal(nextState.ok, true);
+  assert.equal(nextState.state.tasks.length, 1);
+  assert.equal(nextState.state.tasks[0].title, 'Keep me');
+  assert.equal(Array.isArray(refreshed.items), true);
+});
+
 test('dashboard store rerunFeedItemSummary refetches content and regenerates summary', async () => {
   const tempDir = makeTempDir();
   const store = createDashboardStore({

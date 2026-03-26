@@ -1484,6 +1484,32 @@ function createMailStore(options = {}) {
     return { ok: true };
   }
 
+  async function moveThreadLocally(thread = null, targetMailbox = null, role = '') {
+    const threadId = String((thread && thread.id) || '').trim();
+    const targetPath = String((targetMailbox && targetMailbox.path) || '').trim();
+    const targetMailboxId = String((targetMailbox && targetMailbox.id) || '').trim();
+    const normalizedRole = String(role || '').trim().toLowerCase();
+    if (!threadId || !targetPath || !normalizedRole) return;
+    await withDatabase(async (db) => {
+      const stmt = db.prepare(`
+        UPDATE messages
+        SET mailbox = ?, mailbox_id = ?, mailbox_role = ?, is_trashed = ?, is_archived = ?, updated_at = ?
+        WHERE thread_id = ?
+      `);
+      stmt.bind([
+        targetPath,
+        targetMailboxId,
+        normalizedRole,
+        normalizedRole === 'trash' ? 1 : 0,
+        normalizedRole === 'archive' ? 1 : 0,
+        nowTs(),
+        threadId,
+      ]);
+      stmt.step();
+      stmt.free();
+    });
+  }
+
   async function moveThread(threadId = '', targetRole = '') {
     const thread = await getThread(threadId);
     if (!thread.ok || !thread.thread) return thread;
@@ -1512,6 +1538,7 @@ function createMailStore(options = {}) {
         await client.selectMailbox(message.mailbox_name);
         await client.uidMove(uid, targetMailbox.path);
       }
+      await moveThreadLocally(thread.thread, targetMailbox, role);
       await syncAccount(account.id);
       return { ok: true, target_mailbox: targetMailbox };
     } catch (err) {

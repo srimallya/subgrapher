@@ -921,6 +921,15 @@ function createDashboardStore(options = {}) {
     fs.writeFileSync(filePath, JSON.stringify(next, null, 2), 'utf8');
   }
 
+  function writeRssState(rss) {
+    const latest = readState();
+    latest.rss = {
+      items: pruneFeedItems(rss && rss.items),
+      last_refreshed_at: Number((rss && rss.last_refreshed_at) || 0),
+    };
+    writeState(latest);
+  }
+
   function getTopicLabels(settings = getConfiguredFeedSettings()) {
     const labels = { [DEFAULT_TOPIC]: 'All' };
     getFeedSourcesWithSettings(settings)
@@ -1001,11 +1010,10 @@ function createDashboardStore(options = {}) {
   function resetFeedCache() {
     const state = readState();
     const clearedItems = pruneFeedItems(state.rss && state.rss.items).length;
-    state.rss = {
+    writeRssState({
       items: [],
       last_refreshed_at: 0,
-    };
-    writeState(state);
+    });
     return {
       ok: true,
       cleared_items: clearedItems,
@@ -1361,11 +1369,10 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
       });
       return result;
     });
-    state.rss = {
+    writeRssState({
       items: mergeFeedItems(existingItems, enriched),
       last_refreshed_at: nowTs(),
-    };
-    writeState(state);
+    });
     emitProgress({
       stage: 'summarizing_articles',
       total: enriched.length,
@@ -1389,11 +1396,10 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
       });
     });
     const classified = await classifyItems(summarized);
-    state.rss = {
+    writeRssState({
       items: mergeFeedItems(existingItems, classified),
       last_refreshed_at: nowTs(),
-    };
-    writeState(state);
+    });
     const listing = await listFeedItems({ topic: options.topic, limit: options.limit, query: options.query });
     return {
       ...listing,
@@ -1474,11 +1480,10 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
         ...summaryPatch,
       });
     });
-    state.rss = {
+    writeRssState({
       items: nextItems,
       last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
-    };
-    writeState(state);
+    });
     return {
       ok: true,
       total: items.length,
@@ -1524,11 +1529,10 @@ function mergeFeedItems(existingItems = [], incomingItems = []) {
     } else {
       items[index] = updatedItem;
     }
-    state.rss = {
+    writeRssState({
       items,
       last_refreshed_at: Number((state.rss && state.rss.last_refreshed_at) || 0),
-    };
-    writeState(state);
+    });
     if (shouldDelete) {
       return {
         ok: true,
