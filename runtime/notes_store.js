@@ -4,7 +4,15 @@ const path = require('path');
 const SCHEMA_VERSION = 1;
 const dbTaskByPath = new Map();
 const NOTE_EVIDENCE_MODE = 'web_only';
-const WEB_ONLY_SOURCE_KINDS = new Set(['explicit_url', 'web_search', 'official_search', 'challenge_search']);
+const WEB_ONLY_SOURCE_KINDS = new Set([
+  'explicit_url',
+  'web_search',
+  'official_search',
+  'challenge_search',
+  'rss_search',
+  'rss_official_search',
+  'rss_challenge_search',
+]);
 
 let sqlModulePromise = null;
 
@@ -329,8 +337,8 @@ function isWebOnlySourceKind(sourceKind = '') {
 
 function getSearchIntentForSourceKind(sourceKind = '') {
   const kind = String(sourceKind || '').trim();
-  if (kind === 'official_search') return 'official';
-  if (kind === 'challenge_search') return 'challenge';
+  if (kind === 'official_search' || kind === 'rss_official_search') return 'official';
+  if (kind === 'challenge_search' || kind === 'rss_challenge_search') return 'challenge';
   return 'support';
 }
 
@@ -339,6 +347,9 @@ function getProvenanceLabelForSourceKind(sourceKind = '') {
   if (kind === 'explicit_url') return 'from pasted URL';
   if (kind === 'official_search') return 'from official source search';
   if (kind === 'challenge_search') return 'from challenge search';
+  if (kind === 'rss_official_search') return 'from RSS cache (official search)';
+  if (kind === 'rss_challenge_search') return 'from RSS cache (challenge search)';
+  if (kind === 'rss_search') return 'from RSS cache';
   return 'from web search';
 }
 
@@ -347,6 +358,11 @@ function getRelevanceReasonForCitation(citation = {}) {
   const intent = getSearchIntentForSourceKind(sourceKind);
   const stance = String((citation && citation.stance) || (citation && citation.support_label) || '').trim();
   if (sourceKind === 'explicit_url') return 'This source came from a URL already present in the note.';
+  if (sourceKind === 'rss_search' || sourceKind === 'rss_official_search' || sourceKind === 'rss_challenge_search') {
+    if (intent === 'official') return 'This result came from the cached RSS article bank while looking for official confirmation.';
+    if (intent === 'challenge' || stance === 'contradict') return 'This cached RSS article contradicts or narrows part of the claim.';
+    return 'This cached RSS article supports the claim wording.';
+  }
   if (intent === 'official') return 'This result came from an official-source search for the claim.';
   if (intent === 'challenge' || stance === 'contradict') return 'This source contradicts or narrows part of the claim.';
   return 'This source supports the claim wording.';
@@ -515,14 +531,28 @@ function buildSentenceRegions(bodyMarkdown = '', claims = []) {
 }
 
 function buildEvidenceFeed(regions = [], claims = [], citationsByClaimId = new Map()) {
+  function hasReadableEvidenceText(item = {}) {
+    const source = (item && item.source && typeof item.source === 'object') ? item.source : {};
+    const text = String((item && item.excerpt) || (item && item.passage_text) || source.title || source.url || '').trim();
+    if (!text) return false;
+    return text.length >= 24 || /^https?:\/\//i.test(String(source.url || ''));
+  }
+
+  function isHelpfulEvidenceItem(item = {}) {
+    const score = Number((item && item.score) || 0) || 0;
+    return score >= 0.34 && hasReadableEvidenceText(item);
+  }
+
   return (Array.isArray(regions) ? regions : []).map((region) => {
     const linkedClaims = (Array.isArray(claims) ? claims : []).filter((claim) => region.claim_ids.includes(String((claim && claim.id) || '').trim()));
-    const allCitations = linkedClaims.flatMap((claim) => citationsByClaimId.get(String((claim && claim.id) || '').trim()) || []);
+    const allCitations = linkedClaims
+      .flatMap((claim) => citationsByClaimId.get(String((claim && claim.id) || '').trim()) || [])
+      .filter(isHelpfulEvidenceItem)
+      .sort((a, b) => Number((b && b.score) || 0) - Number((a && a.score) || 0));
     const supportItems = allCitations.filter((item) => String((item && item.stance) || '') !== 'contradict').slice(0, 2);
     const contradictionItems = allCitations.filter((item) => String((item && item.stance) || '') === 'contradict').slice(0, 2);
     const contextItems = allCitations
       .filter((item) => String((item && item.stance) || '') !== 'contradict')
-      .sort((a, b) => Number((b && b.score) || 0) - Number((a && a.score) || 0))
       .slice(0, 2);
     const leadClaim = linkedClaims
       .slice()

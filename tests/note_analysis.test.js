@@ -640,3 +640,85 @@ test('note analysis stores a tighter citation excerpt near the matched claim tex
   assert.ok(/released GPT-5 in 2025/i.test(String((result.citations[0] && result.citations[0].excerpt) || '')));
   assert.ok(!/^background:/i.test(String((result.citations[0] && result.citations[0].excerpt) || '')));
 });
+
+test('note analysis rejects non-english grammar pages for english claims', async () => {
+  const engine = createNoteAnalysisEngine({
+    webSearch: async () => ({
+      results: [
+        {
+          title: 'both.....and的用法 - 百度知道',
+          url: 'https://example.cn/grammar-both-and',
+          snippet: '"The boy is so lazy that he sleeps both in the daytime and at night."',
+        },
+        {
+          title: 'A Landmark Verdict Against Meta and Google - The Atlantic',
+          url: 'https://example.com/meta-google-verdict',
+          snippet: 'Jurors concluded the companies intentionally built addictive platforms that harmed teen mental health.',
+        },
+      ],
+    }),
+    fetchUrl: async (url) => ({
+      ok: true,
+      title: url.includes('grammar-both-and')
+        ? 'both.....and的用法 - 百度知道'
+        : 'A Landmark Verdict Against Meta and Google - The Atlantic',
+      markdown: url.includes('grammar-both-and')
+        ? 'both and means something in English grammar.'
+        : 'Jurors concluded the companies intentionally built addictive platforms that harmed teen mental health.',
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_non_english_filter',
+    analysis_revision: 1,
+    body_markdown: 'Jurors concluded the companies intentionally built addictive platforms that harmed teen mental health.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.ok(result.sources.some((source) => String(source.title || '').includes('Landmark Verdict')));
+  assert.ok(!result.sources.some((source) => String(source.title || '').includes('百度知道')));
+});
+
+test('note analysis uses cached RSS matches as additional note evidence', async () => {
+  const rssQueries = [];
+  const engine = createNoteAnalysisEngine({
+    rssSearch: async ({ query }) => {
+      rssQueries.push(query);
+      return {
+        results: [{
+          title: 'A Landmark Verdict Against Meta and Google - The Atlantic',
+          display_title: 'A Landmark Verdict Against Meta and Google - The Atlantic',
+          url: 'https://example.com/meta-google-verdict',
+          canonical_article_url: 'https://example.com/meta-google-verdict',
+          clean_summary: 'Meta and Google intentionally built addictive platforms that harmed teen mental health, jurors concluded.',
+          raw_content_text: 'Meta and Google intentionally built addictive platforms that harmed teen mental health, jurors concluded.',
+          published_at: 1_710_000_000_000,
+          fetched_at: 1_710_000_000_100,
+        }],
+      };
+    },
+    webSearch: async () => ({ results: [] }),
+    fetchUrl: async () => ({ ok: false }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_rss_first',
+    analysis_revision: 1,
+    body_markdown: 'Meta and Google intentionally built addictive platforms that harmed teen mental health.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.ok(rssQueries.length > 0);
+  assert.ok(result.sources.some((source) => String(source.source_kind || '').startsWith('rss_')));
+  assert.ok(result.passages.some((passage) => /meta and google intentionally built addictive platforms/i.test(String((passage && passage.passage_text) || ''))));
+});

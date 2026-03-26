@@ -4,6 +4,8 @@ const electronApi = window.electronAPI || null;
 const api = electronApi && electronApi.browser;
 const notesApi = electronApi && electronApi.notes;
 const PYTHON_WINDOWS_DOWNLOAD_URL = 'https://www.python.org/downloads/windows/';
+const HYPERWEB_CHAT_HEARTBEAT_MS = 30 * 1000;
+const HYPERWEB_CHAT_REFRESH_SKIP_WINDOW_MS = HYPERWEB_CHAT_HEARTBEAT_MS - 5000;
 
 const state = {
   references: [],
@@ -132,6 +134,10 @@ const state = {
   hyperwebChatActivePresence: null,
   hyperwebChatLivePeerCount: 0,
   hyperwebChatPendingFile: null,
+  hyperwebChatLastRefreshAt: 0,
+  hyperwebChatLastPushRefreshAt: 0,
+  hyperwebChatLastHeartbeatAt: 0,
+  hyperwebChatLastResumeAt: 0,
   hyperwebReferenceExpandedKeys: new Set(),
   hyperwebReferenceAboutLoadingKeys: new Set(),
   hyperwebPostSearchQuery: '',
@@ -313,6 +319,8 @@ const STATUS_SURFACE_ID = '__status__';
 let passiveNoticeTimer = null;
 let hyperwebChatRefreshPromise = null;
 let hyperwebChatRefreshQueuedMode = '';
+let hyperwebChatRefreshQueuedSource = '';
+let hyperwebChatHeartbeatTimer = null;
 let statusClockTimer = null;
 let statusRefreshTimer = null;
 
@@ -356,6 +364,11 @@ function mergeHyperwebChatRefreshMode(currentMode = '', nextMode = '') {
   return (rank[nextMode] || 0) > (rank[currentMode] || 0) ? nextMode : currentMode;
 }
 
+function mergeHyperwebChatRefreshSource(currentSource = '', nextSource = '') {
+  const rank = { '': 0, heartbeat: 1, resume: 2, push: 3, manual: 4 };
+  return (rank[nextSource] || 0) >= (rank[currentSource] || 0) ? nextSource : currentSource;
+}
+
 function resolveHyperwebChatRefreshMode(payload = {}) {
   const eventName = String((payload && payload.event) || '').trim().toLowerCase();
   const inboxKind = String((payload && payload.kind) || '').trim().toLowerCase();
@@ -368,13 +381,27 @@ function resolveHyperwebChatRefreshMode(payload = {}) {
     return '';
   }
   if (eventName === 'social_sync') {
-    if (socialType === 'social_chat_message_private') return 'incremental';
+    if (socialType === 'social_chat_message_private' || socialType === 'social_chat_message_public' || socialType === 'social_chat_message') {
+      return 'incremental';
+    }
     if (socialType === 'social_chat_receipt' || socialType === 'social_chat_delete' || socialType === 'social_thread_delete' || socialType === 'social_thread_policy') {
       return 'history';
     }
     return '';
   }
   return 'full';
+}
+
+function renderHyperwebResetAction() {
+  const button = e('hyperweb-reset-filter-btn');
+  if (!button) return;
+  if (state.hyperwebActiveTab === 'chat') {
+    button.textContent = 'Refresh Chat';
+    button.title = 'Reload the current chat thread.';
+    return;
+  }
+  button.textContent = 'Clear Filters';
+  button.title = 'Clear filters and reload this view.';
 }
 
 async function runHyperwebChatRefresh(mode = 'full') {
@@ -392,23 +419,76 @@ async function runHyperwebChatRefresh(mode = 'full') {
   await refreshHyperwebChatData();
 }
 
-function scheduleHyperwebChatRefresh(mode = 'full') {
+function recordHyperwebChatRefreshSuccess(source = '') {
+  const now = Date.now();
+  state.hyperwebChatLastRefreshAt = now;
+  if (source === 'push') state.hyperwebChatLastPushRefreshAt = now;
+  if (source === 'heartbeat') state.hyperwebChatLastHeartbeatAt = now;
+}
+
+function canRunHyperwebChatBackgroundRefresh() {
+  const availability = getHyperwebIdentityAvailability();
+  const hyper = (state.hyperwebStatus && typeof state.hyperwebStatus === 'object') ? state.hyperwebStatus : {};
+  if (!availability.canSign || availability.degraded) return false;
+  return !!hyper.connected;
+}
+
+function resolveHyperwebChatHeartbeatMode() {
+  const needsFullBootstrap = (
+    !Array.isArray(state.hyperwebChatMembers) || state.hyperwebChatMembers.length === 0
+  ) && (
+    !Array.isArray(state.hyperwebChatConversations) || state.hyperwebChatConversations.length === 0
+  ) && (
+    !Array.isArray(state.hyperwebChatRooms) || state.hyperwebChatRooms.length === 0
+  );
+  if (needsFullBootstrap) return 'full';
+  return 'incremental';
+}
+
+function maybeScheduleHyperwebChatHeartbeat(force = false) {
+  if (!canRunHyperwebChatBackgroundRefresh()) return;
+  const now = Date.now();
+  if (force && Number(state.hyperwebChatLastResumeAt || 0) > 0 && (now - Number(state.hyperwebChatLastResumeAt || 0)) < 2000) return;
+  const lastRefreshAt = Number(state.hyperwebChatLastRefreshAt || 0);
+  const lastPushRefreshAt = Number(state.hyperwebChatLastPushRefreshAt || 0);
+  const recentRefresh = Math.max(lastRefreshAt, lastPushRefreshAt);
+  if (!force && recentRefresh > 0 && (now - recentRefresh) < HYPERWEB_CHAT_REFRESH_SKIP_WINDOW_MS) return;
+  const mode = resolveHyperwebChatHeartbeatMode();
+  if (force) state.hyperwebChatLastResumeAt = now;
+  scheduleHyperwebChatRefresh(mode, force ? 'resume' : 'heartbeat').catch(() => {});
+}
+
+function ensureHyperwebChatHeartbeat() {
+  if (hyperwebChatHeartbeatTimer) return;
+  hyperwebChatHeartbeatTimer = window.setInterval(() => {
+    maybeScheduleHyperwebChatHeartbeat(false);
+  }, HYPERWEB_CHAT_HEARTBEAT_MS);
+}
+
+function scheduleHyperwebChatRefresh(mode = 'full', source = '') {
   const nextMode = String(mode || 'full').trim().toLowerCase();
+  const nextSource = String(source || '').trim().toLowerCase();
   if (!nextMode) return Promise.resolve();
   if (hyperwebChatRefreshPromise) {
     hyperwebChatRefreshQueuedMode = mergeHyperwebChatRefreshMode(hyperwebChatRefreshQueuedMode, nextMode);
+    hyperwebChatRefreshQueuedSource = mergeHyperwebChatRefreshSource(hyperwebChatRefreshQueuedSource, nextSource);
     return hyperwebChatRefreshPromise;
   }
   hyperwebChatRefreshPromise = (async () => {
     let modeToRun = nextMode;
+    let sourceToRun = nextSource;
     while (modeToRun) {
       hyperwebChatRefreshQueuedMode = '';
+      hyperwebChatRefreshQueuedSource = '';
       await runHyperwebChatRefresh(modeToRun);
+      recordHyperwebChatRefreshSuccess(sourceToRun);
       modeToRun = hyperwebChatRefreshQueuedMode;
+      sourceToRun = hyperwebChatRefreshQueuedSource;
     }
   })().finally(() => {
     hyperwebChatRefreshPromise = null;
     hyperwebChatRefreshQueuedMode = '';
+    hyperwebChatRefreshQueuedSource = '';
   });
   return hyperwebChatRefreshPromise;
 }
@@ -2003,8 +2083,8 @@ function getNoteCitationSearchIntent(citation = {}) {
   const explicit = String((citation && citation.search_intent) || '').trim();
   if (explicit) return explicit;
   const sourceKind = getNoteCitationSourceKind(citation);
-  if (sourceKind === 'official_search') return 'official';
-  if (sourceKind === 'challenge_search') return 'challenge';
+  if (sourceKind === 'official_search' || sourceKind === 'rss_official_search') return 'official';
+  if (sourceKind === 'challenge_search' || sourceKind === 'rss_challenge_search') return 'challenge';
   return 'support';
 }
 
@@ -2015,6 +2095,9 @@ function getNoteCitationProvenanceLabel(citation = {}) {
   if (sourceKind === 'explicit_url') return 'from pasted URL';
   if (sourceKind === 'official_search') return 'from official source search';
   if (sourceKind === 'challenge_search') return 'from challenge search';
+  if (sourceKind === 'rss_official_search') return 'from RSS cache (official search)';
+  if (sourceKind === 'rss_challenge_search') return 'from RSS cache (challenge search)';
+  if (sourceKind === 'rss_search') return 'from RSS cache';
   return 'from web search';
 }
 
@@ -10976,7 +11059,7 @@ function setupBrowserEvents() {
       if (state.appView === 'hyperweb' && state.hyperwebActiveTab === 'chat') {
         const chatRefreshMode = resolveHyperwebChatRefreshMode(payload);
         if (chatRefreshMode) {
-          scheduleHyperwebChatRefresh(chatRefreshMode).catch(() => {});
+          scheduleHyperwebChatRefresh(chatRefreshMode, 'push').catch(() => {});
         }
         return;
       }
@@ -11294,6 +11377,7 @@ async function setHyperwebSurfaceTab(tab, options = {}) {
   e('hyperweb-tab-feed-btn')?.classList.toggle('active', next === 'feed');
   e('hyperweb-tab-refs-btn')?.classList.toggle('active', next === 'refs');
   e('hyperweb-tab-chat-btn')?.classList.toggle('active', next === 'chat');
+  renderHyperwebResetAction();
   if (options.skipRefresh) return;
   if (next === 'chat') {
     await refreshHyperwebChatData();
@@ -12069,7 +12153,7 @@ function renderHyperwebChatThread() {
         setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to delete message.');
         return;
       }
-      await scheduleHyperwebChatRefresh('incremental');
+      await scheduleHyperwebChatRefresh('incremental', 'manual');
     });
   });
   holder.querySelectorAll('.hyperweb-chat-undo-btn').forEach((button) => {
@@ -12082,7 +12166,7 @@ function renderHyperwebChatThread() {
         setStatusText('hyperweb-chat-status', (res && res.message) ? res.message : 'Unable to undo message.');
         return;
       }
-      await scheduleHyperwebChatRefresh('incremental');
+      await scheduleHyperwebChatRefresh('incremental', 'manual');
     });
   });
 }
@@ -12131,6 +12215,7 @@ async function refreshHyperwebChatHistory() {
   renderHyperwebChatSelectors();
   renderHyperwebDmConversationList();
   renderHyperwebChatThread();
+  state.hyperwebChatLastRefreshAt = Date.now();
   setStatusText('hyperweb-chat-status', `Messages: ${state.hyperwebChatMessages.length} · live peers ${state.hyperwebChatLivePeerCount}`);
   if (api.hyperwebChatMarkRead && state.hyperwebChatMessages.length > 0) {
     const unread = state.hyperwebChatMessages
@@ -12166,6 +12251,7 @@ async function refreshHyperwebChatData() {
   renderHyperwebChatSelectors();
   renderHyperwebDmConversationList();
   await refreshHyperwebChatHistory();
+  state.hyperwebChatLastRefreshAt = Date.now();
 }
 
 function renderHyperwebFeedItems(posts) {
@@ -16516,7 +16602,7 @@ function bindControls() {
     await api.hyperwebResetFilter();
     renderHyperwebIdentityLine();
     if (state.hyperwebActiveTab === 'chat') {
-      await scheduleHyperwebChatRefresh('full');
+      await scheduleHyperwebChatRefresh('full', 'manual');
       return;
     }
     if (state.hyperwebActiveTab === 'refs') {
@@ -16684,7 +16770,7 @@ function bindControls() {
     if (input) input.value = '';
     state.hyperwebChatPendingFile = null;
     if (fileInput) fileInput.value = '';
-    await scheduleHyperwebChatRefresh('incremental');
+    await scheduleHyperwebChatRefresh('incremental', 'manual');
   });
   e('hyperweb-chat-input')?.addEventListener('keydown', async (event) => {
     if (event.key !== 'Enter' || event.shiftKey) return;
@@ -16930,6 +17016,14 @@ async function initialize() {
   setupChatPanelResize();
   setupHyperwebSplitter();
   setupArtifactHorizontalSplitter();
+  ensureHyperwebChatHeartbeat();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    maybeScheduleHyperwebChatHeartbeat(true);
+  });
+  window.addEventListener('focus', () => {
+    maybeScheduleHyperwebChatHeartbeat(true);
+  });
   await setHyperwebSurfaceTab(state.hyperwebActiveTab || 'feed', { skipRefresh: true });
   setSharesTab(state.sharesActiveTab || 'incoming');
   applyHyperwebSplitRatio(state.hyperwebSplitRatio, { skipPersist: true });

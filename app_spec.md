@@ -60,7 +60,9 @@ Where:
   - users write freely in markdown/plain note form without manually triggering fact-check actions
   - when writing pauses, the full note is classified first into a retrieval policy that controls freshness bias, source mix, contradiction scan, and fetch budget
   - factual claims are detected continuously from the current note body
-  - web evidence retrieval runs in the background against detected claims
+  - evidence retrieval runs in the background against detected claims
+  - retrieval checks the cached RSS article bank first as an additional local/current-events source, then broadens to web search when RSS coverage is weak or missing
+  - cached RSS matches can be used directly as note evidence when article text or cleaned summaries are already available
   - reliability is shown at two levels:
     - whole-note `Evidence Reliability`
     - local sentence/region evidence states
@@ -113,6 +115,7 @@ Where:
 - The `status` feed stores both raw fetched article text and cleaned summaries.
 - After crawler fetch, the bundled small LLM removes scraper noise and stores a concise factual gist for display/search.
 - RSS titles, excerpts, and summaries are normalized on ingest and on cached-item read so malformed/double-encoded XML entities do not leak into UI text.
+- The cached RSS article bank is reusable outside Status as an additional evidence source for Notes claim retrieval.
 - `Rerun Tasks` in Settings discards old derived note/feed LLM outputs and rebuilds them from source content.
 - Per-item recovery flow:
   - opening a feed item shows cleaned summary first, raw text only as fallback
@@ -227,6 +230,10 @@ Migration is idempotent and safe to run repeatedly.
 - UX:
   - Hyperweb supports a public lobby, public feed/reference discovery, trusted-peer DM, private share notices, and shared rooms.
   - Public features are best-effort and eventually consistent across online peers.
+  - Chat UI behavior:
+    - inbound chat and receipt events should update the visible thread immediately when the renderer receives them
+    - a renderer-side fallback refresh heartbeat runs every 30 seconds to reconcile missed UI sync events while Hyperweb remains connected
+    - manual chat reload is labeled `Refresh Chat`; feed/reference filter reset is labeled `Clear Filters`
   - Trusted-peer private traffic uses durable inbox replay:
     - DM text
     - DM file attachments

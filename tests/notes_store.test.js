@@ -371,3 +371,161 @@ test('notes citations can resolve stored claims by text and range when ids chang
   assert.equal(citationsRes.claim.id, 'claim_lookup');
   assert.equal(citationsRes.citations.length, 1);
 });
+
+test('evidence feed hides low-score citations', async () => {
+  const userDataPath = makeTempDir();
+  const store = createNotesStore({ userDataPath });
+  const createRes = await store.createNote({
+    title: 'Weak Evidence',
+    body_markdown: 'Meta and Google will appeal the verdict.',
+  });
+  const noteId = String(createRes.note.id || '').trim();
+
+  const saveAnalysisRes = await store.saveAnalysis(noteId, {
+    analysis_run_id: 'analysis_low_score_filter',
+    note_revision: createRes.note.analysis_revision,
+    extractor_version: 'test-engine',
+    claims: [{
+      id: 'claim_low_score',
+      claim_index: 0,
+      start_offset: 0,
+      end_offset: 40,
+      claim_text: 'Meta and Google will appeal the verdict.',
+      normalized_claim_text: 'meta and google will appeal the verdict',
+      subject_text: 'Meta and Google',
+      predicate_text: 'will appeal',
+      object_text: 'the verdict',
+      time_text: '',
+      modality: 'statement',
+      factuality: 'factual',
+      claim_type: 'event',
+      status: 'weak_evidence',
+      truth_confidence: 0.29,
+      support_confidence: 0.29,
+      contradict_confidence: 0.04,
+      corroboration: 0.1,
+      authority: 0.2,
+      freshness: 0.5,
+      explanation: 'Weak evidence only.',
+      rewrite_suggestions: [],
+      top_score: 0.29,
+      highlight_score: 0.29,
+    }],
+    sources: [{
+      id: 'src_low_score',
+      source_kind: 'web_search',
+      source_query: 'Meta Google appeal verdict',
+      url: 'https://example.cn/grammar-both-and',
+      canonical_url: 'https://example.cn/grammar-both-and',
+      title: 'both.....and的用法 - 百度知道',
+      published_at: 1_710_000_000_000,
+      fetched_at: 1_710_000_000_100,
+      content_hash: 'hash_low_score',
+    }],
+    passages: [{
+      id: 'passage_low_score',
+      source_id: 'src_low_score',
+      passage_index: 0,
+      passage_text: 'The boy is so lazy that he sleeps both in the daytime and at night.',
+      passage_start: 0,
+      passage_end: 70,
+      fetched_at: 1_710_000_000_100,
+    }],
+    citations: [{
+      id: 'citation_low_score',
+      claim_id: 'claim_low_score',
+      source_id: 'src_low_score',
+      passage_id: 'passage_low_score',
+      citation_index: 0,
+      support_label: 'support',
+      score: 0.21,
+      semantic_score: 0.2,
+      lexical_score: 0.15,
+      time_score: 0,
+      corroboration_score: 0.1,
+      temporal_score: 0.1,
+      excerpt: 'The boy is so lazy that he sleeps both in the daytime and at night.',
+    }],
+  });
+
+  assert.equal(saveAnalysisRes.ok, true);
+  const evidenceFeedRes = await store.getEvidenceFeed(noteId);
+  assert.equal(evidenceFeedRes.ok, true);
+  assert.equal(evidenceFeedRes.evidence_feed.length, 1);
+  assert.equal(evidenceFeedRes.evidence_feed[0].support_items.length, 0);
+  assert.equal(evidenceFeedRes.evidence_feed[0].contradiction_items.length, 0);
+});
+
+test('notes citations expose RSS cache provenance', async () => {
+  const userDataPath = makeTempDir();
+  const store = createNotesStore({ userDataPath });
+  const createRes = await store.createNote({
+    title: 'RSS Provenance',
+    body_markdown: 'Meta and Google will appeal the verdict.',
+  });
+  const noteId = String(createRes.note.id || '').trim();
+
+  const saveAnalysisRes = await store.saveAnalysis(noteId, {
+    analysis_run_id: 'analysis_rss_provenance',
+    note_revision: createRes.note.analysis_revision,
+    claims: [{
+      id: 'claim_rss_provenance',
+      claim_index: 0,
+      start_offset: 0,
+      end_offset: 40,
+      claim_text: 'Meta and Google will appeal the verdict.',
+      normalized_claim_text: 'meta and google will appeal the verdict',
+      subject_text: 'Meta and Google',
+      predicate_text: 'will appeal',
+      object_text: 'the verdict',
+      time_text: '',
+      modality: 'statement',
+      factuality: 'factual',
+      claim_type: 'event',
+      status: 'supported',
+      truth_confidence: 0.75,
+      support_confidence: 0.75,
+      contradict_confidence: 0.08,
+      top_score: 0.75,
+      highlight_score: 0.75,
+    }],
+    sources: [{
+      id: 'src_rss',
+      source_kind: 'rss_search',
+      source_query: 'Meta Google verdict',
+      url: 'https://example.com/meta-google-verdict',
+      canonical_url: 'https://example.com/meta-google-verdict',
+      title: 'A Landmark Verdict Against Meta and Google - The Atlantic',
+    }],
+    passages: [{
+      id: 'passage_rss',
+      source_id: 'src_rss',
+      passage_index: 0,
+      passage_text: 'Jurors concluded the companies intentionally built addictive platforms that harmed teen mental health.',
+      passage_start: 0,
+      passage_end: 100,
+    }],
+    citations: [{
+      id: 'citation_rss',
+      claim_id: 'claim_rss_provenance',
+      source_id: 'src_rss',
+      passage_id: 'passage_rss',
+      citation_index: 0,
+      support_label: 'support',
+      score: 0.75,
+      semantic_score: 0.75,
+      lexical_score: 0.6,
+      time_score: 0.4,
+      corroboration_score: 0.2,
+      temporal_score: 0.1,
+      excerpt: 'Jurors concluded the companies intentionally built addictive platforms that harmed teen mental health.',
+    }],
+  });
+
+  assert.equal(saveAnalysisRes.ok, true);
+  const citationsRes = await store.getCitations(noteId, 'claim_rss_provenance');
+  assert.equal(citationsRes.ok, true);
+  assert.equal(citationsRes.citations.length, 1);
+  assert.equal(citationsRes.citations[0].provenance_label, 'from RSS cache');
+  assert.equal(citationsRes.citations[0].search_intent, 'support');
+});

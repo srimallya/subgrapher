@@ -14,7 +14,15 @@ const MAX_CONCURRENCY = 2;
 const MAX_RESOLUTION_CANDIDATES = 8;
 const VERB_PATTERN = /\b(is|are|was|were|has|have|had|began|begin|beginning|started|start|launched|released|acquired|bought|won|lost|grew|fell|sued|announced|built|uses|use|caused|causes|reported|reports|showed|shows|said|says|fight|fights|fighting|attack|attacks|attacked|attacking|invade|invades|invaded|invading|bombed|bombing|strike|strikes|struck|broke|break|broken|wounded|wound|redirected|redirect|deployed|deploy|sent|send|targeted|target|carried|carry|carrying|kill|kills|killed)\b/i;
 const VERB_PATTERN_GLOBAL = new RegExp(VERB_PATTERN.source, 'ig');
-const WEB_NOTE_SOURCE_KINDS = new Set(['explicit_url', 'web_search', 'official_search', 'challenge_search']);
+const WEB_NOTE_SOURCE_KINDS = new Set([
+  'explicit_url',
+  'web_search',
+  'official_search',
+  'challenge_search',
+  'rss_search',
+  'rss_official_search',
+  'rss_challenge_search',
+]);
 const QUERY_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'their', 'there', 'about', 'according', 'over', 'than']);
 const GENERIC_SUBJECT_PATTERN = /^(it|its|they|their|them|this|that|these|those|the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
 const GENERIC_QUERY_PATTERN = /\b(the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
@@ -33,8 +41,20 @@ const BOILERPLATE_PASSAGE_PATTERNS = [
   /\bsubscribe to continue reading\b/i,
   /\bcookie policy\b/i,
 ];
+const LANGUAGE_LEARNING_PATTERNS = [
+  /用法/,
+  /意思/,
+  /\bmeaning\b/i,
+  /\bdefinition\b/i,
+  /\btranslate(?:d|s|ing|ion)?\b/i,
+  /\bgrammar\b/i,
+  /\bexample sentence\b/i,
+  /\bhow to use\b/i,
+  /\bconjugat(?:e|ed|ion)\b/i,
+];
 
 const searchCache = new Map();
+const rssSearchCache = new Map();
 const fetchCache = new Map();
 const DEFAULT_NOTE_POLICY = {
   note_mode: 'background_brief',
@@ -78,6 +98,27 @@ function normalizeUrl(raw = '') {
 
 function normalizeClaimText(text = '') {
   return normalizeWhitespace(String(text || '').toLowerCase().replace(/https?:\/\/[^\s]+/g, ' ').replace(/[^a-z0-9\s]/g, ' '));
+}
+
+function countMatches(text = '', pattern) {
+  const matches = String(text || '').match(pattern);
+  return Array.isArray(matches) ? matches.length : 0;
+}
+
+function latinLetterRatio(text = '') {
+  const source = String(text || '');
+  const latinCount = countMatches(source, /[A-Za-z]/g);
+  const letterCount = countMatches(source, /\p{L}/gu);
+  if (letterCount <= 0) return 0;
+  return latinCount / letterCount;
+}
+
+function cjkCharacterRatio(text = '') {
+  const source = String(text || '');
+  const cjkCount = countMatches(source, /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g);
+  const visibleCount = countMatches(source, /[^\s]/g);
+  if (visibleCount <= 0) return 0;
+  return cjkCount / visibleCount;
 }
 
 function getEffectiveClaimText(claim = {}) {
@@ -700,11 +741,22 @@ function isWebNoteSourceKind(sourceKind = '') {
   return WEB_NOTE_SOURCE_KINDS.has(String(sourceKind || '').trim());
 }
 
+function isRssNoteSourceKind(sourceKind = '') {
+  return ['rss_search', 'rss_official_search', 'rss_challenge_search'].includes(String(sourceKind || '').trim());
+}
+
 function getSearchIntentForSourceKind(sourceKind = '') {
   const kind = String(sourceKind || '').trim();
-  if (kind === 'official_search') return 'official';
-  if (kind === 'challenge_search') return 'challenge';
+  if (kind === 'official_search' || kind === 'rss_official_search') return 'official';
+  if (kind === 'challenge_search' || kind === 'rss_challenge_search') return 'challenge';
   return 'support';
+}
+
+function getRssSourceKindForIntent(intent = '') {
+  const normalized = String(intent || '').trim();
+  if (normalized === 'official') return 'rss_official_search';
+  if (normalized === 'challenge') return 'rss_challenge_search';
+  return 'rss_search';
 }
 
 function isReleasePredicate(predicate = '') {
@@ -793,6 +845,27 @@ function shouldAcceptSearchCandidate(scores = {}, plan = {}) {
       && Number(scores.object_coverage || 0) >= 0.45
       && Number(scores.semantic_score || 0) >= 0.18
     );
+}
+
+function shouldRejectSearchCandidate(claim = {}, result = {}, scores = {}) {
+  const claimText = getEffectiveClaimText(claim);
+  const title = String((result && result.title) || '');
+  const snippet = String((result && result.snippet) || '');
+  const combined = normalizeWhitespace(`${title} ${snippet}`);
+  if (!combined) return false;
+  const claimIsLatin = latinLetterRatio(claimText) >= 0.7;
+  const nonLatinHeavy = cjkCharacterRatio(combined) >= 0.08 || latinLetterRatio(combined) < 0.45;
+  const weakEntityCoverage = Number(scores.entity_coverage || 0) < 0.45;
+  const weakSubjectCoverage = Number(scores.subject_coverage || 0) < 0.45;
+  const weakObjectCoverage = Number(scores.object_coverage || 0) < 0.35;
+  if (claimIsLatin && nonLatinHeavy && weakEntityCoverage && weakSubjectCoverage && weakObjectCoverage) {
+    return true;
+  }
+  const languageLearningNoise = LANGUAGE_LEARNING_PATTERNS.some((pattern) => pattern.test(combined));
+  if (languageLearningNoise && weakEntityCoverage && weakSubjectCoverage) {
+    return true;
+  }
+  return false;
 }
 
 function hasSatisfiedSearchIntent(bucket = {}, plan = {}) {
@@ -1080,6 +1153,7 @@ function buildRewriteSuggestions(claim = {}, topSupport = null, topContradict = 
 
 function createNoteAnalysisEngine(options = {}) {
   const webSearch = typeof options.webSearch === 'function' ? options.webSearch : null;
+  const rssSearch = typeof options.rssSearch === 'function' ? options.rssSearch : null;
   const fetchUrl = typeof options.fetchUrl === 'function' ? options.fetchUrl : null;
   const temporalGraphScorer = typeof options.temporalGraphScorer === 'function' ? options.temporalGraphScorer : null;
   const classifyNotePolicy = typeof options.classifyNotePolicy === 'function' ? options.classifyNotePolicy : null;
@@ -1113,6 +1187,21 @@ function createNoteAnalysisEngine(options = {}) {
       fetchCache.set(canonical, { ts: nowTs(), preview });
     }
     return preview;
+  }
+
+  async function rssSearchWithCache(query = '', maxResults = MAX_WEB_RESULTS_PER_CLAIM) {
+    const normalized = normalizeWhitespace(query);
+    if (!normalized || !rssSearch) return [];
+    const safeMaxResults = Math.max(1, Math.min(12, Number(maxResults) || MAX_WEB_RESULTS_PER_CLAIM));
+    const cacheKey = `${normalizeClaimText(normalized)}:${safeMaxResults}`;
+    const cached = rssSearchCache.get(cacheKey);
+    if (cached && (nowTs() - Number(cached.ts || 0)) < DAY_MS) {
+      return cached.results;
+    }
+    const res = await rssSearch({ query: normalized, max_results: safeMaxResults });
+    const results = Array.isArray(res && res.results) ? res.results : [];
+    rssSearchCache.set(cacheKey, { ts: nowTs(), results });
+    return results;
   }
 
   async function analyze(note = {}, context = {}) {
@@ -1393,6 +1482,52 @@ function createNoteAnalysisEngine(options = {}) {
       }
     }
 
+    function addRssSource(item = {}) {
+      const canonical = normalizeUrl(item.canonical_article_url || item.url);
+      if (!canonical) return;
+      const source = ensureSource({
+        source_kind: String(item.source_kind || 'rss_search'),
+        source_query: String(item.source_query || ''),
+        url: canonical,
+        canonical_url: canonical,
+        title: String(item.title || item.display_title || canonical),
+        published_at: Number(item.published_at || 0) || 0,
+        fetched_at: Number(item.content_fetched_at || item.fetched_at || startedAt) || startedAt,
+        content_hash: String(item.content_hash || buildHash(String(item.raw_content_text || item.content_text || item.clean_summary || item.content_excerpt || ''))),
+        query_confidence: Number(item.query_confidence || 0) || 0,
+        search_intent: String(item.search_intent || getSearchIntentForSourceKind(item.source_kind)),
+      });
+      if (!source) return;
+      const text = normalizeWhitespace(String(
+        item.raw_content_text
+        || item.content_text
+        || item.clean_summary
+        || item.content_excerpt
+        || item.snippet
+        || ''
+      ));
+      if (!text) {
+        addSnippetFallback(item);
+        return;
+      }
+      chunkText(text).forEach((chunk, idx) => {
+        passages.push({
+          id: makeId('passage'),
+          note_id: noteId,
+          analysis_run_id: analysisRunId,
+          source_id: source.id,
+          passage_index: idx,
+          passage_text: chunk.text,
+          passage_start: chunk.start,
+          passage_end: chunk.end,
+          fetched_at: Number(source.fetched_at || startedAt),
+        });
+      });
+      if (!passages.some((passage) => String((passage && passage.source_id) || '') === String(source.id || ''))) {
+        addSnippetFallback(item);
+      }
+    }
+
     const explicitFetchItems = explicitUrls.slice(0, maxFetchesForNote).map((item) => ({
       source_kind: 'explicit_url',
       source_query: '',
@@ -1437,6 +1572,40 @@ function createNoteAnalysisEngine(options = {}) {
       };
       for (const plan of searchPlans) {
         if (hasSatisfiedSearchIntent(buckets[plan.intent], plan)) continue;
+        if (rssSearch) {
+          const rssResults = await rssSearchWithCache(plan.query, Math.max(4, maxResultsPerClaim + 1));
+          const acceptedRss = rssResults
+            .map((result) => ({
+              ...result,
+              score_meta: scoreSearchCandidate(claim, plan, result),
+            }))
+            .filter((result) => shouldAcceptSearchCandidate(result.score_meta, plan))
+            .filter((result) => !shouldRejectSearchCandidate(claim, result, result.score_meta))
+            .sort((a, b) => Number((b.score_meta && b.score_meta.query_confidence) || 0) - Number((a.score_meta && a.score_meta.query_confidence) || 0))
+            .slice(0, 3)
+            .map((result) => ({
+              title: String((result && (result.title || result.display_title)) || ''),
+              url: normalizeUrl(result && (result.canonical_article_url || result.url)),
+              canonical_article_url: normalizeUrl(result && (result.canonical_article_url || result.url)),
+              snippet: String((result && (result.clean_summary || result.content_excerpt || result.summary || result.snippet)) || ''),
+              raw_content_text: String((result && (result.raw_content_text || result.content_text || '')) || ''),
+              content_text: String((result && (result.content_text || result.raw_content_text || '')) || ''),
+              published_at: Number((result && result.published_at) || 0) || 0,
+              fetched_at: Number((result && (result.content_fetched_at || result.fetched_at)) || 0) || startedAt,
+              source_kind: getRssSourceKindForIntent(plan.intent),
+              source_query: String(plan.query || ''),
+              search_intent: String(plan.intent || 'support'),
+              query_confidence: Number((result.score_meta && result.score_meta.query_confidence) || 0) || 0,
+            }))
+            .filter((result) => result.url);
+          if (acceptedRss.length > 0) {
+            buckets[plan.intent].items = dedupeBy(
+              buckets[plan.intent].items.concat(acceptedRss),
+              (item) => String(item.url || '')
+            ).sort((a, b) => Number(b.query_confidence || 0) - Number(a.query_confidence || 0)).slice(0, 4);
+          }
+        }
+        if (hasSatisfiedSearchIntent(buckets[plan.intent], plan)) continue;
         const results = await searchWithCache(plan.query, maxResultsPerClaim);
         const accepted = results
           .map((result) => ({
@@ -1444,6 +1613,7 @@ function createNoteAnalysisEngine(options = {}) {
             score_meta: scoreSearchCandidate(claim, plan, result),
           }))
           .filter((result) => shouldAcceptSearchCandidate(result.score_meta, plan))
+          .filter((result) => !shouldRejectSearchCandidate(claim, result, result.score_meta))
           .sort((a, b) => Number((b.score_meta && b.score_meta.query_confidence) || 0) - Number((a.score_meta && a.score_meta.query_confidence) || 0))
           .slice(0, 3)
           .map((result) => ({
@@ -1500,7 +1670,21 @@ function createNoteAnalysisEngine(options = {}) {
       });
     });
 
-    const fetchQueue = dedupeBy(searchSources, (item) => `${item.source_kind}:${normalizeUrl(item.url)}`)
+    const rssSources = dedupeBy(
+      searchSources.filter((item) => isRssNoteSourceKind(item && item.source_kind)),
+      (item) => `${item.source_kind}:${normalizeUrl(item.url)}`
+    );
+    rssSources.forEach(addRssSource);
+    emitProgress('rss_source_done', {
+      rss_source_count: rssSources.length,
+      source_count: sources.length,
+      passage_count: passages.length,
+    });
+
+    const fetchQueue = dedupeBy(
+      searchSources.filter((item) => !isRssNoteSourceKind(item && item.source_kind)),
+      (item) => `${item.source_kind}:${normalizeUrl(item.url)}`
+    )
       .slice(0, maxFetchesForNote);
     emitProgress('web_fetch_queue', {
       item_count: fetchQueue.length,

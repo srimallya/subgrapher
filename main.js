@@ -6532,6 +6532,17 @@ function getNoteAnalysisEngine() {
   if (!noteAnalysisEngine) {
     noteAnalysisEngine = createNoteAnalysisEngine({
       webSearch: runOrchestratorWebSearch,
+      rssSearch: async ({ query, max_results }) => {
+        const res = await getDashboardStore().listFeedItems({
+          topic: 'all',
+          limit: Math.max(1, Math.min(24, Number(max_results || 8) || 8)),
+          query: String(query || '').trim(),
+        });
+        return {
+          ok: !!(res && res.ok),
+          results: Array.isArray(res && res.items) ? res.items : [],
+        };
+      },
       fetchUrl: (url) => fetchWebPagePreview(url, {
         markdownFirst: true,
         maxChars: 18_000,
