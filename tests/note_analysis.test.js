@@ -380,6 +380,125 @@ test('subordinate-clause pronouns inherit the nearby entity before search planni
   assert.ok(result.claims.some((claim) => String(claim.resolved_subject_text || claim.subject_text || '').trim() === 'Maduro'));
 });
 
+test('claim splitting keeps dotted abbreviations inside the same claim', async () => {
+  const seenQueries = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      seenQueries.push(query);
+      return {
+        results: [{
+          title: 'Maduro sanctions case',
+          url: 'https://example.com/maduro-us-sanctions',
+          snippet: 'Maduro and Flores were subject to U.S. sanctions, requiring a license for legal fees.',
+        }],
+      };
+    },
+    fetchUrl: async () => ({
+      ok: true,
+      title: 'Maduro sanctions case',
+      markdown: 'Maduro and Flores were subject to U.S. sanctions, requiring a license for legal fees.',
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_us_abbreviation',
+    analysis_revision: 1,
+    body_markdown: 'Because they are subject to U.S. sanctions, a license was needed to pay their legal fees.',
+  }, {
+    resolveClaimEntities: async () => {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.claims.some((claim) => /U\.S\. sanctions/i.test(String(claim.claim_text || ''))));
+  assert.ok(!result.claims.some((claim) => /\bsubject to U\.\s*$/i.test(String(claim.claim_text || ''))));
+  assert.ok(!seenQueries.some((query) => /\bsubject to U\.\b/i.test(String(query || ''))));
+});
+
+test('relevant search snippets do not let unrelated fetched pages become evidence', async () => {
+  const engine = createNoteAnalysisEngine({
+    webSearch: async () => ({
+      results: [{
+        title: 'Maduro sanctions case',
+        url: 'https://example.com/maduro-bad-fetch',
+        snippet: 'Maduro and Flores were subject to U.S. sanctions, requiring a license for legal fees.',
+      }],
+    }),
+    fetchUrl: async () => ({
+      ok: true,
+      title: 'because的用法 - 百度知道',
+      markdown: 'because 的意思、用法、例句。这是一个语法页面。',
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_irrelevant_fetch',
+    analysis_revision: 1,
+    body_markdown: 'Maduro and Flores were subject to U.S. sanctions, requiring a license for legal fees.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.equal(result.citations.length, 0);
+  assert.equal(result.claims[0].status, 'weak_evidence');
+});
+
+test('same URL discovered by multiple search intents is fetched once', async () => {
+  const fetchedUrls = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      const normalized = String(query || '').toLowerCase();
+      if (normalized.includes('official') || normalized.includes('rumor') || normalized.includes('denied')) {
+        return {
+          results: [{
+            title: 'NovaAI statement',
+            url: 'https://example.com/novaai-statement',
+            snippet: 'NovaAI released Atlas-7 in 2025 according to the company announcement.',
+          }],
+        };
+      }
+      return {
+        results: [{
+          title: 'NovaAI statement',
+          url: 'https://example.com/novaai-statement',
+          snippet: 'NovaAI released Atlas-7 in 2025 according to the company announcement.',
+        }],
+      };
+    },
+    fetchUrl: async (url) => {
+      fetchedUrls.push(url);
+      return {
+        ok: true,
+        title: 'NovaAI statement',
+        markdown: 'NovaAI released Atlas-7 in 2025 according to the company announcement.',
+      };
+    },
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_single_fetch_per_url',
+    analysis_revision: 1,
+    body_markdown: 'NovaAI released Atlas-7 in 2025.',
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.equal(fetchedUrls.filter((url) => url === 'https://example.com/novaai-statement').length, 1);
+  assert.equal(result.sources.filter((source) => String(source.canonical_url || '') === 'https://example.com/novaai-statement').length, 1);
+});
+
 test('ambiguous generic claims are gated instead of issuing broad web searches', async () => {
   const seenQueries = [];
   const engine = createNoteAnalysisEngine({

@@ -27,6 +27,7 @@ const QUERY_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'f
 const GENERIC_SUBJECT_PATTERN = /^(it|its|they|their|them|this|that|these|those|the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
 const GENERIC_QUERY_PATTERN = /\b(the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
 const LEADING_SUBORDINATE_PATTERN = /^(because|while|when|if|since|although|though|after|before|as)\b[\s,]*/i;
+const SENTENCE_ABBREVIATION_PATTERN = /\b(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc|no|fig|dept|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\.$/i;
 const CONTRADICTION_PATTERNS = [
   /\b(no official record|no evidence|not true|false|falsely|fabricated|debunked|denied|denies|deny|did not|didn't|not describe|never happened|unconfirmed|rumor)\b/i,
   /\b(but|however|while)\b.{0,60}\b(not|never|denied|did not|didn't|no)\b/i,
@@ -161,6 +162,46 @@ function tokenCoverageScore(terms = [], text = '') {
   return matched / required.length;
 }
 
+function buildQueryGroundingTerms(text = '') {
+  const query = normalizeWhitespace(text);
+  if (!query) return [];
+  const entityTerms = extractNamedEntityTerms(query);
+  const lexicalTerms = tokenize(query).filter((item) => item.length >= 3 && !QUERY_STOPWORDS.has(item));
+  return Array.from(new Set(entityTerms.concat(lexicalTerms).map((item) => normalizeWhitespace(item).toLowerCase()).filter(Boolean))).slice(0, 12);
+}
+
+function scoreQueryGrounding(source = {}, passageText = '') {
+  const query = normalizeWhitespace(String((source && source.source_query) || ''));
+  if (!query) {
+    return {
+      required: false,
+      term_score: 0.5,
+      entity_score: 0.5,
+      score: 0.5,
+    };
+  }
+  const queryTerms = buildQueryGroundingTerms(query);
+  if (queryTerms.length === 0) {
+    return {
+      required: false,
+      term_score: 0.5,
+      entity_score: 0.5,
+      score: 0.5,
+    };
+  }
+  const entityTerms = extractNamedEntityTerms(query);
+  const termScore = tokenCoverageScore(queryTerms, passageText);
+  const entityScore = entityTerms.length > 0
+    ? tokenCoverageScore(entityTerms, passageText)
+    : termScore;
+  return {
+    required: true,
+    term_score: termScore,
+    entity_score: entityScore,
+    score: clampUnit((0.58 * entityScore) + (0.42 * termScore)),
+  };
+}
+
 function cosineSimilarity(vecA = [], vecB = []) {
   if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
   let dot = 0;
@@ -239,10 +280,7 @@ function timeMatchScore(claimText = '', passageText = '') {
 }
 
 function splitPassageSentences(text = '') {
-  return String(text || '')
-    .split(/(?<=[.!?])\s+/)
-    .map((item) => normalizeWhitespace(item))
-    .filter(Boolean);
+  return splitTextSentencesWithOffsets(text).map((item) => normalizeWhitespace(item.text)).filter(Boolean);
 }
 
 function buildCitationExcerpt(claimText = '', passageText = '', maxChars = 320) {
@@ -374,6 +412,46 @@ function dedupeBy(list = [], keyFn = (item) => item) {
   return out;
 }
 
+function getSourceKindPriority(sourceKind = '') {
+  const kind = String(sourceKind || '').trim();
+  if (kind === 'explicit_url') return 5;
+  if (kind === 'official_search' || kind === 'rss_official_search') return 4;
+  if (kind === 'challenge_search' || kind === 'rss_challenge_search') return 3;
+  if (kind === 'web_search' || kind === 'rss_search') return 2;
+  return 1;
+}
+
+function mergeSourceCandidateItems(items = []) {
+  const grouped = new Map();
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const canonical = normalizeUrl(item && item.url);
+    if (!canonical) return;
+    if (!grouped.has(canonical)) {
+      grouped.set(canonical, []);
+    }
+    grouped.get(canonical).push({
+      ...(item || {}),
+      url: canonical,
+    });
+  });
+  return Array.from(grouped.values()).map((group) => {
+    const ordered = group.slice().sort((a, b) => {
+      const confidenceDiff = Number((b && b.query_confidence) || 0) - Number((a && a.query_confidence) || 0);
+      if (Math.abs(confidenceDiff) > 0.0001) return confidenceDiff;
+      return getSourceKindPriority(b && b.source_kind) - getSourceKindPriority(a && a.source_kind);
+    });
+    const best = ordered[0] || {};
+    return {
+      ...best,
+      source_query: String(best.source_query || ordered.map((item) => String((item && item.source_query) || '').trim()).find(Boolean) || ''),
+      search_intent: String(best.search_intent || ordered.map((item) => String((item && item.search_intent) || '').trim()).find(Boolean) || ''),
+      title: String(best.title || ordered.map((item) => String((item && item.title) || '').trim()).find(Boolean) || best.url || ''),
+      snippet: String(best.snippet || ordered.map((item) => String((item && item.snippet) || '').trim()).find(Boolean) || ''),
+      query_confidence: Number(best.query_confidence || 0) || 0,
+    };
+  });
+}
+
 function extractExplicitUrls(markdown = '') {
   const text = String(markdown || '');
   const re = /https?:\/\/[^\s<>)\]]+/g;
@@ -429,6 +507,48 @@ function stripMarkdownListMarker(line = '') {
   };
 }
 
+function isLikelySentenceBoundary(text = '', index = 0) {
+  const source = String(text || '');
+  const ch = source[index];
+  if (!'.!?'.includes(ch || '')) return false;
+  if (ch === '.' && /\d/.test(source[index - 1] || '') && /\d/.test(source[index + 1] || '')) return false;
+  if (ch === '.' && /^[A-Z]\./.test(source.slice(index + 1, index + 4))) return false;
+  const prefix = source.slice(Math.max(0, index - 18), index + 1);
+  if (ch === '.' && (SENTENCE_ABBREVIATION_PATTERN.test(prefix) || /(?:\b[A-Za-z]\.){2,}$/i.test(prefix))) return false;
+  let cursor = index + 1;
+  while (cursor < source.length && /[\s"'”’)\]]/.test(source[cursor])) cursor += 1;
+  if (cursor >= source.length) return true;
+  if (ch === '.' && /[a-z0-9]/.test(source[cursor])) return false;
+  return true;
+}
+
+function splitTextSentencesWithOffsets(text = '') {
+  const source = String(text || '');
+  const out = [];
+  let start = 0;
+  function pushChunk(endExclusive) {
+    const raw = source.slice(start, endExclusive);
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      start = endExclusive;
+      return;
+    }
+    const localStart = raw.indexOf(trimmed);
+    out.push({
+      text: trimmed,
+      start: start + Math.max(0, localStart),
+      end: start + Math.max(0, localStart) + trimmed.length,
+    });
+    start = endExclusive;
+  }
+  for (let i = 0; i < source.length; i += 1) {
+    if (!isLikelySentenceBoundary(source, i)) continue;
+    pushChunk(i + 1);
+  }
+  if (start < source.length) pushChunk(source.length);
+  return out;
+}
+
 function splitClaims(markdown = '') {
   const text = String(markdown || '');
   const out = [];
@@ -443,14 +563,10 @@ function splitClaims(markdown = '') {
       offset += line.length + 1;
       return;
     }
-    const re = /[^.!?]+[.!?]?/g;
-    let match = re.exec(contentLine);
-    while (match) {
-      const chunk = String(match[0] || '');
-      const sentence = chunk.trim();
+    splitTextSentencesWithOffsets(contentLine).forEach((chunk) => {
+      const sentence = String((chunk && chunk.text) || '').trim();
       if (sentence) {
-        const startTrim = chunk.indexOf(sentence);
-        const start = offset + Number(normalizedLine.contentOffset || 0) + match.index + Math.max(0, startTrim);
+        const start = offset + Number(normalizedLine.contentOffset || 0) + Number((chunk && chunk.start) || 0);
         splitCompoundClaimSegments(sentence, start).forEach((segment) => out.push({
           ...segment,
           line_index: lineIndex,
@@ -458,8 +574,7 @@ function splitClaims(markdown = '') {
           is_list_line: listLine,
         }));
       }
-      match = re.exec(contentLine);
-    }
+    });
     offset += line.length + 1;
   });
   return out;
@@ -622,7 +737,7 @@ function parseClaimStructure(claimText = '') {
         index: Number(match.index || 0),
       };
     })
-    .sort((a, b) => (b.weight - a.weight) || (b.index - a.index))[0];
+    .sort((a, b) => (b.weight - a.weight) || (a.index - b.index))[0];
   if (!verbMatch) {
     return {
       subject_text: normalized,
@@ -1410,12 +1525,19 @@ function createNoteAnalysisEngine(options = {}) {
         sourceByCanonicalUrl.set(canonical, source);
         sources.push(source);
       } else {
+        const currentPriority = getSourceKindPriority(source.source_kind);
+        const incomingPriority = getSourceKindPriority(sourceKind);
+        if (incomingPriority > currentPriority) source.source_kind = sourceKind;
         if (!source.title && sourceInput.title) source.title = String(sourceInput.title || '');
-        if (!source.source_query && sourceInput.source_query) source.source_query = String(sourceInput.source_query || '');
+        if ((!source.source_query && sourceInput.source_query) || (Number(sourceInput.query_confidence || 0) || 0) > (Number(source.query_confidence || 0) || 0)) {
+          source.source_query = String(sourceInput.source_query || '');
+        }
         source.fetched_at = Math.max(Number(source.fetched_at || 0), Number(sourceInput.fetched_at || 0), startedAt);
         if (!source.content_hash && sourceInput.content_hash) source.content_hash = String(sourceInput.content_hash || '');
         source.query_confidence = Math.max(Number(source.query_confidence || 0), Number(sourceInput.query_confidence || 0));
-        if (!source.search_intent && sourceInput.search_intent) source.search_intent = String(sourceInput.search_intent || '');
+        if ((!source.search_intent && sourceInput.search_intent) || (Number(sourceInput.query_confidence || 0) || 0) >= (Number(source.query_confidence || 0) || 0)) {
+          source.search_intent = String(sourceInput.search_intent || '');
+        }
       }
       return source;
     }
@@ -1682,9 +1804,8 @@ function createNoteAnalysisEngine(options = {}) {
       });
     });
 
-    const rssSources = dedupeBy(
-      searchSources.filter((item) => isRssNoteSourceKind(item && item.source_kind)),
-      (item) => `${item.source_kind}:${normalizeUrl(item.url)}`
+    const rssSources = mergeSourceCandidateItems(
+      searchSources.filter((item) => isRssNoteSourceKind(item && item.source_kind))
     );
     rssSources.forEach(addRssSource);
     emitProgress('rss_source_done', {
@@ -1693,9 +1814,8 @@ function createNoteAnalysisEngine(options = {}) {
       passage_count: passages.length,
     });
 
-    const fetchQueue = dedupeBy(
-      searchSources.filter((item) => !isRssNoteSourceKind(item && item.source_kind)),
-      (item) => `${item.source_kind}:${normalizeUrl(item.url)}`
+    const fetchQueue = mergeSourceCandidateItems(
+      searchSources.filter((item) => !isRssNoteSourceKind(item && item.source_kind))
     )
       .slice(0, maxFetchesForNote);
     emitProgress('web_fetch_queue', {
@@ -1735,6 +1855,7 @@ function createNoteAnalysisEngine(options = {}) {
           const entityScore = namedEntityCoverageScore(effectiveClaimText, entry.passage.passage_text);
           const exactScore = exactnessScore(effectiveClaimText, entry.passage.passage_text);
           const contradictionScore = contradictionCueScore(effectiveClaimText, entry.passage.passage_text);
+          const queryGrounding = scoreQueryGrounding(entry.source, entry.passage.passage_text);
           const searchIntent = getSearchIntentForSourceKind(entry.source && entry.source.source_kind);
           const queryConfidence = Number((entry.source && entry.source.query_confidence) || 0) || 0;
           const authorityScore = sourceAuthorityScore(entry.source, claim);
@@ -1751,12 +1872,22 @@ function createNoteAnalysisEngine(options = {}) {
             entity_score: entityScore,
             exact_score: exactScore,
             contradiction_score: contradictionScore,
+            query_grounding_score: queryGrounding.score,
+            query_entity_grounding_score: queryGrounding.entity_score,
+            query_term_grounding_score: queryGrounding.term_score,
+            query_grounding_required: queryGrounding.required,
             authority_score: authorityScore,
             freshness_score: freshnessScore,
           };
         })
         .filter((entry) => entry.source && (entry.semantic_score > 0.16 || entry.lexical_score > 0.1 || entry.query_confidence >= 0.52 || entry.contradiction_score >= 0.3))
-        .sort((a, b) => ((b.query_confidence + b.semantic_score + b.lexical_score + b.entity_score + b.exact_score) - (a.query_confidence + a.semantic_score + a.lexical_score + a.entity_score + a.exact_score)) || a.passage.id.localeCompare(b.passage.id))
+        .filter((entry) => (
+          !entry.query_grounding_required
+          || entry.query_grounding_score >= 0.24
+          || (entry.query_entity_grounding_score >= 0.5 && entry.lexical_score >= 0.16)
+          || entry.exact_score >= 0.62
+        ))
+        .sort((a, b) => ((b.query_grounding_score + b.query_confidence + b.semantic_score + b.lexical_score + b.entity_score + b.exact_score) - (a.query_grounding_score + a.query_confidence + a.semantic_score + a.lexical_score + a.entity_score + a.exact_score)) || a.passage.id.localeCompare(b.passage.id))
         .slice(0, 10);
       const supportRanked = ranked.filter((item) => item.search_intent !== 'challenge');
       const challengeRanked = ranked.filter((item) => item.search_intent === 'challenge' || item.contradiction_score >= 0.34);
@@ -1824,6 +1955,7 @@ function createNoteAnalysisEngine(options = {}) {
               + (0.08 * corroborationBase)
               + (0.08 * temporalScore)
               + (0.12 * entry.query_confidence)
+              + (0.08 * entry.query_grounding_score)
               + (0.12 * entry.entity_score)
               + (0.08 * entry.exact_score)
               + (0.08 * entry.authority_score)
@@ -1836,6 +1968,7 @@ function createNoteAnalysisEngine(options = {}) {
               + (0.1 * corroborationBase)
               + (0.08 * temporalScore)
               + (0.14 * entry.query_confidence)
+              + (0.12 * entry.query_grounding_score)
               + (0.08 * entry.entity_score)
               + (0.12 * entry.exact_score)
               + (0.08 * entry.authority_score)
@@ -1855,6 +1988,7 @@ function createNoteAnalysisEngine(options = {}) {
             corroboration_score: corroborationBase,
             temporal_score: temporalScore,
             contradiction_score: entry.contradiction_score,
+            query_grounding_score: entry.query_grounding_score,
             entity_score: entry.entity_score,
             exact_score: entry.exact_score,
             authority_score: entry.authority_score,
