@@ -324,6 +324,62 @@ test('conditional LLM claim resolution rewrites weak generic subjects before sea
   assert.ok(result.citations.length >= 1);
 });
 
+test('subordinate-clause pronouns inherit the nearby entity before search planning', async () => {
+  const seenQueries = [];
+  const engine = createNoteAnalysisEngine({
+    webSearch: async ({ query }) => {
+      seenQueries.push(query);
+      const normalized = String(query || '').toLowerCase();
+      if (normalized.includes('maduro')) {
+        return {
+          results: [{
+            title: 'Maduro sanctions case',
+            url: 'https://example.com/maduro-sanctions-case',
+            snippet: 'Maduro and Flores were subject to U.S. sanctions and legal fees required a license.',
+          }],
+        };
+      }
+      return {
+        results: [{
+          title: 'because的用法 - 百度知道',
+          url: 'https://example.cn/because-grammar',
+          snippet: 'because 的用法说明与例句。',
+        }],
+      };
+    },
+    fetchUrl: async (url) => ({
+      ok: true,
+      title: url.includes('maduro')
+        ? 'Maduro sanctions case'
+        : 'because的用法 - 百度知道',
+      markdown: url.includes('maduro')
+        ? 'Maduro and Flores were subject to U.S. sanctions, so a license was needed to pay their legal fees.'
+        : 'because 的意思、用法、例句。',
+    }),
+    temporalGraphScorer: makeTemporalScorer(),
+    makeId: (() => {
+      let counter = 0;
+      return (prefix) => `${prefix}_${++counter}`;
+    })(),
+  });
+
+  const result = await engine.analyze({
+    id: 'note_subordinate_subject',
+    analysis_revision: 1,
+    body_markdown: [
+      'Maduro and Flores face charges in New York.',
+      'Because they are subject to U.S. sanctions, a license was needed to pay their legal fees.',
+    ].join(' '),
+  }, {});
+
+  assert.equal(result.ok, true);
+  assert.ok(seenQueries.some((query) => query.toLowerCase().includes('maduro')));
+  assert.ok(!seenQueries.some((query) => query.toLowerCase().includes('because they')));
+  assert.ok(result.sources.some((source) => String(source.url || '').includes('maduro-sanctions-case')));
+  assert.ok(!result.sources.some((source) => String(source.url || '').includes('because-grammar')));
+  assert.ok(result.claims.some((claim) => String(claim.resolved_subject_text || claim.subject_text || '').trim() === 'Maduro'));
+});
+
 test('ambiguous generic claims are gated instead of issuing broad web searches', async () => {
   const seenQueries = [];
   const engine = createNoteAnalysisEngine({

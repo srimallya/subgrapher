@@ -26,6 +26,7 @@ const WEB_NOTE_SOURCE_KINDS = new Set([
 const QUERY_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'into', 'their', 'there', 'about', 'according', 'over', 'than']);
 const GENERIC_SUBJECT_PATTERN = /^(it|its|they|their|them|this|that|these|those|the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
 const GENERIC_QUERY_PATTERN = /\b(the company|company|the business|business|the startup|startup|the firm|firm|the platform|platform|the app|app|the product|product|the tool|tool)\b/i;
+const LEADING_SUBORDINATE_PATTERN = /^(because|while|when|if|since|although|though|after|before|as)\b[\s,]*/i;
 const CONTRADICTION_PATTERNS = [
   /\b(no official record|no evidence|not true|false|falsely|fabricated|debunked|denied|denies|deny|did not|didn't|not describe|never happened|unconfirmed|rumor)\b/i,
   /\b(but|however|while)\b.{0,60}\b(not|never|denied|did not|didn't|no)\b/i,
@@ -98,6 +99,16 @@ function normalizeUrl(raw = '') {
 
 function normalizeClaimText(text = '') {
   return normalizeWhitespace(String(text || '').toLowerCase().replace(/https?:\/\/[^\s]+/g, ' ').replace(/[^a-z0-9\s]/g, ' '));
+}
+
+function normalizeSubjectCandidate(text = '') {
+  let normalized = normalizeWhitespace(text);
+  let prior = '';
+  while (normalized && normalized !== prior) {
+    prior = normalized;
+    normalized = normalizeWhitespace(normalized.replace(LEADING_SUBORDINATE_PATTERN, ''));
+  }
+  return normalized;
 }
 
 function countMatches(text = '', pattern) {
@@ -622,7 +633,7 @@ function parseClaimStructure(claimText = '') {
   const predicateText = String((verbMatch.value && verbMatch.value[0]) || '').trim();
   const idx = Number((verbMatch.value && verbMatch.value.index) || 0);
   return {
-    subject_text: normalizeWhitespace(normalized.slice(0, idx)),
+    subject_text: normalizeSubjectCandidate(normalizeWhitespace(normalized.slice(0, idx))),
     predicate_text: predicateText,
     object_text: normalizeWhitespace(normalized.slice(idx + predicateText.length)),
   };
@@ -645,11 +656,11 @@ function primaryNamedEntity(text = '') {
 }
 
 function isGenericSubject(subject = '') {
-  return GENERIC_SUBJECT_PATTERN.test(normalizeWhitespace(subject));
+  return GENERIC_SUBJECT_PATTERN.test(normalizeSubjectCandidate(subject));
 }
 
 function genericSubjectSuffix(subject = '') {
-  return normalizeWhitespace(String(subject || '').replace(GENERIC_SUBJECT_PATTERN, ''));
+  return normalizeWhitespace(normalizeSubjectCandidate(String(subject || '')).replace(GENERIC_SUBJECT_PATTERN, ''));
 }
 
 function getClaimAnchorText(claim = {}) {
@@ -1037,7 +1048,8 @@ function applyHeuristicClaimResolution(claims = [], contextClaims = []) {
     }
     const best = candidates[0] || null;
     if (best && Number(best.score || 0) >= 0.3) {
-      const suffix = genericSubjectSuffix(subject);
+      const unresolvedSubject = normalizeWhitespace(String(next.base_subject_text || subject));
+      const suffix = genericSubjectSuffix(unresolvedSubject);
       next.resolved_subject_text = normalizeWhitespace(`${best.anchor} ${suffix}`) || best.anchor;
       next.resolved_claim_text = normalizeWhitespace(`${next.resolved_subject_text} ${String(next.predicate_text || '')} ${String(next.object_text || '')}`);
       next.parser_provenance = 'reconciled';
