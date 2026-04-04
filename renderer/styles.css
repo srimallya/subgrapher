@@ -3891,6 +3891,28 @@ body[data-theme="light"] .status-rss-filters button.active {
   overflow: hidden;
 }
 
+.notes-recovery-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(180, 135, 62, 0.08);
+}
+
+.notes-recovery-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.notes-recovery-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .notes-highlight-layer,
 #notes-input {
   font-family: var(--font-mono);

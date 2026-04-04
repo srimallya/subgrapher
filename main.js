@@ -57,6 +57,7 @@ const { createBundledSmallLlmRuntime } = require('./runtime/bundled_small_llm');
 const { createBundledLlmBootstrapManager } = require('./runtime/bundled_llm_bootstrap');
 
 const APP_NAME = 'Subgrapher';
+const NOTE_RECOVERY_BODY_CHAR_THRESHOLD = 50000;
 const STORE_FILENAME = 'semantic_references.json';
 const MAX_BROWSER_TABS_PER_REFERENCE = 10;
 const MAX_RUNTIME_BROWSER_TABS = 120;
@@ -21480,18 +21481,41 @@ ipcMain.handle('notes:create', async (_event, payload) => {
 
 ipcMain.handle('notes:get', async (_event, payload) => {
   const noteId = typeof payload === 'string' ? payload : String((payload && payload.noteId) || '').trim();
+  const unsafeBody = !!(payload && payload.unsafe_body);
   console.log('[notes-main] notes:get:start', { noteId });
   const res = await getNotesStore().getNote(noteId);
+  const note = (res && res.ok && res.note)
+    ? (() => {
+        const rawNote = res.note;
+        const body = String((rawNote && rawNote.body_markdown) || '');
+        if (unsafeBody || body.length <= NOTE_RECOVERY_BODY_CHAR_THRESHOLD) {
+          return {
+            ...rawNote,
+            body_length: body.length,
+            body_withheld: false,
+            recovery_reason: '',
+          };
+        }
+        return {
+          ...rawNote,
+          body_markdown: '',
+          active_mode: 'edit',
+          body_length: body.length,
+          body_withheld: true,
+          recovery_reason: `This note is ${body.length.toLocaleString()} characters. Subgrapher opened it in recovery mode to keep startup responsive.`,
+        };
+      })()
+    : null;
   const analysisJob = (res && res.ok && res.note)
     ? ensureScheduledNoteAnalysis(noteId, res.note, res.analysis_summary || null, 100)
     : null;
   console.log('[notes-main] notes:get:done', {
     noteId,
     ok: !!(res && res.ok),
-    title: String((res && res.note && res.note.title) || ''),
+    title: String((note && note.title) || ''),
   });
   return (res && res.ok)
-    ? { ...res, analysis_job: analysisJob }
+    ? { ...res, note, analysis_job: analysisJob }
     : res;
 });
 

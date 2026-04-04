@@ -116,6 +116,10 @@ const state = {
   noteAnalysisJob: null,
   noteSaveState: 'idle',
   noteAnalysisPending: false,
+  noteBodyWithheld: false,
+  noteBodyLength: 0,
+  noteRecoveryReason: '',
+  noteRecoveryLoading: false,
   zenMode: false,
   hyperwebFeed: [],
   hyperwebFilterFingerprint: '',
@@ -316,6 +320,7 @@ const MAIL_SMART_FOLDER_LABELS = {
 };
 const HYPERWEB_LAST_SEEN_KEY = 'subgrapher_hyperweb_last_seen_v1';
 const STATUS_SURFACE_ID = '__status__';
+const NOTE_RECOVERY_BODY_CHAR_THRESHOLD = 50000;
 let passiveNoticeTimer = null;
 let hyperwebChatRefreshPromise = null;
 let hyperwebChatRefreshQueuedMode = '';
@@ -1619,6 +1624,20 @@ function getActiveNoteDraftBody() {
     : String((state.activeNote && state.activeNote.body_markdown) || '');
 }
 
+function getActiveNoteBodyLength() {
+  const explicit = Number(state.noteBodyLength || 0);
+  if (explicit > 0) return explicit;
+  return String(getActiveNoteDraftBody()).length;
+}
+
+function isActiveNoteRecoveryMode() {
+  return !!(state.activeNote && state.noteBodyWithheld);
+}
+
+function isActiveNoteHeavyBody() {
+  return !!(state.activeNote && getActiveNoteBodyLength() > NOTE_RECOVERY_BODY_CHAR_THRESHOLD);
+}
+
 function upsertLocalNoteSummary(note = null) {
   if (!note || !note.id) return;
   const targetId = String(note.id || '').trim();
@@ -1938,6 +1957,7 @@ function shouldMaskPersistedNoteAnalysis() {
 }
 
 function getRenderableNoteClaims() {
+  if (isActiveNoteRecoveryMode() || isActiveNoteHeavyBody()) return [];
   const persistedClaims = (Array.isArray(state.activeNoteClaims) ? state.activeNoteClaims : [])
     .filter((claim) => {
       if (!claim) return false;
@@ -1958,6 +1978,7 @@ function getRenderableNoteClaims() {
 }
 
 function getRenderableNoteRegions() {
+  if (isActiveNoteRecoveryMode() || isActiveNoteHeavyBody()) return [];
   const persisted = (Array.isArray(state.activeNoteRegions) ? state.activeNoteRegions : [])
     .filter((region) => {
       if (!region) return false;
@@ -2023,6 +2044,7 @@ function buildProvisionalEvidenceFeed() {
 }
 
 function getRenderableNoteEvidenceFeed() {
+  if (isActiveNoteRecoveryMode() || isActiveNoteHeavyBody()) return [];
   const feed = Array.isArray(state.activeNoteEvidenceFeed) ? state.activeNoteEvidenceFeed : [];
   if (feed.length > 0 && !shouldMaskPersistedNoteAnalysis()) {
     return feed.slice().sort((a, b) => Number((a && a.start_offset) || 0) - Number((b && b.start_offset) || 0));
@@ -2271,6 +2293,7 @@ function getNoteAnalysisStageLabel(stage = '') {
 }
 
 function getDisplayedNoteScore() {
+  if (isActiveNoteRecoveryMode() || isActiveNoteHeavyBody()) return clamp(Math.round(Number(state.noteScore || 0) || 0), 0, 100);
   if (shouldMaskPersistedNoteAnalysis()) {
     const provisionalPending = computeProvisionalNoteMetrics(getActiveNoteDraftBody());
     return provisionalPending.note_score > 0 ? provisionalPending.note_score : 0;
@@ -2287,6 +2310,9 @@ function getDisplayedNoteScore() {
 }
 
 function getDisplayedNoteRiskLevel() {
+  if (isActiveNoteRecoveryMode() || isActiveNoteHeavyBody()) {
+    return String(state.noteRiskLevel || '').trim() || 'needs_review';
+  }
   if (shouldMaskPersistedNoteAnalysis()) {
     const provisionalPending = computeProvisionalNoteMetrics(getActiveNoteDraftBody());
     return provisionalPending.risk_level || 'needs_review';
@@ -2417,6 +2443,16 @@ function renderNotesEvidenceRail() {
   if (!bodyNode) return;
   if (!state.activeNote) {
     bodyNode.innerHTML = '<div class="notes-citation-state muted">Open a note to see evidence feedback.</div>';
+    return;
+  }
+  if (isActiveNoteRecoveryMode()) {
+    const bodyLength = getActiveNoteBodyLength();
+    bodyNode.innerHTML = `<div class="notes-citation-state muted">This note is ${escapeHtml(bodyLength.toLocaleString())} characters and is open in recovery mode. Load the full note only if you need the original text.</div>`;
+    return;
+  }
+  if (isActiveNoteHeavyBody()) {
+    const bodyLength = getActiveNoteBodyLength();
+    bodyNode.innerHTML = `<div class="notes-citation-state muted">Interactive evidence is paused for this ${escapeHtml(bodyLength.toLocaleString())}-character note to keep the editor responsive.</div>`;
     return;
   }
   if (shouldMaskPersistedNoteAnalysis()) {
@@ -2553,6 +2589,8 @@ async function openNoteCitationInWorkspace({ url = '', title = '', excerpt = '' 
 
 function computeNoteStatusText() {
   if (!state.activeNote) return 'No note selected';
+  if (isActiveNoteRecoveryMode()) return 'Recovery mode';
+  if (isActiveNoteHeavyBody()) return 'Large note';
   if (state.noteSaveState === 'saving') return 'Saving';
   if (state.noteSaveState === 'edited') return 'Edited';
   const analysisJob = normalizeNoteAnalysisJob(state.noteAnalysisJob, String((state.activeNote && state.activeNote.id) || ''));
@@ -2777,6 +2815,14 @@ async function renderNotePreview() {
     content.innerHTML = '';
     return;
   }
+  if (isActiveNoteRecoveryMode()) {
+    content.innerHTML = '<div class="artifact-markdown-preview-empty">Recovery mode is active. Use Edit to trim the note, or load the full note explicitly.</div>';
+    return;
+  }
+  if (isActiveNoteHeavyBody()) {
+    content.innerHTML = '<div class="artifact-markdown-preview-empty">Preview is paused for large notes to avoid hangs. Trim the note or load the full body only when needed.</div>';
+    return;
+  }
   const requestSeq = Number(state.notePreviewRenderSeq || 0) + 1;
   state.notePreviewRenderSeq = requestSeq;
   content.innerHTML = '<div class="artifact-markdown-preview-empty">Rendering note...</div>';
@@ -2796,6 +2842,9 @@ function renderNotesSurface() {
   const hasNote = !!state.activeNote;
   const emptyState = e('notes-empty-state');
   const editorShell = e('notes-editor-shell');
+  const recoveryBanner = e('notes-recovery-banner');
+  const recoveryMessage = e('notes-recovery-message');
+  const loadFullBtn = e('notes-load-full-btn');
   const titleInput = e('note-title-input');
   const textPane = e('notes-text-pane');
   const previewPane = e('notes-preview-pane');
@@ -2813,15 +2862,18 @@ function renderNotesSurface() {
   if (titleInput) titleInput.disabled = !hasNote;
   if (input) input.disabled = !hasNote;
   if (saveBtn) saveBtn.disabled = !hasNote;
-  if (reanalyzeBtn) reanalyzeBtn.disabled = !hasNote || state.noteAnalysisPending;
+  if (reanalyzeBtn) reanalyzeBtn.disabled = !hasNote || state.noteAnalysisPending || isActiveNoteRecoveryMode() || isActiveNoteHeavyBody();
   if (deleteBtn) deleteBtn.disabled = !hasNote;
-  if (promoteBtn) promoteBtn.disabled = !hasNote;
+  if (promoteBtn) promoteBtn.disabled = !hasNote || isActiveNoteRecoveryMode() || isActiveNoteHeavyBody();
+  if (loadFullBtn) loadFullBtn.disabled = !hasNote || !isActiveNoteRecoveryMode() || state.noteRecoveryLoading;
   if (statusNode) {
     statusNode.textContent = computeNoteStatusText();
     const notePolicy = (state.activeNoteAnalysis && state.activeNoteAnalysis.note_policy && typeof state.activeNoteAnalysis.note_policy === 'object')
       ? state.activeNoteAnalysis.note_policy
       : {};
-    const statusReason = String(notePolicy.fallback_reason || '').trim();
+    const statusReason = isActiveNoteRecoveryMode()
+      ? String(state.noteRecoveryReason || '').trim()
+      : String(notePolicy.fallback_reason || '').trim();
     statusNode.title = statusReason || '';
   }
   renderNotesScoreSummary();
@@ -2832,8 +2884,13 @@ function renderNotesSurface() {
     if (input) input.value = '';
     state.noteDraftTitle = '';
     state.noteDraftBody = '';
+    state.noteBodyWithheld = false;
+    state.noteBodyLength = 0;
+    state.noteRecoveryReason = '';
+    state.noteRecoveryLoading = false;
     if (textPane) textPane.classList.remove('hidden');
     if (previewPane) previewPane.classList.add('hidden');
+    if (recoveryBanner) recoveryBanner.classList.add('hidden');
     closeNoteCitationPopover();
     renderNotesList();
     renderNoteHighlightLayer();
@@ -2842,23 +2899,47 @@ function renderNotesSurface() {
   }
 
   const mode = String((state.activeNote && state.activeNote.active_mode) || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
+  const recoveryMode = isActiveNoteRecoveryMode();
+  const heavyBody = isActiveNoteHeavyBody();
+  const effectiveMode = recoveryMode ? 'edit' : mode;
   if (titleInput && titleInput.value !== String(getActiveNoteDraftTitle())) {
     titleInput.value = String(getActiveNoteDraftTitle());
   }
   if (input && input.value !== String(getActiveNoteDraftBody())) {
     input.value = String(getActiveNoteDraftBody());
   }
-  if (editBtn) editBtn.classList.toggle('active', mode === 'edit');
-  if (viewBtn) viewBtn.classList.toggle('active', mode === 'view');
-  if (textPane) textPane.classList.toggle('hidden', mode !== 'edit');
-  if (previewPane) previewPane.classList.toggle('hidden', mode !== 'view');
+  if (editBtn) editBtn.classList.toggle('active', effectiveMode === 'edit');
+  if (viewBtn) {
+    viewBtn.classList.toggle('active', effectiveMode === 'view');
+    viewBtn.disabled = recoveryMode || state.noteRecoveryLoading;
+  }
+  if (textPane) textPane.classList.toggle('hidden', effectiveMode !== 'edit');
+  if (previewPane) previewPane.classList.toggle('hidden', effectiveMode !== 'view');
+  if (recoveryBanner) recoveryBanner.classList.toggle('hidden', !recoveryMode);
+  if (recoveryMessage) {
+    recoveryMessage.textContent = recoveryMode
+      ? (String(state.noteRecoveryReason || '').trim() || 'This note was opened in recovery mode.')
+      : '';
+  }
+  if (loadFullBtn) {
+    loadFullBtn.textContent = state.noteRecoveryLoading ? 'Loading…' : 'Load Full Note';
+  }
+  if (input) {
+    input.placeholder = recoveryMode
+      ? 'Recovery mode: trim or replace this note, then save.'
+      : '';
+  }
   renderNotesList();
   renderNoteHighlightLayer();
-  if (mode === 'view') void renderNotePreview();
+  if (effectiveMode === 'view' && !heavyBody) void renderNotePreview();
 }
 
 async function refreshActiveNoteAnalysis(options = {}) {
   if (!notesApi) return;
+  if (isActiveNoteRecoveryMode() || isActiveNoteHeavyBody()) {
+    clearNoteAnalysisRefreshTimer();
+    return;
+  }
   const targetId = String((options && options.noteId) || state.activeNoteId || '').trim();
   if (!targetId) return;
   const requestSeq = Number(state.noteAnalysisSeq || 0) + 1;
@@ -2962,6 +3043,10 @@ async function saveActiveNote(options = {}) {
       state.activeNoteId = savedNoteId;
       state.noteDraftTitle = String(res.note.title || '');
       state.noteDraftBody = String(res.note.body_markdown || '');
+      state.noteBodyLength = String(res.note.body_markdown || '').length;
+      state.noteBodyWithheld = false;
+      state.noteRecoveryReason = '';
+      state.noteRecoveryLoading = false;
       state.noteSaveState = 'saved';
       state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, savedNoteId);
       state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, res.note, state.activeNoteAnalysis);
@@ -2971,10 +3056,12 @@ async function saveActiveNote(options = {}) {
         : (saveStage === 'error' ? 'error' : 'stable');
       renderNotesSurface();
       clearNoteAnalysisRefreshTimer();
-      state.noteAnalysisRefreshTimer = setTimeout(() => {
-        state.noteAnalysisRefreshTimer = null;
-        void refreshActiveNoteAnalysis({ noteId: savedNoteId, allowReschedule: true });
-      }, 1800);
+      if (!isActiveNoteHeavyBody()) {
+        state.noteAnalysisRefreshTimer = setTimeout(() => {
+          state.noteAnalysisRefreshTimer = null;
+          void refreshActiveNoteAnalysis({ noteId: savedNoteId, allowReschedule: true });
+        }, 1800);
+      }
     }
     upsertLocalNoteSummary(res.note);
     return res;
@@ -3025,6 +3112,10 @@ function scheduleActiveNoteSave(delayMs = 800) {
 
 async function setActiveNoteMode(mode = 'edit') {
   if (!notesApi || !state.activeNote) return;
+  if (isActiveNoteRecoveryMode() && String(mode || 'edit').trim().toLowerCase() === 'view') {
+    renderNotesSurface();
+    return;
+  }
   const nextMode = String(mode || 'edit').trim().toLowerCase() === 'view' ? 'view' : 'edit';
   const noteId = String((state.activeNote && state.activeNote.id) || '').trim();
   logNotesDebug('setActiveNoteMode:start', {
@@ -3104,7 +3195,7 @@ async function loadNoteRecord(noteId = '', options = {}) {
       const saveRes = await saveActiveNote({ silent: true });
       if (saveRes && saveRes.ok === false) return;
     }
-    const res = await notesApi.get(targetId);
+    const res = await notesApi.get(targetId, { unsafe_body: !!options.unsafeBody });
     if (!res || !res.ok || !res.note) {
       logNotesDebug('loadNoteRecord:error', { targetId, message: String((res && res.message) || '') });
       if (!options.silent) window.alert((res && res.message) || 'Unable to load note.');
@@ -3122,6 +3213,16 @@ async function loadNoteRecord(noteId = '', options = {}) {
     state.activeEvidenceRegionId = '';
     state.noteDraftTitle = String(res.note.title || '');
     state.noteDraftBody = String(res.note.body_markdown || '');
+    state.noteBodyWithheld = !!res.note.body_withheld;
+    state.noteBodyLength = Number(res.note.body_length || String(res.note.body_markdown || '').length || 0) || 0;
+    state.noteRecoveryReason = String(res.note.recovery_reason || '').trim();
+    state.noteRecoveryLoading = false;
+    if (state.noteBodyWithheld || state.noteBodyLength > NOTE_RECOVERY_BODY_CHAR_THRESHOLD) {
+      state.activeNote = {
+        ...state.activeNote,
+        active_mode: 'edit',
+      };
+    }
     state.noteSaveState = 'saved';
     state.noteAnalysisJob = normalizeNoteAnalysisJob(res.analysis_job, targetId);
     state.noteAnalysisPending = isNoteAnalysisJobPending(state.noteAnalysisJob, res.note, res.analysis_summary || null);
@@ -3138,7 +3239,9 @@ async function loadNoteRecord(noteId = '', options = {}) {
       : (loadStage === 'error' ? 'error' : 'stable');
     upsertLocalNoteSummary(res.note);
     renderNotesSurface();
-    void refreshActiveNoteAnalysis({ noteId: state.activeNoteId, allowReschedule: true });
+    if (!state.noteBodyWithheld && !isActiveNoteHeavyBody()) {
+      void refreshActiveNoteAnalysis({ noteId: state.activeNoteId, allowReschedule: true });
+    }
     logNotesDebug('loadNoteRecord:done', {
       targetId,
       activeId: String(state.activeNoteId || ''),
@@ -3150,6 +3253,22 @@ async function loadNoteRecord(noteId = '', options = {}) {
   } finally {
     if (requestSeq === Number(state.noteLoadSeq || 0)) {
       state.notePendingSwitchTargetId = '';
+    }
+  }
+}
+
+async function loadFullActiveNoteBody() {
+  if (!notesApi || !state.activeNote || !isActiveNoteRecoveryMode()) return;
+  const noteId = String(state.activeNoteId || '').trim();
+  if (!noteId) return;
+  state.noteRecoveryLoading = true;
+  renderNotesSurface();
+  try {
+    await loadNoteRecord(noteId, { skipSave: true, silent: false, unsafeBody: true });
+  } finally {
+    if (String(state.activeNoteId || '').trim() === noteId) {
+      state.noteRecoveryLoading = false;
+      renderNotesSurface();
     }
   }
 }
@@ -3194,6 +3313,10 @@ async function loadNotesList(options = {}) {
   state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
   state.noteAnalysisPending = false;
+  state.noteBodyWithheld = false;
+  state.noteBodyLength = 0;
+  state.noteRecoveryReason = '';
+  state.noteRecoveryLoading = false;
   renderNotesSurface();
 }
 
@@ -3251,6 +3374,10 @@ async function deleteActiveNote() {
   state.noteAnalysisStage = 'stable';
   state.noteSaveState = 'idle';
   state.noteAnalysisPending = false;
+  state.noteBodyWithheld = false;
+  state.noteBodyLength = 0;
+  state.noteRecoveryReason = '';
+  state.noteRecoveryLoading = false;
   renderNotesSurface();
   if (state.notes.length > 0) {
     await loadNoteRecord(String((state.notes[0] && state.notes[0].id) || '').trim(), { skipSave: true, silent: true });
@@ -15255,6 +15382,11 @@ function bindControls() {
   e('notes-delete-btn')?.addEventListener('click', async () => {
     await runNotesUiAction('notes:delete', async () => {
       await deleteActiveNote();
+    });
+  });
+  e('notes-load-full-btn')?.addEventListener('click', async () => {
+    await runNotesUiAction('notes:load-full', async () => {
+      await loadFullActiveNoteBody();
     });
   });
   e('notes-create-reference-btn')?.addEventListener('click', async () => {

@@ -347,6 +347,15 @@
         </div>
         <div id="notes-empty-state" class="notes-empty-state hidden">Create a note to begin.</div>
         <div id="notes-editor-shell" class="notes-editor-shell hidden">
+          <section id="notes-recovery-banner" class="notes-recovery-banner hidden">
+            <div class="notes-recovery-copy">
+              <strong>Recovery mode</strong>
+              <span id="notes-recovery-message" class="muted">This note was opened in a safe mode.</span>
+            </div>
+            <div class="notes-recovery-actions">
+              <button id="notes-load-full-btn" type="button">Load Full Note</button>
+            </div>
+          </section>
           <section id="notes-text-pane" class="notes-text-pane">
             <pre id="notes-highlight-layer" class="notes-highlight-layer" aria-hidden="true"></pre>
             <textarea id="notes-input" spellcheck="false"></textarea>
