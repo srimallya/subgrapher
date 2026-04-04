@@ -5581,31 +5581,36 @@ function buildContextPreviewMeta(preview = {}) {
   return parts.join(' · ');
 }
 
+function isLowSignalContextText(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  const suspicious = (value.match(/[^\x09\x0A\x0D\x20-\x7E]/g) || []).length;
+  const suspiciousRatio = suspicious / Math.max(1, value.length);
+  if (suspiciousRatio > 0.12) return true;
+  const punctuationRuns = value.match(/[^\sA-Za-z0-9]{4,}/g) || [];
+  if (punctuationRuns.length > 0) return true;
+  return false;
+}
+
 function buildContextPreviewBody(preview = {}) {
   const mode = String(preview.preview_mode || 'text').trim().toLowerCase();
   const summary = String(preview.summary || '').trim();
   const content = String(preview.preview || '').replace(/\u0000/g, '').trim();
-  const looksScrambled = (text) => {
-    const value = String(text || '').trim();
-    if (!value) return false;
-    const suspicious = (value.match(/[^\x09\x0A\x0D\x20-\x7E]/g) || []).length;
-    const ratio = suspicious / Math.max(1, value.length);
-    return ratio > 0.12;
-  };
   if (mode === 'binary') {
     const rows = [];
     const notice = String(preview.message || 'Binary format detected.').trim();
+    const safeContent = isLowSignalContextText(content) ? '' : content;
     rows.push(notice || 'Binary format detected.');
-    if (summary && !looksScrambled(summary)) {
+    if (summary && !isLowSignalContextText(summary)) {
       rows.push('');
       rows.push(`Index summary: ${summary}`);
     }
     rows.push('');
-    if (content) {
+    if (safeContent) {
       rows.push('Extracted text fragments:');
-      rows.push(content);
+      rows.push(safeContent);
     } else {
-      rows.push('No extracted text fragments were available.');
+      rows.push('No readable extracted text fragments were available.');
     }
     return rows.join('\n');
   }
@@ -8429,7 +8434,11 @@ function renderFilesPanel() {
     ? visibleFiles.slice(0, 240).map((file) => {
       const fileId = String((file && file.id) || '').trim();
       const name = escapeHtml(String((file && file.relative_path) || (file && file.original_name) || 'context.txt'));
-      const summary = escapeHtml(String((file && file.summary) || ''));
+      const rawSummary = String((file && file.summary) || '').trim();
+      const summaryText = rawSummary && !isLowSignalContextText(rawSummary)
+        ? rawSummary
+        : `${String((file && file.original_name) || (file && file.relative_path) || 'Context file')} (${String((file && file.mime_type) || '').replace(/^application\//, '').replace(/^text\//, '').toUpperCase() || 'FILE'})`;
+      const summary = escapeHtml(summaryText);
       const source = escapeHtml(String((file && file.source_type) || 'context'));
       return `
         <div class="files-item" data-file-id="${escapeHtml(fileId)}">

@@ -45,6 +45,28 @@ function summarizeText(content, maxLen = 320) {
   return `${normalized.slice(0, limit - 3)}...`;
 }
 
+function isLowSignalPreviewText(content = '') {
+  const value = String(content || '').replace(/\u0000/g, '').trim();
+  if (!value) return true;
+  const suspiciousMatches = value.match(/[^\x09\x0A\x0D\x20-\x7E]/g) || [];
+  const suspiciousRatio = suspiciousMatches.length / Math.max(1, value.length);
+  if (suspiciousRatio > 0.12) return true;
+  const alphaNumMatches = value.match(/[A-Za-z0-9]/g) || [];
+  const alphaNumRatio = alphaNumMatches.length / Math.max(1, value.length);
+  if (alphaNumRatio < 0.35) return true;
+  const punctuationRuns = value.match(/[^\sA-Za-z0-9]{4,}/g) || [];
+  if (punctuationRuns.length > 0) return true;
+  return false;
+}
+
+function buildContextSummaryText(content = '', fallback = '', maxLen = 320) {
+  const candidate = String(content || '').replace(/\u0000/g, '').trim();
+  if (candidate && !isLowSignalPreviewText(candidate)) {
+    return summarizeText(candidate, maxLen);
+  }
+  return summarizeText(fallback, maxLen);
+}
+
 function detectMimeType(ext = '', isText = false) {
   const normalized = normalizeExt(ext);
   if (normalized === '.md' || normalized === '.markdown') return 'text/markdown';
@@ -573,6 +595,8 @@ module.exports = {
   isImageExtension,
   detectMimeType,
   summarizeText,
+  isLowSignalPreviewText,
+  buildContextSummaryText,
   extractBinaryTextFragments,
   extractContextTextFromBuffer,
   extractContextTextFromFile,

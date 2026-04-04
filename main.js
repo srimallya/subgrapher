@@ -26,6 +26,7 @@ const {
   isImageExtension,
   detectMimeType,
   summarizeText,
+  buildContextSummaryText,
   extractContextTextFromFile,
   extractContextTextFromBuffer,
 } = require('./runtime/context_file_support');
@@ -22971,7 +22972,11 @@ ipcMain.handle('browser:srAddContextFile', async (_event, payload) => {
       mimeType,
       maxChars: 8_000,
     });
-    const summary = summarizeText(String((extracted && extracted.text) || ''), 560);
+    const summary = buildContextSummaryText(
+      String((extracted && extracted.text) || ''),
+      `${path.basename(absolutePath)} (${String(ext || '').replace(/^\./, '').toUpperCase() || 'FILE'})`,
+      560,
+    );
     const item = {
       id: fileId,
       source_type: 'external_context_file',

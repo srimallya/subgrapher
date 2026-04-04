@@ -6,7 +6,7 @@ const {
   ALLOWED_CONTEXT_EXTENSIONS,
   isTextExtension,
   detectMimeType,
-  summarizeText,
+  buildContextSummaryText,
   extractContextTextFromBuffer,
 } = require('./context_file_support');
 
@@ -105,8 +105,9 @@ function indexFolderAsContext(rootPath, options = {}) {
         mimeType,
         maxChars: 8_000,
       });
-      const summary = summarizeText(
-        String((extracted && extracted.text) || `${entry.name} (${String(ext || '').replace(/^\./, '').toUpperCase() || 'file'})`),
+      const summary = buildContextSummaryText(
+        String((extracted && extracted.text) || ''),
+        `${entry.name} (${String(ext || '').replace(/^\./, '').toUpperCase() || 'file'})`,
         560,
       );
       const hash = crypto.createHash('sha256').update(rawBuffer).digest('hex');

@@ -1662,37 +1662,45 @@ body.workspace-status-mode .nav-bar-main input {
 
 .artifact-type-chip.artifact-type-html,
 .hyperweb-status-badge.visible {
-  color: #c8d8cb;
-  border-color: rgba(95, 143, 107, 0.5);
+  color: color-mix(in oklab, var(--success) 88%, var(--text));
+  border-color: color-mix(in oklab, var(--success) 42%, var(--border-strong));
+  background: color-mix(in oklab, var(--success) 12%, var(--surface-active));
 }
 
 .hyperweb-status-badge.pending,
 .share-chip.pending {
-  color: #deca98;
+  color: color-mix(in oklab, #b18c49 82%, var(--text));
+  border-color: color-mix(in oklab, #b18c49 42%, var(--border-strong));
+  background: color-mix(in oklab, #b18c49 12%, var(--surface-active));
 }
 
 .hyperweb-status-badge.hidden,
 .share-chip.revoked,
 .share-chip.declined {
-  color: #dfbbbb;
+  color: color-mix(in oklab, #a35e5e 82%, var(--text));
+  border-color: color-mix(in oklab, #a35e5e 42%, var(--border-strong));
+  background: color-mix(in oklab, #a35e5e 10%, var(--surface-active));
 }
 
 .hyperweb-status-badge.discovered,
 .hyperweb-status-badge.metadata_loaded,
 .hyperweb-status-badge.fetching_content,
 .hyperweb-status-badge.fetching_assets {
-  color: #d8c59d;
-  border-color: rgba(177, 140, 73, 0.45);
+  color: color-mix(in oklab, #b18c49 82%, var(--text));
+  border-color: color-mix(in oklab, #b18c49 42%, var(--border-strong));
+  background: color-mix(in oklab, #b18c49 12%, var(--surface-active));
 }
 
 .hyperweb-status-badge.ready {
-  color: #c8d8cb;
-  border-color: rgba(95, 143, 107, 0.5);
+  color: color-mix(in oklab, var(--success) 88%, var(--text));
+  border-color: color-mix(in oklab, var(--success) 42%, var(--border-strong));
+  background: color-mix(in oklab, var(--success) 12%, var(--surface-active));
 }
 
 .hyperweb-status-badge.failed {
-  color: #dfbbbb;
-  border-color: rgba(163, 94, 94, 0.45);
+  color: color-mix(in oklab, #a35e5e 82%, var(--text));
+  border-color: color-mix(in oklab, #a35e5e 42%, var(--border-strong));
+  background: color-mix(in oklab, #a35e5e 10%, var(--surface-active));
 }
 
 #artifact-input,
