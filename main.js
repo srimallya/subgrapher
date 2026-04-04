@@ -6635,9 +6635,17 @@ function deriveNoteFreshnessState(note = null, summary = null, analysisJob = nul
   return 'stable';
 }
 
+function shouldSkipAutomaticNoteAnalysis(note = null) {
+  if (!note) return false;
+  return String((note && note.body_markdown) || '').length > NOTE_RECOVERY_BODY_CHAR_THRESHOLD;
+}
+
 function ensureScheduledNoteAnalysis(noteId = '', note = null, summary = null, delayMs = 1200) {
   const targetId = String(noteId || '').trim();
   if (!targetId || !note) return getNoteAnalysisJobMetadata(targetId, note, summary);
+  if (shouldSkipAutomaticNoteAnalysis(note)) {
+    return null;
+  }
   if (!noteNeedsFreshAnalysis(note, summary)) {
     return getNoteAnalysisJobMetadata(targetId, note, summary);
   }
@@ -6675,6 +6683,14 @@ async function runNoteAnalysis(noteId = '', options = {}) {
     return { ok: false, message: (noteRes && noteRes.message) || 'Note not found.' };
   }
   const note = noteRes.note;
+  if (shouldSkipAutomaticNoteAnalysis(note)) {
+    return {
+      ok: false,
+      skipped: true,
+      message: 'Note analysis skipped for oversized note body.',
+      note_revision: Number(note.analysis_revision || 0) || 0,
+    };
+  }
   if (expectedRevision > 0 && Number(note.analysis_revision || 0) !== expectedRevision) {
     safeMainLog('error', '[bundled-llm] note-analysis:stale', {
       note_id: targetId,
@@ -6754,6 +6770,7 @@ function scheduleNoteAnalysis(noteId = '', delayMs = 1200, revision = 0) {
 }
 
 function noteNeedsFreshAnalysis(note = null, summary = null) {
+  if (shouldSkipAutomaticNoteAnalysis(note)) return false;
   if (!note) return false;
   const analyzerVersion = String((getNoteAnalysisEngine() && getNoteAnalysisEngine().ANALYZER_VERSION) || '').trim();
   const idleEnough = (nowTs() - Number((note && note.last_saved_at) || 0)) >= 15_000;
@@ -6781,6 +6798,7 @@ async function ensureFreshNoteAnalysis(noteId = '') {
   if (!noteRes || !noteRes.ok || !noteRes.note) return noteRes;
   const note = noteRes.note;
   const summary = noteRes.analysis_summary || null;
+  if (shouldSkipAutomaticNoteAnalysis(note)) return noteRes;
   const needsRefresh = noteNeedsFreshAnalysis(note, summary);
   if (!needsRefresh) return noteRes;
   await runNoteAnalysis(targetId, { expectedRevision: Number(note.analysis_revision || 0) || 0 });
@@ -6802,6 +6820,7 @@ async function computeBundledLlmTaskDiagnostics() {
     if (!noteId) continue;
     const noteRes = await notesStore.getNote(noteId).catch(() => null);
     if (!noteRes || !noteRes.ok || !noteRes.note) continue;
+    if (shouldSkipAutomaticNoteAnalysis(noteRes.note)) continue;
     if (!String(noteRes.note.body_markdown || '').trim()) continue;
     noteCandidates += 1;
     if (noteNeedsFreshAnalysis(noteRes.note, noteRes.analysis_summary || null)) notePending += 1;
@@ -6912,6 +6931,7 @@ async function processBundledLlmBacklog(options = {}) {
       if (!noteId) continue;
       const noteRes = await notesStore.getNote(noteId);
       if (!noteRes || !noteRes.ok || !noteRes.note) continue;
+      if (shouldSkipAutomaticNoteAnalysis(noteRes.note)) continue;
       if (!String(noteRes.note.body_markdown || '').trim()) continue;
       if (!forceReset && !noteNeedsFreshAnalysis(noteRes.note, noteRes.analysis_summary || null)) continue;
       noteCandidates.push(noteRes.note);
