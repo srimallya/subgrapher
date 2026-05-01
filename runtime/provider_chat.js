@@ -292,9 +292,13 @@ async function openAiLikeChat(params, options = {}) {
   const baseUrl = provider === 'cerebras'
     ? 'https://api.cerebras.ai'
     : (
-      provider === 'lmstudio'
-        ? normalizeBaseUrl(params.baseUrl || params.lmstudio_base_url, 'http://127.0.0.1:1234')
-        : 'https://api.openai.com'
+      provider === 'openrouter'
+        ? 'https://openrouter.ai/api'
+        : (
+          provider === 'lmstudio'
+            ? normalizeBaseUrl(params.baseUrl || params.lmstudio_base_url, 'http://127.0.0.1:1234')
+            : 'https://api.openai.com'
+        )
     );
 
   const body = {
@@ -529,7 +533,7 @@ async function chatWithProvider(params = {}, options = {}) {
 
   try {
     const request = { provider, model, apiKey, systemPrompt, userPrompt, baseUrl };
-    if (provider === 'openai' || provider === 'cerebras' || provider === 'lmstudio') {
+    if (provider === 'openai' || provider === 'cerebras' || provider === 'openrouter' || provider === 'lmstudio') {
       return await openAiLikeChat(request, { signal: controller.signal, onDelta });
     }
     if (provider === 'anthropic') {
@@ -575,7 +579,7 @@ async function callProviderWithTools(params = {}, options = {}) {
   if (!provider || !model || (requiresApiKey && !apiKey)) {
     throw new Error('Provider and model are required. API key is required for remote providers.');
   }
-  if (!['openai', 'anthropic', 'cerebras', 'lmstudio'].includes(provider)) {
+  if (!['openai', 'anthropic', 'cerebras', 'openrouter', 'lmstudio'].includes(provider)) {
     throw new Error(`Tool-calling is not supported for provider: ${provider}`);
   }
 
@@ -588,13 +592,17 @@ async function callProviderWithTools(params = {}, options = {}) {
   }
 
   try {
-    if (provider === 'openai' || provider === 'cerebras' || provider === 'lmstudio') {
+    if (provider === 'openai' || provider === 'cerebras' || provider === 'openrouter' || provider === 'lmstudio') {
       const endpoint = provider === 'cerebras'
         ? 'https://api.cerebras.ai/v1/chat/completions'
         : (
-          provider === 'lmstudio'
-            ? `${normalizeBaseUrl(baseUrl, 'http://127.0.0.1:1234')}/v1/chat/completions`
-            : 'https://api.openai.com/v1/chat/completions'
+          provider === 'openrouter'
+            ? 'https://openrouter.ai/api/v1/chat/completions'
+            : (
+              provider === 'lmstudio'
+                ? `${normalizeBaseUrl(baseUrl, 'http://127.0.0.1:1234')}/v1/chat/completions`
+                : 'https://api.openai.com/v1/chat/completions'
+            )
         );
       const body = {
         model,

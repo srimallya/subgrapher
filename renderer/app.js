@@ -272,7 +272,7 @@ const state = {
   },
 };
 
-const PROVIDERS = ['openai', 'cerebras', 'google', 'anthropic', 'lmstudio'];
+const PROVIDERS = ['openai', 'cerebras', 'google', 'anthropic', 'openrouter', 'lmstudio'];
 const REFERENCE_COLOR_TAGS = ['c1', 'c2', 'c3', 'c4', 'c5'];
 const BROWSER_URL_PLACEHOLDER_WEB = 'type anything to search or enter URL...';
 const BROWSER_URL_PLACEHOLDER_ARTIFACT = 'Commands: /add /create /rename/<name> /rm';

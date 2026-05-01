@@ -65,7 +65,7 @@ const MAX_RUNTIME_BROWSER_TABS = 120;
 const MAX_CHAT_MESSAGES = 120;
 const MAX_HIGHLIGHTS = 800;
 const BROWSER_VIEW_PRELOAD_PATH = path.join(__dirname, 'browser_view_preload.js');
-const PROVIDERS = ['openai', 'cerebras', 'google', 'anthropic', 'lmstudio'];
+const PROVIDERS = ['openai', 'cerebras', 'google', 'anthropic', 'openrouter', 'lmstudio'];
 const APP_LOGO_PATH = path.join(__dirname, 'subgrapher_logo.jpg');
 const APP_ICON_PNG_PATH = path.join(__dirname, 'assets', 'icons', 'app-icon-1024.png');
 const APP_ICON_ICO_PATH = path.join(__dirname, 'assets', 'icons', 'app-icon.ico');
@@ -163,7 +163,7 @@ const DECISION_TRACE_MAX_STEPS = 240;
 const GRAPH_MAX_NODES = 600;
 const GRAPH_MAX_EDGES = 1200;
 const AGENTIC_MAX_TURNS = 8;
-const AGENT_MODE_SUPPORTED_PROVIDERS = ['openai', 'anthropic', 'cerebras', 'lmstudio'];
+const AGENT_MODE_SUPPORTED_PROVIDERS = ['openai', 'anthropic', 'cerebras', 'openrouter', 'lmstudio'];
 const PYTHON_EXEC_TIMEOUT_MS = 10_000;
 const PACKAGED_PYTHON_IMMUTABLE_MESSAGE = 'Python package installs are disabled in installed builds. Allowlisted packages are prebundled; reinstall or update Subgrapher if packages are missing.';
 const YOUTUBE_TRANSCRIPT_MAX_CHARS = 60_000;
@@ -201,6 +201,7 @@ const PROVIDER_SUMMARY_MODEL_FALLBACK = {
   cerebras: 'llama-3.3-70b',
   anthropic: 'claude-3-7-sonnet-latest',
   google: 'gemini-2.0-flash',
+  openrouter: 'openai/gpt-4o-mini',
   lmstudio: 'local-model',
 };
 const CEREBRAS_KNOWN_CHAT_MODELS = [
@@ -2424,8 +2425,8 @@ async function fetchProviderModels(provider, apiKey) {
     return { ok: false, message: 'API key is not configured for this provider.' };
   }
 
-  if (target === 'openai' || target === 'cerebras') {
-    const base = target === 'openai' ? 'https://api.openai.com' : 'https://api.cerebras.ai';
+  if (target === 'openai' || target === 'cerebras' || target === 'openrouter') {
+    const base = target === 'openai' ? 'https://api.openai.com' : target === 'openrouter' ? 'https://openrouter.ai/api' : 'https://api.cerebras.ai';
     const result = await fetchJsonWithTimeout(`${base}/v1/models`, {
       method: 'GET',
       headers: {
@@ -3930,11 +3931,15 @@ async function analyzeImageWithOpenAiLikeProvider(provider = 'openai', model = '
   const defaultBaseUrl = targetProvider === 'cerebras'
     ? 'https://api.cerebras.ai'
     : (
-      targetProvider === 'lmstudio'
-        ? LMSTUDIO_DEFAULT_BASE_URL
-        : 'https://api.openai.com'
+      targetProvider === 'openrouter'
+        ? 'https://openrouter.ai/api'
+        : (
+          targetProvider === 'lmstudio'
+            ? LMSTUDIO_DEFAULT_BASE_URL
+            : 'https://api.openai.com'
+        )
     );
-  const endpointBase = targetProvider === 'openai' || targetProvider === 'cerebras'
+  const endpointBase = targetProvider === 'openai' || targetProvider === 'cerebras' || targetProvider === 'openrouter'
     ? defaultBaseUrl
     : normalizeHttpBaseUrl(String((creds && creds.base_url) || defaultBaseUrl), defaultBaseUrl);
   const endpoint = `${endpointBase}/v1/chat/completions`;
@@ -7201,7 +7206,7 @@ function resolveProviderRuntimeCredentials(provider, settings = readSettings(), 
     provider: target,
     apiKey: String(keyRes.apiKey || ''),
     key_id: String(keyRes.key_id || ''),
-    base_url: '',
+    base_url: target === 'openrouter' ? 'https://openrouter.ai/api' : '',
   };
 }
 
