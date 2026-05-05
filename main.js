@@ -131,6 +131,10 @@ const SETTINGS_EDITABLE_KEYS = new Set([
   'crawler_depth_default',
   'crawler_page_cap_default',
   'agent_mode_v1_enabled',
+  'agent_verifier_loop_enabled',
+  'agent_chat_timeout_sec',
+  'agent_research_timeout_sec',
+  'agent_deliverable_timeout_sec',
   'history_enabled',
   'history_max_entries',
   'telegram_enabled',
@@ -157,8 +161,10 @@ const SETTINGS_EDITABLE_KEYS = new Set([
 const FOLDER_MOUNT_MAX_FILES = 500;
 const CONTEXT_FILE_MAX_BYTES = 32 * 1024 * 1024;
 const FOLDER_MOUNT_MAX_FILE_BYTES = CONTEXT_FILE_MAX_BYTES;
-const CHAT_REQUEST_TIMEOUT_MS = 60_000;
-const CHAT_REQUEST_TIMEOUT_MAX_MS = 10 * 60_000;
+const CHAT_REQUEST_TIMEOUT_MS = 180_000;
+const CHAT_RESEARCH_TIMEOUT_MS = 6 * 60_000;
+const CHAT_DELIVERABLE_TIMEOUT_MS = 8 * 60_000;
+const CHAT_REQUEST_TIMEOUT_MAX_MS = 15 * 60_000;
 const DECISION_TRACE_MAX_STEPS = 240;
 const GRAPH_MAX_NODES = 600;
 const GRAPH_MAX_EDGES = 1200;
@@ -1150,6 +1156,7 @@ function throwIfAborted(signal, fallbackMessage = 'Request canceled.') {
 
 function resolveChatTimeoutMs(input = {}, ref = null) {
   const payload = (input && typeof input === 'object') ? input : {};
+  const settings = readSettings();
   const requested = Number(payload.timeout_ms || payload.timeoutMs || 0);
   if (Number.isFinite(requested) && requested > 0) {
     return Math.max(30_000, Math.min(CHAT_REQUEST_TIMEOUT_MAX_MS, Math.round(requested)));
@@ -1177,9 +1184,12 @@ function resolveChatTimeoutMs(input = {}, ref = null) {
     || effectiveMessage.includes('context files')
     || effectiveMessage.includes('images')
   );
-  if (detailedDeliverableRequest) return 8 * 60_000;
-  if (researchHeavyRequest || imageCount >= 3 || (imageCount > 0 && fileIntent)) return 6 * 60_000;
-  return CHAT_REQUEST_TIMEOUT_MS;
+  const normalTimeoutMs = Math.max(30_000, Math.min(CHAT_REQUEST_TIMEOUT_MAX_MS, Math.round(Number(settings.agent_chat_timeout_sec || (CHAT_REQUEST_TIMEOUT_MS / 1000)) * 1000)));
+  const researchTimeoutMs = Math.max(60_000, Math.min(CHAT_REQUEST_TIMEOUT_MAX_MS, Math.round(Number(settings.agent_research_timeout_sec || (CHAT_RESEARCH_TIMEOUT_MS / 1000)) * 1000)));
+  const deliverableTimeoutMs = Math.max(60_000, Math.min(CHAT_REQUEST_TIMEOUT_MAX_MS, Math.round(Number(settings.agent_deliverable_timeout_sec || (CHAT_DELIVERABLE_TIMEOUT_MS / 1000)) * 1000)));
+  if (detailedDeliverableRequest) return deliverableTimeoutMs;
+  if (researchHeavyRequest || imageCount >= 3 || (imageCount > 0 && fileIntent)) return researchTimeoutMs;
+  return normalTimeoutMs;
 }
 
 function makeTimeoutSignalWithUpstream(timeoutMs = 12000, upstream = null) {
@@ -5532,6 +5542,10 @@ function getDefaultSettings() {
     crawler_depth_default: 3,
     crawler_page_cap_default: 80,
     agent_mode_v1_enabled: false,
+    agent_verifier_loop_enabled: false,
+    agent_chat_timeout_sec: CHAT_REQUEST_TIMEOUT_MS / 1000,
+    agent_research_timeout_sec: CHAT_RESEARCH_TIMEOUT_MS / 1000,
+    agent_deliverable_timeout_sec: CHAT_DELIVERABLE_TIMEOUT_MS / 1000,
     lumino_last_provider: 'openai',
     lumino_last_model: '',
     automated_tasks_backend: AUTOMATED_TASKS_BACKEND_DEFAULT,
@@ -5631,6 +5645,16 @@ function readSettings() {
         ? Math.max(5, Math.min(300, Math.round(Number(parsed.crawler_page_cap_default))))
         : defaults.crawler_page_cap_default,
       agent_mode_v1_enabled: !!(parsed && parsed.agent_mode_v1_enabled),
+      agent_verifier_loop_enabled: !!(parsed && parsed.agent_verifier_loop_enabled),
+      agent_chat_timeout_sec: Number.isFinite(Number(parsed && parsed.agent_chat_timeout_sec))
+        ? Math.max(30, Math.min(900, Math.round(Number(parsed.agent_chat_timeout_sec))))
+        : defaults.agent_chat_timeout_sec,
+      agent_research_timeout_sec: Number.isFinite(Number(parsed && parsed.agent_research_timeout_sec))
+        ? Math.max(60, Math.min(900, Math.round(Number(parsed.agent_research_timeout_sec))))
+        : defaults.agent_research_timeout_sec,
+      agent_deliverable_timeout_sec: Number.isFinite(Number(parsed && parsed.agent_deliverable_timeout_sec))
+        ? Math.max(60, Math.min(900, Math.round(Number(parsed.agent_deliverable_timeout_sec))))
+        : defaults.agent_deliverable_timeout_sec,
       lumino_last_provider: PROVIDERS.includes(savedProvider) ? savedProvider : defaults.lumino_last_provider,
       lumino_last_model: savedModel,
       automated_tasks_backend: automatedTasksBackend === 'provider' ? 'provider' : AUTOMATED_TASKS_BACKEND_DEFAULT,
@@ -5773,6 +5797,21 @@ function writeSettings(next) {
       ? input.telegram_poll_interval_sec
       : current.telegram_poll_interval_sec
   );
+  const requestedAgentChatTimeoutSec = Number(
+    Object.prototype.hasOwnProperty.call(input, 'agent_chat_timeout_sec')
+      ? input.agent_chat_timeout_sec
+      : current.agent_chat_timeout_sec
+  );
+  const requestedAgentResearchTimeoutSec = Number(
+    Object.prototype.hasOwnProperty.call(input, 'agent_research_timeout_sec')
+      ? input.agent_research_timeout_sec
+      : current.agent_research_timeout_sec
+  );
+  const requestedAgentDeliverableTimeoutSec = Number(
+    Object.prototype.hasOwnProperty.call(input, 'agent_deliverable_timeout_sec')
+      ? input.agent_deliverable_timeout_sec
+      : current.agent_deliverable_timeout_sec
+  );
   const requestedLmstudioBaseUrl = String(
     Object.prototype.hasOwnProperty.call(input, 'lmstudio_base_url')
       ? input.lmstudio_base_url
@@ -5875,6 +5914,18 @@ function writeSettings(next) {
     agent_mode_v1_enabled: Object.prototype.hasOwnProperty.call(input, 'agent_mode_v1_enabled')
       ? !!input.agent_mode_v1_enabled
       : !!current.agent_mode_v1_enabled,
+    agent_verifier_loop_enabled: Object.prototype.hasOwnProperty.call(input, 'agent_verifier_loop_enabled')
+      ? !!input.agent_verifier_loop_enabled
+      : !!current.agent_verifier_loop_enabled,
+    agent_chat_timeout_sec: Number.isFinite(requestedAgentChatTimeoutSec)
+      ? Math.max(30, Math.min(900, Math.round(requestedAgentChatTimeoutSec)))
+      : CHAT_REQUEST_TIMEOUT_MS / 1000,
+    agent_research_timeout_sec: Number.isFinite(requestedAgentResearchTimeoutSec)
+      ? Math.max(60, Math.min(900, Math.round(requestedAgentResearchTimeoutSec)))
+      : CHAT_RESEARCH_TIMEOUT_MS / 1000,
+    agent_deliverable_timeout_sec: Number.isFinite(requestedAgentDeliverableTimeoutSec)
+      ? Math.max(60, Math.min(900, Math.round(requestedAgentDeliverableTimeoutSec)))
+      : CHAT_DELIVERABLE_TIMEOUT_MS / 1000,
     lumino_last_provider: PROVIDERS.includes(requestedLastProvider) ? requestedLastProvider : 'openai',
     lumino_last_model: requestedLastModel,
     automated_tasks_backend: requestedAutomatedTasksBackend === 'provider' ? 'provider' : AUTOMATED_TASKS_BACKEND_DEFAULT,
@@ -17549,6 +17600,126 @@ function trimForPrompt(value, maxLen = 800) {
   return `${text.slice(0, Math.max(1, maxLen - 3))}...`;
 }
 
+function summarizeRefsForVerifier(refs = []) {
+  return (Array.isArray(refs) ? refs : []).slice(0, 8).map((ref) => ({
+    id: String((ref && ref.id) || '').trim(),
+    title: String((ref && ref.title) || '').trim().slice(0, 160),
+    artifact_count: Array.isArray(ref && ref.artifacts) ? ref.artifacts.length : 0,
+    tab_count: Array.isArray(ref && ref.tabs) ? ref.tabs.length : 0,
+    context_file_count: Array.isArray(ref && ref.context_files) ? ref.context_files.length : 0,
+    decision_trace_count: Array.isArray(ref && ref.decision_trace) ? ref.decision_trace.length : 0,
+  }));
+}
+
+function summarizeAgentDeltasForVerifier(result = {}) {
+  const payload = (result && typeof result === 'object') ? result : {};
+  const artifacts = Array.isArray(payload.pending_artifacts) ? payload.pending_artifacts : [];
+  const tabs = Array.isArray(payload.pending_workspace_tabs) ? payload.pending_workspace_tabs : [];
+  const diffOps = Array.isArray(payload.pending_diff_ops) ? payload.pending_diff_ops : [];
+  const traces = Array.isArray(payload.pending_decision_traces) ? payload.pending_decision_traces : [];
+  return {
+    pending_artifacts: artifacts.map((artifact) => ({
+      id: String((artifact && artifact.id) || '').trim(),
+      reference_id: String((artifact && artifact.reference_id) || '').trim(),
+      type: String((artifact && artifact.type) || '').trim(),
+      title: String((artifact && artifact.title) || '').trim().slice(0, 160),
+      content_chars: String((artifact && artifact.content) || '').length,
+    })).slice(0, 20),
+    pending_workspace_tabs: tabs.map((tab) => ({
+      type: String((tab && tab.type) || '').trim(),
+      reference_id: String((tab && tab.reference_id) || '').trim(),
+      artifact_id: String((tab && tab.artifact_id) || '').trim(),
+      url: String((tab && tab.url) || '').trim().slice(0, 240),
+      title: String((tab && tab.title) || '').trim().slice(0, 160),
+    })).slice(0, 20),
+    pending_diff_ops_count: diffOps.length,
+    pending_weight_updates_count: Array.isArray(payload.pending_weight_updates) ? payload.pending_weight_updates.length : 0,
+    pending_decision_traces_count: traces.length,
+  };
+}
+
+function buildVerifierSystemPrompt() {
+  return [
+    'You verify one completed Lumino agent run.',
+    'Decide whether the planned reference-state delta satisfies the user request.',
+    'Be conservative: request a corrective loop only for clear, actionable mismatches.',
+    'Do not request a corrective loop for style preferences, minor wording issues, or missing work that needs user clarification.',
+    'Return only valid JSON with this schema:',
+    '{"verdict":"pass|corrective_loop|ask_user|fail_safe","reason":"short reason","missing_requirements":["..."],"regression_risk":"low|medium|high","corrective_prompt":"short corrective prompt or empty string"}',
+  ].join('\n');
+}
+
+async function verifyLuminoAgentRun(params = {}) {
+  const input = (params && typeof params === 'object') ? params : {};
+  const provider = String(input.provider || '').trim().toLowerCase();
+  const model = String(input.model || '').trim();
+  const apiKey = String(input.apiKey || '');
+  const baseUrl = String(input.baseUrl || '').trim();
+  if (!provider || !model) return { verdict: 'pass', reason: 'Verifier provider/model unavailable.', corrective_prompt: '' };
+
+  const userPrompt = [
+    `Original user request: ${String(input.message || '').trim()}`,
+    '',
+    `Active reference id: ${String(input.srId || '').trim()}`,
+    `Active artifact before run: ${JSON.stringify(input.activeArtifactContext || null)}`,
+    '',
+    `Scoped references before run: ${JSON.stringify(summarizeRefsForVerifier(input.scopedRefsBefore || []))}`,
+    '',
+    `Planned state delta from primary run: ${JSON.stringify(summarizeAgentDeltasForVerifier(input.agentResult || {}))}`,
+    '',
+    `Primary final answer: ${trimForPrompt((input.agentResult && input.agentResult.message) || '', 1600)}`,
+    '',
+    `Tool trace: ${JSON.stringify((Array.isArray(input.toolSteps) ? input.toolSteps : []).slice(-30).map((step) => ({
+      name: String((step && step.name) || ''),
+      ok: !!(step && step.ok),
+      message: trimForPrompt((step && step.message) || '', 180),
+    })))}`,
+    '',
+    'Verifier policy:',
+    '- If the user asked to create/write/save a long-form artifact, pending_artifacts should include a substantive non-memory artifact.',
+    '- If the user asked to update/fix/improve the active artifact, the delta should update that active artifact unless a new artifact was explicitly requested.',
+    '- If the user asked to search/open articles/sources/tabs, pending_workspace_tabs should include relevant web tabs.',
+    '- If the user asked to use attached/local files, tool trace should show local evidence or context-file analysis when local files exist.',
+    '- Corrective prompts must be specific, bounded, and must not ask for more than the missing requirement.',
+  ].join('\n');
+
+  try {
+    const res = await chatWithProvider({
+      provider,
+      model,
+      apiKey,
+      baseUrl,
+      systemPrompt: buildVerifierSystemPrompt(),
+      userPrompt,
+    }, {
+      timeoutMs: Math.min(45_000, CHAT_REQUEST_TIMEOUT_MAX_MS),
+    });
+    const parsed = JSON.parse(extractFirstJsonObject(String((res && res.text) || '').trim()));
+    const verdict = String((parsed && parsed.verdict) || 'pass').trim().toLowerCase();
+    if (!['pass', 'corrective_loop', 'ask_user', 'fail_safe'].includes(verdict)) {
+      return { verdict: 'pass', reason: 'Verifier returned an unsupported verdict.', corrective_prompt: '' };
+    }
+    return {
+      verdict,
+      reason: String((parsed && parsed.reason) || '').trim().slice(0, 800),
+      missing_requirements: Array.isArray(parsed && parsed.missing_requirements)
+        ? parsed.missing_requirements.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 8)
+        : [],
+      regression_risk: ['low', 'medium', 'high'].includes(String(parsed && parsed.regression_risk).trim().toLowerCase())
+        ? String(parsed.regression_risk).trim().toLowerCase()
+        : 'medium',
+      corrective_prompt: String((parsed && parsed.corrective_prompt) || '').trim().slice(0, 2000),
+    };
+  } catch (err) {
+    return {
+      verdict: 'pass',
+      reason: `Verifier unavailable: ${String((err && err.message) || 'unknown error')}`,
+      corrective_prompt: '',
+      verifier_error: true,
+    };
+  }
+}
+
 // ── Rolling Memory Artifact Constants ───────────────────────────────────────
 const MEMORY_ARTIFACT_MARKER = '<!-- subgrapher:memory -->';
 const MEMORY_ARTIFACT_TITLE = 'Research Memory';
@@ -20248,6 +20419,84 @@ async function executeLuminoChat(input, options = {}) {
         ? agentResult.policy_diagnostics
         : null,
     };
+
+    if (
+      runtimeSettings.agent_verifier_loop_enabled
+      && !payload.verifier_corrective
+      && lane !== 'path_b'
+    ) {
+      emitStatus('info', 'verifier', 'Checking Lumino result against the request...');
+      const verifier = await verifyLuminoAgentRun({
+        provider,
+        model,
+        apiKey: providerApiKey,
+        baseUrl: providerBaseUrl,
+        message,
+        srId,
+        activeArtifactContext,
+        scopedRefsBefore: scopedRefs,
+        agentResult,
+        toolSteps: Array.isArray(agentResult && agentResult.tool_steps) ? agentResult.tool_steps : [],
+      });
+      finalResult.verifier = verifier;
+      const verdict = String((verifier && verifier.verdict) || 'pass').trim().toLowerCase();
+      const correctivePrompt = String((verifier && verifier.corrective_prompt) || '').trim();
+      if (verdict === 'corrective_loop' && correctivePrompt) {
+        const risk = String((verifier && verifier.regression_risk) || 'medium').trim().toLowerCase();
+        if (risk === 'high') {
+          emitStatus('info', 'verifier', 'Verifier found a high-risk correction; stopping for user review.');
+          finalResult.message = [
+            String(finalResult.message || '').trim(),
+            '',
+            `Verifier stopped before an automatic correction: ${String((verifier && verifier.reason) || 'high regression risk').trim()}`,
+          ].filter(Boolean).join('\n');
+        } else {
+          emitStatus('info', 'verifier', 'Verifier found a missing requirement; running one corrective pass.');
+          const correctiveMessage = [
+            'Verifier corrective pass for the previous Lumino run.',
+            '',
+            `Original user request: ${message}`,
+            '',
+            `Primary answer: ${trimForPrompt(finalResult.message, 1200)}`,
+            '',
+            `Primary planned deltas: ${JSON.stringify(summarizeAgentDeltasForVerifier(agentResult))}`,
+            '',
+            `Verifier reason: ${String((verifier && verifier.reason) || '').trim()}`,
+            '',
+            'Correction to perform:',
+            correctivePrompt,
+            '',
+            'Only perform the missing requirement. Do not duplicate completed artifacts, tabs, or evidence work unless required to correct the mismatch.',
+          ].join('\n');
+          const correctiveResult = await executeLuminoChat({
+            ...payload,
+            message: correctiveMessage,
+            request_id: `${requestId}:verifier`,
+            verifier_corrective: true,
+          }, {
+            ...((options && typeof options === 'object') ? options : {}),
+            onDelta: null,
+            lane,
+          });
+          [
+            'pending_artifacts',
+            'pending_workspace_tabs',
+            'pending_diff_ops',
+            'pending_hyperweb_queries',
+            'pending_hyperweb_suggestions',
+            'pending_weight_updates',
+            'pending_decision_traces',
+          ].forEach((key) => mergeArrays(finalResult, correctiveResult, key));
+          const correctiveText = String((correctiveResult && correctiveResult.message) || '').trim();
+          if (correctiveText) finalResult.message = correctiveText;
+          finalResult.verifier.corrective_applied = true;
+        }
+      } else if (verdict === 'ask_user' || verdict === 'fail_safe') {
+        emitStatus('info', 'verifier', `Verifier stopped: ${String((verifier && verifier.reason) || verdict).trim()}`);
+      } else {
+        emitStatus('done', 'verifier', 'Verifier passed.');
+      }
+    }
   } else {
     emitStatus('info', 'provider', `Tool execution unavailable for ${provider}; generating direct response.`);
     const providerResult = await chatWithProvider({

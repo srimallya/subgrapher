@@ -13419,6 +13419,16 @@ function normalizeSettingsDraft(raw = {}) {
     crawler_depth_default: Number(src.crawler_depth_default || 3),
     crawler_page_cap_default: Number(src.crawler_page_cap_default || 80),
     agent_mode_v1_enabled: !!src.agent_mode_v1_enabled,
+    agent_verifier_loop_enabled: !!src.agent_verifier_loop_enabled,
+    agent_chat_timeout_sec: Number.isFinite(Number(src.agent_chat_timeout_sec))
+      ? Math.max(30, Math.min(900, Math.round(Number(src.agent_chat_timeout_sec))))
+      : 180,
+    agent_research_timeout_sec: Number.isFinite(Number(src.agent_research_timeout_sec))
+      ? Math.max(60, Math.min(900, Math.round(Number(src.agent_research_timeout_sec))))
+      : 360,
+    agent_deliverable_timeout_sec: Number.isFinite(Number(src.agent_deliverable_timeout_sec))
+      ? Math.max(60, Math.min(900, Math.round(Number(src.agent_deliverable_timeout_sec))))
+      : 480,
     mail_sync_enabled: !!src.mail_sync_enabled,
     mail_poll_interval_sec: mailPollIntervalSec,
     history_enabled: Object.prototype.hasOwnProperty.call(src, 'history_enabled') ? !!src.history_enabled : true,
@@ -13465,6 +13475,15 @@ function validateSettingsDraft(draft = {}) {
   }
   if (!Number.isFinite(d.crawler_page_cap_default) || d.crawler_page_cap_default < 5 || d.crawler_page_cap_default > 300) {
     errors.crawler_page_cap_default = 'Page cap must be 5..300.';
+  }
+  if (!Number.isFinite(d.agent_chat_timeout_sec) || d.agent_chat_timeout_sec < 30 || d.agent_chat_timeout_sec > 900) {
+    errors.agent_chat_timeout_sec = 'Normal timeout must be 30..900 seconds.';
+  }
+  if (!Number.isFinite(d.agent_research_timeout_sec) || d.agent_research_timeout_sec < 60 || d.agent_research_timeout_sec > 900) {
+    errors.agent_research_timeout_sec = 'Research timeout must be 60..900 seconds.';
+  }
+  if (!Number.isFinite(d.agent_deliverable_timeout_sec) || d.agent_deliverable_timeout_sec < 60 || d.agent_deliverable_timeout_sec > 900) {
+    errors.agent_deliverable_timeout_sec = 'Deliverable timeout must be 60..900 seconds.';
   }
   if (!Number.isFinite(d.history_max_entries) || d.history_max_entries < 500 || d.history_max_entries > 10000) {
     errors.history_max_entries = 'History max entries must be 500..10000.';

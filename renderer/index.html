@@ -1002,13 +1002,31 @@
       <details class="settings-section settings-accordion" id="settings-advanced-agent" data-settings-section="agent">
         <summary>Agent Mode</summary>
         <div class="settings-section-content">
-        <div class="settings-grid settings-grid-1">
+        <div class="settings-grid settings-grid-2">
           <label class="settings-field settings-boolean-field">
             <span>Agent Mode v1</span>
             <span class="settings-toggle-card">
               <input id="settings-agent-mode-enabled" data-setting="agent_mode_v1_enabled" type="checkbox" />
               <span>Enabled</span>
             </span>
+          </label>
+          <label class="settings-field settings-boolean-field">
+            <span>Verifier Loop</span>
+            <span class="settings-toggle-card">
+              <input id="settings-agent-verifier-loop-enabled" data-setting="agent_verifier_loop_enabled" type="checkbox" />
+              <span>Enabled</span>
+            </span>
+          </label>
+        </div>
+        <div class="settings-grid settings-grid-3">
+          <label class="settings-field">Normal Timeout (sec)
+            <input id="settings-agent-chat-timeout" data-setting="agent_chat_timeout_sec" type="number" min="30" max="900" step="15" />
+          </label>
+          <label class="settings-field">Research Timeout (sec)
+            <input id="settings-agent-research-timeout" data-setting="agent_research_timeout_sec" type="number" min="60" max="900" step="15" />
+          </label>
+          <label class="settings-field">Deliverable Timeout (sec)
+            <input id="settings-agent-deliverable-timeout" data-setting="agent_deliverable_timeout_sec" type="number" min="60" max="900" step="15" />
           </label>
         </div>
         </div>
